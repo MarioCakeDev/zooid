@@ -81,7 +81,12 @@ describe('triggers: config', () => {
       schedule: '0 6 * * 1',
       as: '@cron:example.org',
       messages: [
-        { room: '#ops:example.org', mention: 'architect', text: 'Check the pinned agent CLI versions.' },
+        {
+          room: '#ops:example.org',
+          mention: 'architect',
+          text: 'Check the pinned agent CLI versions.',
+          ttlMs: 6 * 3600_000,
+        },
       ],
     })
   })
@@ -164,5 +169,21 @@ describe('triggers: config', () => {
     expect(() => loadZooidConfig(withTriggers(block))).toThrow(
       /triggers\.image-currency: must specify schedule:/,
     )
+  })
+
+  it('defaults a schedule trigger to a 6h ttl', () => {
+    const t = loadZooidConfig(withTriggers(ok)).triggers['image-currency']
+    expect(t.messages[0].ttlMs).toBe(6 * 3600_000)
+  })
+
+  it('overrides the default ttl with expires_after:', () => {
+    const t = loadZooidConfig(withTriggers(`${ok}    expires_after: "1m"\n`)).triggers['image-currency']
+    expect(t.messages[0].ttlMs).toBe(60_000)
+  })
+
+  it('rejects an expires_after: that is not a valid duration', () => {
+    expect(() =>
+      loadZooidConfig(withTriggers(`${ok}    expires_after: "soon"\n`)),
+    ).toThrow(/triggers\.image-currency\.expires_after: "soon" is not a valid duration/)
   })
 })

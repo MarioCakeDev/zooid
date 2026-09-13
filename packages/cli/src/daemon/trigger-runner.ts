@@ -1,10 +1,12 @@
 import type { TriggerMessage } from '@zooid/core'
+import { buildMentionContent } from '@zooid/transport-matrix'
 
 export interface FireTriggerDeps {
   name: string
   as: string
   message: TriggerMessage
-  agentUserId: string
+  /** Local agent name → MXID. A `mention:` that is already an MXID bypasses this. */
+  agentUserIds: Record<string, string>
   resolveRoom: (room: string) => Promise<string | null>
   ensureBot: (asUserId: string, roomId: string) => Promise<void>
   sendMessage: (input: {
@@ -15,8 +17,15 @@ export interface FireTriggerDeps {
 }
 
 export async function fireTrigger(deps: FireTriggerDeps): Promise<void> {
-  const { name, as, message, agentUserId, resolveRoom, ensureBot, sendMessage } = deps
+  const { name, as, message, agentUserIds, resolveRoom, ensureBot, sendMessage } = deps
   try {
+    const target = message.mention.startsWith('@')
+      ? message.mention
+      : agentUserIds[message.mention]
+    if (!target) {
+      console.warn(`[trigger:${name}] unknown agent "${message.mention}" — skipping`)
+      return
+    }
     const roomId = await resolveRoom(message.room)
     if (!roomId) {
       console.warn(`[trigger:${name}] cannot resolve room ${message.room} — skipping`)
@@ -27,11 +36,12 @@ export async function fireTrigger(deps: FireTriggerDeps): Promise<void> {
       roomId,
       asUserId: as,
       content: {
-        msgtype: 'm.text',
-        body: message.text,
-        // Structural mention: routes deterministically AND disarms the raw-body
-        // fallback in extractMentions, which only fires when nothing matched.
-        'm.mentions': { user_ids: [agentUserId] },
+        ...buildMentionContent({ userId: target, text: message.text, msgtype: 'm.text' }),
+        'dev.zooid.trigger': {
+          name,
+          fired_at: Date.now(),
+          ...(message.ttlMs !== undefined ? { ttl_ms: message.ttlMs } : {}),
+        },
       },
     })
   } catch (err) {

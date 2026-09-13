@@ -36,12 +36,7 @@ export function startTriggerScheduler(deps: StartTriggerSchedulerDeps): TriggerS
     if (!trigger.schedule) continue
     const job = new Cron(trigger.schedule, () => {
       for (const message of trigger.messages) {
-        const agentUserId = agentUserIds[message.mention]
-        if (!agentUserId) {
-          console.warn(`[trigger:${name}] unknown agent "${message.mention}" — skipping`)
-          continue
-        }
-        void fireTrigger({ name, as: trigger.as, message, agentUserId, resolveRoom, ensureBot, sendMessage })
+        void fireTrigger({ name, as: trigger.as, message, agentUserIds, resolveRoom, ensureBot, sendMessage })
       }
     })
     jobs.push(job)

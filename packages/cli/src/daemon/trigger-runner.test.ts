@@ -12,7 +12,7 @@ const deps = (over: Record<string, unknown> = {}) => ({
   name: 'image-currency',
   as: '@cron:example.org',
   message,
-  agentUserId: '@architect:example.org',
+  agentUserIds: { architect: '@architect:example.org' },
   resolveRoom: vi.fn(async () => '!room:example.org'),
   ensureBot: vi.fn(async () => {}),
   sendMessage: vi.fn(async () => ({ event_id: '$1' })),
@@ -20,14 +20,14 @@ const deps = (over: Record<string, unknown> = {}) => ({
 })
 
 describe('fireTrigger', () => {
-  it('posts text verbatim as the trigger bot user', async () => {
+  it('posts text as the trigger bot user, led by a visible mention', async () => {
     const d = deps()
     await fireTrigger(d as never)
     expect(d.sendMessage).toHaveBeenCalledTimes(1)
     const call = (d.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(call.roomId).toBe('!room:example.org')
     expect(call.asUserId).toBe('@cron:example.org')
-    expect(call.content.body).toBe('Check the pinned agent CLI versions.')
+    expect(call.content.body).toBe('@architect:example.org Check the pinned agent CLI versions.')
     expect(call.content.msgtype).toBe('m.text')
   })
 
@@ -36,7 +36,6 @@ describe('fireTrigger', () => {
     await fireTrigger(d as never)
     const content = (d.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0].content
     expect(content['m.mentions']).toEqual({ user_ids: ['@architect:example.org'] })
-    expect(content.body).not.toContain('@architect')
   })
 
   it('posts at the top level, never into a thread — runTurn makes each firing a new root', async () => {

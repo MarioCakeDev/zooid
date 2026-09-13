@@ -166,17 +166,11 @@ async function handleDelivery(
     for (const message of trigger.messages) {
       if (message.match !== undefined && !evaluateMatch(message.match, ctx)) continue
 
-      const agentUserId = deps.agentUserIds[message.mention]
-      if (!agentUserId) {
-        console.warn(`[webhook:${name}] unknown agent "${message.mention}" — skipping`)
-        continue
-      }
-
       await fireTrigger({
         name,
         as: trigger.as,
         message: { ...message, text: renderTemplate(message.text, ctx) },
-        agentUserId,
+        agentUserIds: deps.agentUserIds,
         resolveRoom: deps.resolveRoom,
         ensureBot: deps.ensureBot,
         sendMessage: deps.sendMessage,

@@ -932,8 +932,21 @@ function parseTriggers(
       rawMessages = t.messages
     }
 
+    // TTL policy: a schedule trigger replayed hours late is noise (a standup
+    // at 18:00); a webhook trigger's delivery still wants reconciling a week
+    // later. `expires_after:` overrides either default — see [[ZOD087]].
+    let ttlMs: number | undefined
+    if (t.expires_after !== undefined) {
+      if (typeof t.expires_after !== 'string' || t.expires_after.length === 0) {
+        throw new Error(`triggers.${name}.expires_after: must be a non-empty duration string`)
+      }
+      ttlMs = parseDurationMs(`triggers.${name}.expires_after`, t.expires_after)
+    } else {
+      ttlMs = webhook ? undefined : 6 * 3600_000
+    }
+
     const messages = rawMessages.map((m, i) =>
-      parseTriggerMessage(name, i, m, agents, as, !!webhook),
+      parseTriggerMessage(name, i, m, agents, transports, as, !!webhook, ttlMs),
     )
 
     const entry: TriggerConfig = { as, messages }
@@ -951,13 +964,45 @@ function parseTriggers(
  * only the flat-level `match:` presence check (in `parseTriggers`) still
  * speaks in the unindexed, trigger-level name.
  */
+function parseDurationMs(label: string, raw: string): number {
+  const m = /^(\d+)(s|m|h)$/.exec(raw)
+  if (!m) {
+    throw new Error(`${label}: "${raw}" is not a valid duration (use "<n>s", "<n>m", or "<n>h")`)
+  }
+  const n = Number(m[1])
+  switch (m[2]) {
+    case 's':
+      return n * 1000
+    case 'm':
+      return n * 60_000
+    case 'h':
+      return n * 60 * 60_000
+  }
+  throw new Error('unreachable')
+}
+
+function soleMatrixTransport(transports: Record<string, TransportConfig>): MatrixTransportConfig {
+  const matrixTransports = Object.values(transports).filter(
+    (t): t is MatrixTransportConfig => t.type === 'matrix',
+  )
+  if (matrixTransports.length !== 1) {
+    throw new Error(
+      `triggers: a full-MXID mention requires exactly one matrix transport to validate its ` +
+        `homeserver against (found ${matrixTransports.length})`,
+    )
+  }
+  return matrixTransports[0]!
+}
+
 function parseTriggerMessage(
   name: string,
   index: number,
   raw: unknown,
   agents: Record<string, AgentConfig>,
+  transports: Record<string, TransportConfig>,
   as: string,
   hasWebhook: boolean,
+  ttlMs: number | undefined,
 ): TriggerMessage {
   const label = `triggers.${name}.messages[${index}]`
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -975,25 +1020,52 @@ function parseTriggerMessage(
   if (typeof m.mention !== 'string' || m.mention.length === 0) {
     throw new Error(`${label}.mention: must be a non-empty string`)
   }
-  const mentionedAgent = agents[m.mention]
-  if (!mentionedAgent) {
-    throw new Error(`${label}.mention: unknown agent "${m.mention}"`)
-  }
-  if (!mentionedAgent.matrix) {
-    throw new Error(
-      `${label}.mention: agent "${m.mention}" has no matrix: binding — a trigger posts ` +
-        `through Matrix, so the mentioned agent must be matrix-bound.`,
-    )
-  }
-  // router.ts never routes an event back to its own sender
-  // (`event.sender === a.userId` short-circuits the match), so a trigger
-  // that posts as the very agent it mentions would silently never wake it.
-  if (as === mentionedAgent.matrix.user_id) {
-    throw new Error(
-      `triggers.${name}.as: must not equal the mentioned agent's own MXID (${as}) — a message ` +
-        `an agent sends never routes back to itself, so this trigger would silently never wake ` +
-        `"${m.mention}". Post as a different identity (a dedicated bot, or another agent's).`,
-    )
+
+  if (m.mention.startsWith('@')) {
+    // A full MXID: a cross-workstation target with no local agent binding.
+    // Validated against this daemon's own homeserver, not against `agents`.
+    if (!MATRIX_USER_ID_RE.test(m.mention)) {
+      throw new Error(`${label}.mention: must be a full MXID (got ${JSON.stringify(m.mention)})`)
+    }
+    const server = m.mention.slice(m.mention.indexOf(':') + 1)
+    const local = deriveServerName(soleMatrixTransport(transports).user_namespace)
+    if (server !== local) {
+      throw new Error(
+        `${label}.mention: "${m.mention}" is on a different homeserver than this daemon ` +
+          `(${local}). A trigger addresses a user on its own homeserver — see [[ZOD081]] §Non-goals.`,
+      )
+    }
+    // router.ts never routes an event back to its own sender
+    // (`event.sender === a.userId` short-circuits the match), so a trigger
+    // that posts as the very MXID it mentions would silently never wake it.
+    if (as === m.mention) {
+      throw new Error(
+        `triggers.${name}.as: must not equal the mentioned agent's own MXID (${as}) — a message ` +
+          `an agent sends never routes back to itself, so this trigger would silently never wake ` +
+          `"${m.mention}". Post as a different identity (a dedicated bot, or another agent's).`,
+      )
+    }
+  } else {
+    const mentionedAgent = agents[m.mention]
+    if (!mentionedAgent) {
+      throw new Error(`${label}.mention: unknown agent "${m.mention}"`)
+    }
+    if (!mentionedAgent.matrix) {
+      throw new Error(
+        `${label}.mention: agent "${m.mention}" has no matrix: binding — a trigger posts ` +
+          `through Matrix, so the mentioned agent must be matrix-bound.`,
+      )
+    }
+    // router.ts never routes an event back to its own sender
+    // (`event.sender === a.userId` short-circuits the match), so a trigger
+    // that posts as the very agent it mentions would silently never wake it.
+    if (as === mentionedAgent.matrix.user_id) {
+      throw new Error(
+        `triggers.${name}.as: must not equal the mentioned agent's own MXID (${as}) — a message ` +
+          `an agent sends never routes back to itself, so this trigger would silently never wake ` +
+          `"${m.mention}". Post as a different identity (a dedicated bot, or another agent's).`,
+      )
+    }
   }
 
   if (typeof m.text !== 'string' || m.text.length === 0) {
@@ -1001,6 +1073,7 @@ function parseTriggerMessage(
   }
 
   const message: TriggerMessage = { room: m.room, mention: m.mention, text: m.text }
+  if (ttlMs !== undefined) message.ttlMs = ttlMs
 
   if (m.match !== undefined) {
     if (typeof m.match !== 'string' || m.match.length === 0) {

@@ -1,5 +1,6 @@
 import type { RoomBinding } from '@zooid/core'
 import { extractMentions } from './mentions.js'
+import { isExpiredTrigger } from './trigger-freshness.js'
 
 export type { RoomBinding }
 
@@ -62,6 +63,7 @@ interface MaybeEvent {
   content?: {
     msgtype?: string
     'm.relates_to'?: { rel_type?: string; event_id?: string }
+    'dev.zooid.trigger'?: { name?: string; fired_at?: number; ttl_ms?: number }
   }
 }
 
@@ -81,6 +83,15 @@ export function route(
   if (event.type !== 'm.room.message') return []
   if (!event.content?.msgtype) return []
   if (isMediaMsgtype(event.content.msgtype)) return []
+  if (isExpiredTrigger(event, Date.now())) {
+    const stamp = event.content['dev.zooid.trigger']
+    const ageMs = stamp?.fired_at !== undefined ? Date.now() - stamp.fired_at : undefined
+    console.info(
+      `[router] dropping expired trigger "${stamp?.name ?? 'unknown'}"` +
+        (ageMs !== undefined ? ` fired ${ageMs}ms ago` : ''),
+    )
+    return []
+  }
   const mentions = new Set(extractMentions(event as never))
   const matches: RouteMatch[] = []
   const threadRoot = inboundThreadRoot(event)

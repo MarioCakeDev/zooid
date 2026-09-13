@@ -69,6 +69,16 @@ describe('webhook triggers: config', () => {
       delete process.env.TEST_WH_SECRET
     }
   })
+
+  it('defaults a webhook trigger to no ttl — a delivery still wants reconciling later', () => {
+    const t = loadZooidConfig(base).triggers.reconcile
+    expect(t.messages[0].ttlMs).toBeUndefined()
+  })
+
+  it('overrides the no-ttl default with expires_after:', () => {
+    const t = loadZooidConfig(`${base}    expires_after: "1h"\n`).triggers.reconcile
+    expect(t.messages[0].ttlMs).toBe(3600_000)
+  })
 })
 
 /**
