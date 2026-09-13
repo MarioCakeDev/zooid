@@ -72,6 +72,57 @@ describe('fireTrigger mention rendering', () => {
     expect(c.formatted_body).toBeUndefined()
   })
 
+  it('warns when the addressed user is not in the room', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const sendMessage = vi.fn(async () => ({ event_id: '$1' }))
+    await fireTrigger({
+      name: 'standup',
+      as: '@cloud.cron:zooid.zoon.eco',
+      message: {
+        room: '#product:zooid.zoon.eco',
+        mention: '@ori-macbook.cpo:zooid.zoon.eco',
+        text: 'Morning standup.',
+      },
+      agentUserIds: {},
+      resolveRoom: async () => '!p:zooid.zoon.eco',
+      ensureBot: async () => {},
+      sendMessage,
+      getJoinedMembers: async () => ({ joined: { '@cloud.product:zooid.zoon.eco': {} } }),
+    })
+    // posted anyway — the agent may join before it expires
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/not in .*#product/))
+    warn.mockRestore()
+  })
+
+  it('warns only once across repeated fires at the same absent target', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const getJoinedMembers = vi.fn(async () => ({ joined: {} }))
+    // A distinct trigger name from the previous test: `warnedTargets` is
+    // module-level (dedup lasts the daemon's process lifetime, per spec), so
+    // reusing "standup" here would find the key already warned and this
+    // test's own two calls would produce zero fresh warnings.
+    const fire = () =>
+      fireTrigger({
+        name: 'standup-repeat',
+        as: '@cloud.cron:zooid.zoon.eco',
+        message: {
+          room: '#product:zooid.zoon.eco',
+          mention: '@ori-macbook.cpo:zooid.zoon.eco',
+          text: 'Morning standup.',
+        },
+        agentUserIds: {},
+        resolveRoom: async () => '!p:zooid.zoon.eco',
+        ensureBot: async () => {},
+        sendMessage: async () => ({ event_id: '$1' }),
+        getJoinedMembers,
+      })
+    await fire()
+    await fire()
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
   it('leaves interpolated webhook text verbatim in the body', async () => {
     const sendMessage = vi.fn(async () => ({ event_id: '$1' }))
     await fireTrigger({

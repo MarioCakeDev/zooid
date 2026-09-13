@@ -8,6 +8,7 @@ export interface StartTriggerSchedulerDeps {
   resolveRoom: FireTriggerDeps['resolveRoom']
   ensureBot: FireTriggerDeps['ensureBot']
   sendMessage: FireTriggerDeps['sendMessage']
+  getJoinedMembers?: FireTriggerDeps['getJoinedMembers']
 }
 
 export interface TriggerSchedulerHandle {
@@ -29,14 +30,23 @@ export function validateCron(name: string, expr: string): void {
 }
 
 export function startTriggerScheduler(deps: StartTriggerSchedulerDeps): TriggerSchedulerHandle {
-  const { triggers, agentUserIds, resolveRoom, ensureBot, sendMessage } = deps
+  const { triggers, agentUserIds, resolveRoom, ensureBot, sendMessage, getJoinedMembers } = deps
   const jobs: Cron[] = []
 
   for (const [name, trigger] of Object.entries(triggers)) {
     if (!trigger.schedule) continue
     const job = new Cron(trigger.schedule, () => {
       for (const message of trigger.messages) {
-        void fireTrigger({ name, as: trigger.as, message, agentUserIds, resolveRoom, ensureBot, sendMessage })
+        void fireTrigger({
+          name,
+          as: trigger.as,
+          message,
+          agentUserIds,
+          resolveRoom,
+          ensureBot,
+          sendMessage,
+          getJoinedMembers,
+        })
       }
     })
     jobs.push(job)

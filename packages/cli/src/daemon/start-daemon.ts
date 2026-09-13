@@ -322,6 +322,7 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
           resolveRoom,
           ensureBot,
           sendMessage: (m) => client.sendMessage(m),
+          getJoinedMembers: (roomId, asUserId) => client.getJoinedMembers(roomId, asUserId),
         })
         for (const [name] of webhookTriggers) {
           console.log(`[webhook] POST ${WEBHOOK_ROUTE_PREFIX}/${name}`)
@@ -383,6 +384,7 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
         resolveRoom,
         ensureBot,
         sendMessage: (m) => client.sendMessage(m),
+        getJoinedMembers: (roomId, asUserId) => client.getJoinedMembers(roomId, asUserId),
       })
       const scheduled = Object.values(config.triggers).filter((t) => t.schedule).length
       if (scheduled > 0) console.log(`[trigger] scheduled ${scheduled} trigger(s)`)

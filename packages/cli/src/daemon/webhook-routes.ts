@@ -84,6 +84,7 @@ export interface WebhookDeps {
   resolveRoom: FireTriggerDeps['resolveRoom']
   ensureBot: FireTriggerDeps['ensureBot']
   sendMessage: FireTriggerDeps['sendMessage']
+  getJoinedMembers?: FireTriggerDeps['getJoinedMembers']
 }
 
 /**
@@ -174,6 +175,7 @@ async function handleDelivery(
         resolveRoom: deps.resolveRoom,
         ensureBot: deps.ensureBot,
         sendMessage: deps.sendMessage,
+        getJoinedMembers: deps.getJoinedMembers,
       })
     }
   } catch (err) {
