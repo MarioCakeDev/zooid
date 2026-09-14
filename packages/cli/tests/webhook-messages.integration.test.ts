@@ -84,8 +84,8 @@ describe('messages', () => {
     // entries 0 and 2 match; entry 1 (merged PR) does not
     await vi.waitFor(() => expect(sent.length).toBe(2))
     const bodies = sent.map((m) => String((m.content as Record<string, string>).body))
-    expect(bodies[0]).toBe('Triage zooid-ai/zooid#23.')
-    expect(bodies[1]).toBe('Any issue activity.')
+    expect(bodies[0]).toBe('@product:example.org Triage zooid-ai/zooid#23.')
+    expect(bodies[1]).toBe('@architect:example.org Any issue activity.')
   })
 
   it('wakes the right agent per message', async () => {
@@ -116,7 +116,9 @@ describe('messages', () => {
     expect(res.status).toBe(202)
     await vi.waitFor(() => expect(sent.length).toBe(1))
     expect(sent[0].roomId).toBe('!dev:example.org')
-    expect(String((sent[0].content as Record<string, string>).body)).toBe('PR 7 merged.')
+    expect(String((sent[0].content as Record<string, string>).body)).toBe(
+      '@architect:example.org PR 7 merged.',
+    )
   })
 
   it('acknowledges a delivery that matches nothing and posts nothing', async () => {

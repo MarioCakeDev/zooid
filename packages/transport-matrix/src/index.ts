@@ -17,8 +17,10 @@ export {
   SLUG_RE,
   AGENT_KEY_RE,
 } from './identity.js'
-export { extractMentions } from './mentions.js'
+export { extractMentions, stripMention } from './mentions.js'
 export type { MaybeMessage } from './mentions.js'
+export { buildMentionContent } from './mention-content.js'
+export { isExpiredTrigger } from './trigger-freshness.js'
 export { route, isMediaMsgtype, MEDIA_MSGTYPES } from './router.js'
 export type { AgentBinding, RouteMatch } from './router.js'
 export { BotPool } from './bot-pool.js'

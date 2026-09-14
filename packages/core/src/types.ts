@@ -327,6 +327,15 @@ export interface TriggerMessage {
    * schedule trigger has no delivery to evaluate.
    */
   match?: string
+  /**
+   * How long a fired copy of this message stays worth answering, in ms.
+   * Stamped onto the posted event as `dev.zooid.trigger.ttl_ms`; a receiving
+   * daemon that comes back after this window drops it rather than replaying
+   * stale work — see [[ZOD087]] §TTL policy. Defaults to 6h for a `schedule:`
+   * trigger and no expiry for a `webhook:` trigger; overridable per trigger
+   * with `expires_after:`.
+   */
+  ttlMs?: number
 }
 
 /**
