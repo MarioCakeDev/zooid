@@ -14,3 +14,6 @@ images/
 # Playwright artifacts
 test-results/
 playwright-report/
+
+# npm pack output (isolated-build deploys; see manage-community-ec2 skill)
+packages/cli/*.tgz
