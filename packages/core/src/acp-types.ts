@@ -38,12 +38,6 @@ export interface AcpSpawnSpec {
   image?: string
   /** Bind mounts. Used by DockerAcpRuntime; ignored by LocalAcpRuntime. */
   mounts?: AcpMount[]
-  /**
-   * Agent id. Container runtimes use it to give each agent a deterministic
-   * container name/label and to reap a stale container before spawning.
-   * Ignored by LocalAcpRuntime.
-   */
-  agentId?: string
 }
 
 /**
