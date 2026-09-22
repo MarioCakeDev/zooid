@@ -253,6 +253,53 @@ describe('MatrixContextProvider', () => {
     })
   })
 
+  it('sendMessage falls back to a display name for #name:server without a directory alias', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ event_id: '$sent' })
+    const resolveAlias = vi.fn().mockResolvedValue(null) // no #handoffs:mariocake.de alias
+    const fetchRoomName = vi.fn().mockResolvedValue('handoffs')
+    const provider = new MatrixContextProvider({
+      client: fakeClient({ sendMessage, resolveAlias, fetchRoomName } as unknown as Partial<MatrixClient>),
+      asUserId: '@architect:hs',
+      agentBots: new Map(),
+      rooms: [{ alias: '!handoffs:hs' }],
+    })
+    const result = await provider.sendMessage({ room: '#handoffs:mariocake.de', text: 'noted' })
+    expect(result).toEqual({ event_id: '$sent' })
+    expect(resolveAlias).toHaveBeenCalledWith('#handoffs:mariocake.de')
+    expect(sendMessage).toHaveBeenCalledWith({
+      roomId: '!handoffs:hs',
+      asUserId: '@architect:hs',
+      content: { msgtype: 'm.notice', body: 'noted' },
+    })
+  })
+
+  it('sendMessage refuses an ambiguous display name instead of guessing a room', async () => {
+    const provider = new MatrixContextProvider({
+      client: fakeClient({
+        resolveAlias: vi.fn().mockResolvedValue(null),
+        fetchRoomName: vi.fn().mockResolvedValue('general'),
+      } as unknown as Partial<MatrixClient>),
+      asUserId: '@architect:hs',
+      agentBots: new Map(),
+      rooms: [{ alias: '!a:hs' }, { alias: '!b:hs' }],
+    })
+    await expect(provider.sendMessage({ room: 'general', text: 'hi' })).rejects.toThrow(
+      /ambiguous_room/,
+    )
+  })
+
+  it('sendMessage propagates a directory failure instead of reporting not_in_room', async () => {
+    const provider = new MatrixContextProvider({
+      client: fakeClient({
+        resolveAlias: vi.fn().mockRejectedValue(new Error('resolveAlias(#review:hs) failed: 500')),
+      } as unknown as Partial<MatrixClient>),
+      asUserId: '@architect:hs',
+      agentBots: new Map(),
+      rooms: [{ alias: '!review:hs' }],
+    })
+    await expect(provider.sendMessage({ room: '#review', text: 'hi' })).rejects.toThrow('500')
+  })
+
   it('sendMessage falls back to top-level when thread_id belongs to another room', async () => {
     const sendMessage = vi.fn().mockResolvedValue({ event_id: '$sent' })
     const fetchEvent = vi.fn().mockResolvedValue(null) // root not in this room

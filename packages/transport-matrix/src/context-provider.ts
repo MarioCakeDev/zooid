@@ -330,6 +330,8 @@ export class MatrixContextProvider implements TransportContextProvider {
    * `#review:server`), or its display name (`review`) — the values an agent
    * sees in `getRooms()`. Anything not bound to this agent resolves to
    * `undefined`, preserving the membership check as the authorization gate.
+   * A directory/room-name lookup failure propagates (it is not a membership
+   * verdict), and an ambiguous display name throws rather than guessing.
    */
   private async resolveRoom(input: string): Promise<string | undefined> {
     const rooms = this.opts.rooms ?? []
@@ -340,31 +342,37 @@ export class MatrixContextProvider implements TransportContextProvider {
     if (input.startsWith('!')) return undefined
 
     const bare = input.replace(/^#/, '')
-    // Alias / bare-name form: normalize with this agent's homeserver, then
-    // resolve through the room directory and re-check against bound rooms.
+    const localpart = bare.split(':')[0]
+    if (!localpart) return undefined
+    // Alias form: try the caller's server (if given) and this agent's own
+    // homeserver, then re-check the resolved id against bound rooms. A
+    // `resolveAlias` throw (401/403/5xx) is a real directory failure and must
+    // surface as such — only `null` (404) means "no such alias".
     const server = this.opts.asUserId.split(':').slice(1).join(':')
-    const alias = `#${bare.includes(':') ? bare : `${bare}:${server}`}`
-    let resolved: string | null = null
-    try {
-      resolved = await this.opts.client.resolveAlias(alias)
-    } catch {
-      resolved = null
+    const aliases = new Set<string>([`#${localpart}:${server}`])
+    if (bare.includes(':')) aliases.add(`#${bare}`)
+    for (const alias of aliases) {
+      const resolved = await this.opts.client.resolveAlias(alias)
+      const bound = resolved ? rooms.find((r) => r.alias === resolved) : undefined
+      if (bound) return bound.alias
     }
-    const bound = resolved ? rooms.find((r) => r.alias === resolved) : undefined
-    if (bound) return bound.alias
 
-    // Display-name form (the `name` in getRooms()), matched case-insensitively.
-    const target = bare.toLowerCase()
+    // Display-name form (the `name` in getRooms()), matched case-insensitively
+    // on the localpart (so `#handoffs:server` matches a room named "handoffs"
+    // even without a directory alias). Ambiguity is a refusal, not a guess.
+    const target = localpart.toLowerCase()
+    const matches: string[] = []
     for (const r of rooms) {
-      let name: string | null = null
-      try {
-        name = await this.opts.client.fetchRoomName(r.alias, this.opts.asUserId)
-      } catch {
-        name = null
-      }
-      if (name?.toLowerCase() === target) return r.alias
+      const name = await this.opts.client.fetchRoomName(r.alias, this.opts.asUserId)
+      if (name?.toLowerCase() === target) matches.push(r.alias)
     }
-    return undefined
+    if (matches.length > 1) {
+      throw new Error(
+        `ambiguous_room: "${input}" matches ${matches.length} bound rooms ` +
+          `(${matches.join(', ')}); pass a room id instead`,
+      )
+    }
+    return matches[0]
   }
 
   /**
