@@ -9,6 +9,7 @@ import {
   type PromptInput,
   type PromptResult,
   type TapEvent,
+  type AcpClientTimeouts,
 } from '@zooid/acp-client'
 import type { AcpAgentSpec, AcpMount, AcpRuntime } from './acp-types.js'
 import type { AgentConfig } from './types.js'
@@ -114,6 +115,12 @@ export interface AcpAgentRegistryOptions {
    * daemon-side binding by the ACP session id instead.
    */
   onSessionEstablished?: (agentName: string, sessionKey: string, sessionId: string) => void
+  /**
+   * Handshake deadlines forwarded to each `AcpClient`. Bounds `initialize`
+   * and `loadSession`/`newSession` so a dead/recreated agent container fails
+   * the dispatch instead of hanging the daemon.
+   */
+  timeouts?: AcpClientTimeouts
 }
 
 export type ContextSpawnFactory = (
@@ -130,6 +137,9 @@ export type ContextSpawnFactory = (
 export class AcpAgentRegistry implements AcpRegistry {
   readonly opts: AcpAgentRegistryOptions
   private readonly clients = new Map<string, AcpClient>()
+  /** In-flight first-time starts, keyed by agent, so concurrent dispatches
+   *  don't spawn duplicate children/containers for the same agent. */
+  private readonly starting = new Map<string, Promise<AcpClient>>()
 
   onEvent: AcpRegistryEventHandler
   onApprovalRequest: AcpRegistryApprovalHandler
@@ -234,7 +244,29 @@ export class AcpAgentRegistry implements AcpRegistry {
 
   private async ensureClient(name: string): Promise<AcpClient> {
     const existing = this.clients.get(name)
-    if (existing) return existing
+    if (existing) {
+      // A client whose child/container was recreated underneath the daemon
+      // reports itself dead. Never return it: drop the stale handle and
+      // reconnect, otherwise every later mention blocks on a dead connection.
+      if (existing.isAlive()) return existing
+      this.clients.delete(name)
+      console.warn(`[acp:${name}] cached client is dead; reconnecting`)
+      void existing.stop().catch((err) => {
+        console.warn(`[acp:${name}] stop() of dead client failed:`, err)
+      })
+    }
+    const inFlight = this.starting.get(name)
+    if (inFlight) return inFlight
+    const starting = this.startClient(name)
+    this.starting.set(name, starting)
+    try {
+      return await starting
+    } finally {
+      this.starting.delete(name)
+    }
+  }
+
+  private async startClient(name: string): Promise<AcpClient> {
     const cfg = this.opts.agents[name]
     if (!cfg.acp) throw new Error(`agents.${name}: missing acp block`)
     const spawn = resolveAcpAgentSpec(cfg.acp)
@@ -257,8 +289,15 @@ export class AcpAgentRegistry implements AcpRegistry {
       onApprovalRequest: (req) => this.onApprovalRequest(name, req),
       onTap: this.opts.onTap ? (e) => this.opts.onTap!(name, e) : undefined,
       contextSpawn: this.opts.contextSpawns?.[name],
+      timeouts: this.opts.timeouts,
     })
-    await client.start()
+    try {
+      await client.start()
+    } catch (err) {
+      // Don't leak a half-started child when the handshake fails/times out.
+      void client.stop().catch(() => {})
+      throw err
+    }
     this.clients.set(name, client)
     return client
   }

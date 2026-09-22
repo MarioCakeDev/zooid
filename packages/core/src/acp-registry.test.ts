@@ -24,6 +24,7 @@ vi.mock('@zooid/acp-client', async (orig) => {
       ensureSession: vi.fn().mockResolvedValue('acp-session-1'),
       prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
       stop: vi.fn().mockResolvedValue(undefined),
+      isAlive: vi.fn(() => true),
     })),
   }
 })
@@ -159,6 +160,37 @@ describe('AcpAgentRegistry', () => {
     await registry.stopAll()
     const inst = AcpClient.mock.results[0].value as { stop: ReturnType<typeof vi.fn> }
     expect(inst.stop).toHaveBeenCalled()
+  })
+
+  it('replaces a dead cached client on the next dispatch instead of reusing it', async () => {
+    const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
+      AcpClient: ReturnType<typeof vi.fn>
+    }
+    await registry.prompt('triage', { threadId: 't1', content: [] })
+    expect(AcpClient).toHaveBeenCalledTimes(1)
+    const dead = AcpClient.mock.results[0].value as {
+      isAlive: ReturnType<typeof vi.fn>
+      stop: ReturnType<typeof vi.fn>
+    }
+    dead.isAlive.mockReturnValue(false)
+
+    await registry.prompt('triage', { threadId: 't2', content: [] })
+    expect(AcpClient).toHaveBeenCalledTimes(2)
+    expect(dead.stop).toHaveBeenCalled()
+    const fresh = AcpClient.mock.results[1].value as { start: ReturnType<typeof vi.fn> }
+    expect(fresh.start).toHaveBeenCalled()
+  })
+
+  it('does not start duplicate clients for concurrent first dispatches', async () => {
+    const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
+      AcpClient: ReturnType<typeof vi.fn>
+    }
+    await Promise.all([
+      registry.ensureSession('triage', 't1'),
+      registry.ensureSession('triage', 't2'),
+      registry.ensureSession('triage', 't3'),
+    ])
+    expect(AcpClient).toHaveBeenCalledTimes(1)
   })
 })
 
