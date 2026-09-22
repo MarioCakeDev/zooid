@@ -297,15 +297,18 @@ export class AcpClient {
     const guards: Promise<never>[] = [death]
     if (timeoutMs > 0) {
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new Error(
-                `AcpClient(${this.options.agent.id}): ${label} timed out after ${timeoutMs}ms`,
-              ),
-            ),
-          timeoutMs,
-        )
+        timer = setTimeout(() => {
+          // A handshake that never completes means the connection is wedged,
+          // not merely slow. Mark the client dead so `isAlive()` goes false and
+          // the registry drops + reconnects instead of reusing it (and so a
+          // `loadSession` timeout does not fall back to `newSession` on the
+          // same unhealthy connection).
+          const err = new Error(
+            `AcpClient(${this.options.agent.id}): ${label} timed out after ${timeoutMs}ms`,
+          )
+          this.markDead(err)
+          reject(err)
+        }, timeoutMs)
       })
       guards.push(timeout)
       void timeout.catch(() => {})

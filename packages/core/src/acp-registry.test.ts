@@ -192,6 +192,46 @@ describe('AcpAgentRegistry', () => {
     ])
     expect(AcpClient).toHaveBeenCalledTimes(1)
   })
+
+  it('stops a half-started client when start() rejects and does not cache it', async () => {
+    const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
+      AcpClient: ReturnType<typeof vi.fn>
+    }
+    const failedStop = vi.fn().mockResolvedValue(undefined)
+    AcpClient.mockImplementationOnce(() => ({
+      start: vi.fn().mockRejectedValue(new Error('handshake failed')),
+      ensureSession: vi.fn(),
+      prompt: vi.fn(),
+      stop: failedStop,
+      isAlive: vi.fn(() => false),
+    }))
+    await expect(registry.prompt('triage', { threadId: 't1', content: [] })).rejects.toThrow(
+      /handshake failed/,
+    )
+    expect(failedStop).toHaveBeenCalled()
+    // A failed start must not poison the cache: the next dispatch builds a
+    // fresh client and succeeds.
+    await expect(registry.prompt('triage', { threadId: 't2', content: [] })).resolves.toEqual({
+      stopReason: 'end_turn',
+    })
+    expect(AcpClient).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears the in-flight start map when start() rejects', async () => {
+    const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
+      AcpClient: ReturnType<typeof vi.fn>
+    }
+    AcpClient.mockImplementationOnce(() => ({
+      start: vi.fn().mockRejectedValue(new Error('boom')),
+      ensureSession: vi.fn(),
+      prompt: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+      isAlive: vi.fn(() => false),
+    }))
+    await expect(registry.ensureSession('triage', 't1')).rejects.toThrow(/boom/)
+    await expect(registry.ensureSession('triage', 't2')).resolves.toBe('acp-session-1')
+    expect(AcpClient).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('AcpAgentRegistry.cancelSession', () => {

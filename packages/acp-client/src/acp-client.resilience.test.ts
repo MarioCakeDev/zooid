@@ -69,6 +69,31 @@ describe('AcpClient handshake resilience', () => {
       loadSession: vi.fn(() => new Promise(() => {})),
     })
     await expect(client.ensureSession('thread-1')).rejects.toThrow(/newSession timed out after 40ms/i)
+    // A handshake timeout means the connection is wedged: the client must
+    // report dead so the registry drops + replaces it on the next dispatch.
+    expect(client.isAlive()).toBe(false)
+  })
+
+  it('does not fall back to newSession when loadSession times out', async () => {
+    const child = new SilentChild()
+    const { client } = makeClient({ child, sessionMs: 40 })
+    const newSession = vi.fn(() => new Promise(() => {}))
+    stubConnection(client, {
+      newSession,
+      loadSession: vi.fn(() => new Promise(() => {})),
+    })
+    ;(client as unknown as { agentCapabilities: { loadSession?: boolean } }).agentCapabilities = {
+      loadSession: true,
+    }
+    ;(client as unknown as { store: unknown }).store = {
+      get: () => 'persisted-session',
+      delete: vi.fn(async () => {}),
+      load: vi.fn(async () => {}),
+    }
+    ;(client as unknown as { storeLoaded: Promise<void> }).storeLoaded = Promise.resolve()
+    await expect(client.ensureSession('thread-1')).rejects.toThrow(/loadSession.*timed out/i)
+    expect(newSession).not.toHaveBeenCalled()
+    expect(client.isAlive()).toBe(false)
   })
 
   it('rejects ensureSession when the child exits while a session is being established', async () => {

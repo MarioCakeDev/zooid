@@ -142,7 +142,19 @@ describe('DockerAcpRuntime', () => {
       rt.spawn({ command: 'cmd', args: [], agentId: 'dev' })
       expect(spawnSyncMock).toHaveBeenCalledWith('docker', ['rm', '-f', 'zooid-agent-dev'], {
         stdio: 'ignore',
+        timeout: 5_000,
       })
+    })
+
+    it('does not break spawn when reaping a stale container fails', () => {
+      spawnSyncMock.mockImplementation(() => {
+        throw new Error('docker CLI wedged')
+      })
+      const child = new FakeChild()
+      spawnMock.mockReturnValue(child)
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      expect(() => rt.spawn({ command: 'cmd', args: [], agentId: 'dev' })).not.toThrow()
+      expect(spawnMock).toHaveBeenCalledTimes(1)
     })
 
     it('sanitises the agentId into a docker-legal container name', () => {

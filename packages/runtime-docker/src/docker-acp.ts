@@ -87,7 +87,13 @@ export class DockerAcpRuntime implements AcpRuntime {
    */
   private reapStale(agentId: string): void {
     try {
-      spawnSync(this.engine, ['rm', '-f', this.containerName(agentId)], { stdio: 'ignore' })
+      spawnSync(this.engine, ['rm', '-f', this.containerName(agentId)], {
+        stdio: 'ignore',
+        // Bound the reap: a wedged docker CLI/daemon must not block the whole
+        // daemon event loop on the cold-start path. On timeout `spawnSync` sets
+        // `result.error` and returns, which the catch below ignores.
+        timeout: 5_000,
+      })
     } catch {
       // ignore — the spawn below will surface any real engine problem.
     }
