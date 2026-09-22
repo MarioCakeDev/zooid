@@ -43,6 +43,13 @@ export interface SendMessageInput {
 export interface SendMessageResult {
   event_id: string
   thread_id?: string
+  /**
+   * Set when the message was delivered, but not exactly as requested — e.g. a
+   * `thread_id` that lives in a different room, so the reply was posted
+   * top-level in the requested room instead of failing with a bare 400. The
+   * send itself still succeeded; `event_id` is the message that landed.
+   */
+  warning?: string
 }
 
 export interface HistoryPage {

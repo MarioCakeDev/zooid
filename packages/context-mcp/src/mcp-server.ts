@@ -155,7 +155,7 @@ export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServe
 
   server.tool(
     'zooid_send_message',
-    'Post a message into a room or thread this agent is bound to. Fire-and-forget: no assignee, no completion tracking, no notify. Use zooid_start_task_threads instead when the intent is delegation.',
+    'Post a message into a room or thread this agent is bound to. `room` accepts a room id or name from zooid_get_rooms (e.g. "!abc:hs", "#review", "review"). Fire-and-forget: no assignee, no completion tracking, no notify. Use zooid_start_task_threads instead when the intent is delegation.',
     {
       room: z.string(),
       thread_id: z.string().optional(),

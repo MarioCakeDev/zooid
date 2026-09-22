@@ -507,9 +507,13 @@ export class MatrixClient {
       body: JSON.stringify(content),
     })
     if (!r.ok) {
-      const err = new Error(`sendEvent(${eventType}) failed: ${r.status}`) as Error & {
-        status?: number
-      }
+      // Carry the homeserver body: callers need the errcode to tell an
+      // actionable rejection (e.g. `M_INVALID_PARAM` — "Relations must be in
+      // the same room") from a transient one, and retry accordingly.
+      const body = await r.text().catch(() => '')
+      const err = new Error(
+        `sendEvent(${eventType}) failed: ${r.status}${body ? ` ${body}` : ''}`,
+      ) as Error & { status?: number }
       err.status = r.status
       throw err
     }
