@@ -288,6 +288,23 @@ describe('MatrixContextProvider', () => {
     )
   })
 
+  it('sendMessage refuses an alias resolving to an unbound room without falling through to a name match', async () => {
+    const fetchRoomName = vi.fn().mockResolvedValue('general')
+    const provider = new MatrixContextProvider({
+      client: fakeClient({
+        resolveAlias: vi.fn().mockResolvedValue('!general:otherserver'),
+        fetchRoomName,
+      } as unknown as Partial<MatrixClient>),
+      asUserId: '@architect:hs',
+      agentBots: new Map(),
+      rooms: [{ alias: '!local-general:hs' }],
+    })
+    await expect(
+      provider.sendMessage({ room: '#general:otherserver', text: 'hi' }),
+    ).rejects.toThrow(/not_in_room/)
+    expect(fetchRoomName).not.toHaveBeenCalled()
+  })
+
   it('sendMessage propagates a directory failure instead of reporting not_in_room', async () => {
     const provider = new MatrixContextProvider({
       client: fakeClient({

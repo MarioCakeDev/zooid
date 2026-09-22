@@ -351,11 +351,18 @@ export class MatrixContextProvider implements TransportContextProvider {
     const server = this.opts.asUserId.split(':').slice(1).join(':')
     const aliases = new Set<string>([`#${localpart}:${server}`])
     if (bare.includes(':')) aliases.add(`#${bare}`)
+    let sawResolvedAlias = false
     for (const alias of aliases) {
       const resolved = await this.opts.client.resolveAlias(alias)
-      const bound = resolved ? rooms.find((r) => r.alias === resolved) : undefined
+      if (!resolved) continue
+      sawResolvedAlias = true
+      const bound = rooms.find((r) => r.alias === resolved)
       if (bound) return bound.alias
     }
+    // An alias that resolved to a concrete room the agent is not bound to is a
+    // membership refusal — never fall through to a name match, which could
+    // silently deliver into a *different* local room that merely shares a name.
+    if (sawResolvedAlias) return undefined
 
     // Display-name form (the `name` in getRooms()), matched case-insensitively
     // on the localpart (so `#handoffs:server` matches a room named "handoffs"
