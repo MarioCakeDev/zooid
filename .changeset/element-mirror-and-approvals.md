@@ -19,11 +19,16 @@ that sends `dev.zooid.approval_response`.
   `dev.zooid.workforce` state event lives in an `m.space` container that
   Element surfaces through the space rather than a message timeline.
 - **Interactive approvals.** The daemon now also resolves an approval from a
-  plain `m.room.message` (`approve <id>` / `deny <id>`, or a bare
-  `approve` / `deny` when exactly one approval is pending in the thread) and
-  from a ✅ / ❌ reaction on the approval's custom event or its mirrored notice.
-  Commands/reactions from Zooid's own bot users are ignored so an agent cannot
-  self-approve. Correlation is idempotent: `ApprovalCorrelator.resolveById`
-  deletes the pending entry, so a double approve is a no-op.
+  plain `m.room.message` (`approve <id>` / `deny <id>` — the id must be
+  UUID-shaped, so prose that merely starts with the word routes normally — or a
+  bare `approve` / `deny` replied inside the approval's own thread when exactly
+  one is pending there) and from a ✅ / ❌ reaction on the approval's custom
+  event or its mirrored notice. Commands/reactions from Zooid's own bot users
+  are ignored on every path, including the legacy `dev.zooid.approval_response`
+  event, so an agent cannot self-approve. `approve`/`deny` prefer the narrowest
+  matching option (`allow_once` / `reject_once`) over a persistent one,
+  regardless of the order the agent listed them. Correlation is idempotent:
+  `ApprovalCorrelator.resolveById` deletes the pending entry, so a double
+  approve is a no-op.
 - `ApprovalCorrelator` gains `resolveById()` and `get()`, and emits `resolved`
   so transports can drop the correlation state they kept for an approval.

@@ -36,6 +36,7 @@ import {
 } from './event-encoders.js'
 import {
   decisionForCommand,
+  isApprovalId,
   parseApprovalCommand,
   reactionCommand,
   type ApprovalCommand,
@@ -549,6 +550,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const threadRoot = inboundThreadRoot(evt)
 
     if (parsed.approvalId) {
+      // Only an id-shaped token is treated as a command. Prose that merely
+      // starts with the word ("approve please") routes normally instead of
+      // being consumed.
+      if (!isApprovalId(parsed.approvalId)) return false
       const meta = approvalMeta.get(parsed.approvalId)
       if (!meta) {
         await postApprovalNotice(
@@ -572,12 +577,14 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       return true
     }
 
-    // Bare `approve` / `deny`: only meaningful when exactly one approval is
-    // pending in this room/thread. Zero pending → not an approval command (it
-    // may be ordinary prose), so let it route normally; more than one → refuse
+    // Bare `approve` / `deny`: only meaningful as a reply *inside* the
+    // approval's own thread (approvals are always thread-scoped), and only when
+    // exactly one is pending there. Outside a thread, or with zero pending, the
+    // message is ordinary prose and routes normally; more than one → refuse
     // rather than guess.
+    if (!threadRoot) return false
     const candidates = [...approvalMeta.entries()].filter(
-      ([, m]) => m.roomId === evt.room_id && (threadRoot ? m.threadRoot === threadRoot : true),
+      ([, m]) => m.roomId === evt.room_id && m.threadRoot === threadRoot,
     )
     if (candidates.length === 0) return false
     if (candidates.length > 1) {
@@ -1173,6 +1180,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       return
     }
     if (evt.type === 'dev.zooid.approval_response') {
+      // Agents never legitimately answer their own permission request — only a
+      // human (via the Zooid client) does. Ignore a bot sender so an agent
+      // cannot self-approve through this legacy path either.
+      if (evt.sender && ourBotUserIds.has(evt.sender)) return
       const content = (evt.content ?? {}) as {
         approval_id?: string
         session_id?: string

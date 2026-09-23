@@ -47,6 +47,15 @@ export function parseApprovalCommand(body: string): ParsedApprovalCommand | null
   return { command: m[1].toLowerCase() as ApprovalCommand, approvalId: m[2] }
 }
 
+// Approval ids are `randomUUID()` values. Requiring this shape means a prose
+// message that merely starts with the word ("approve please") is not treated as
+// an id-bearing command and routes normally.
+const APPROVAL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function isApprovalId(token: string | undefined): boolean {
+  return token !== undefined && APPROVAL_ID_RE.test(token)
+}
+
 export type DecisionResolution =
   | { ok: true; decision: ApprovalDecision }
   | { ok: false; reason: string }
@@ -62,13 +71,18 @@ export function decisionForCommand(
   options: ApprovalOption[],
 ): DecisionResolution {
   const list = Array.isArray(options) ? options : []
-  const byKind = (prefix: string) =>
-    list.filter((o) => typeof o.kind === 'string' && o.kind.startsWith(prefix))
+  // Option order is agent-controlled, so never pick the first `allow*` blindly:
+  // prefer the narrowest ("once") over the persistent ("always") option.
+  const pick = (prefix: string, preferred: string): ApprovalOption | undefined => {
+    const matches = list.filter((o) => typeof o.kind === 'string' && o.kind.startsWith(prefix))
+    if (matches.length === 0) return undefined
+    return matches.find((o) => o.kind === preferred) ?? matches[0]
+  }
 
   if (command === 'approve') {
-    const allow = byKind('allow')
-    if (allow.length > 0) {
-      return { ok: true, decision: { decision: 'allow', optionId: allow[0].optionId } }
+    const allow = pick('allow', 'allow_once')
+    if (allow) {
+      return { ok: true, decision: { decision: 'allow', optionId: allow.optionId } }
     }
     // A request with a single option (e.g. a yes/no confirm) still has an
     // unambiguous answer.
@@ -78,9 +92,9 @@ export function decisionForCommand(
     return { ok: false, reason: 'this request offers no "allow" option' }
   }
 
-  const reject = byKind('reject')
-  if (reject.length > 0) {
-    return { ok: true, decision: { decision: 'allow', optionId: reject[0].optionId } }
+  const reject = pick('reject', 'reject_once')
+  if (reject) {
+    return { ok: true, decision: { decision: 'allow', optionId: reject.optionId } }
   }
   return { ok: true, decision: { decision: 'cancel' } }
 }

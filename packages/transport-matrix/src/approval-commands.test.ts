@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   decisionForCommand,
+  isApprovalId,
   parseApprovalCommand,
   reactionCommand,
   APPROVE_REACTION,
@@ -38,6 +39,18 @@ describe('parseApprovalCommand', () => {
   })
 })
 
+describe('isApprovalId', () => {
+  it('accepts a UUID (the shape ApprovalCorrelator mints)', () => {
+    expect(isApprovalId('3f2504e0-4f89-41d3-9a0c-0305e82c3301')).toBe(true)
+  })
+
+  it('rejects prose and non-UUID tokens', () => {
+    expect(isApprovalId('please')).toBe(false)
+    expect(isApprovalId('a1')).toBe(false)
+    expect(isApprovalId(undefined)).toBe(false)
+  })
+})
+
 describe('reactionCommand', () => {
   it('maps the canonical emoji', () => {
     expect(reactionCommand(APPROVE_REACTION)).toBe('approve')
@@ -52,18 +65,31 @@ describe('reactionCommand', () => {
 })
 
 describe('decisionForCommand', () => {
-  it('approve selects the first allow option', () => {
+  it('approve prefers allow_once over allow_always regardless of option order', () => {
     expect(decisionForCommand('approve', options)).toEqual({
       ok: true,
       decision: { decision: 'allow', optionId: 'allow-once' },
     })
+    // Agent lists the persistent option first — still pick the narrow one.
+    expect(
+      decisionForCommand('approve', [
+        { optionId: 'allow-always', name: 'Always', kind: 'allow_always' },
+        { optionId: 'allow-once', name: 'Once', kind: 'allow_once' },
+      ]),
+    ).toEqual({ ok: true, decision: { decision: 'allow', optionId: 'allow-once' } })
   })
 
-  it('deny selects the first reject option (still a selected option, not cancel)', () => {
+  it('deny prefers reject_once over reject_always regardless of option order', () => {
     expect(decisionForCommand('deny', options)).toEqual({
       ok: true,
       decision: { decision: 'allow', optionId: 'reject-once' },
     })
+    expect(
+      decisionForCommand('deny', [
+        { optionId: 'reject-always', name: 'Always', kind: 'reject_always' },
+        { optionId: 'reject-once', name: 'Once', kind: 'reject_once' },
+      ]),
+    ).toEqual({ ok: true, decision: { decision: 'allow', optionId: 'reject-once' } })
   })
 
   it('approve falls back to the sole option when it has no allow kind', () => {

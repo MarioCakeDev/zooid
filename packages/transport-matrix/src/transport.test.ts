@@ -2690,6 +2690,9 @@ describe('interactive approvals from a stock client', () => {
     { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
     { optionId: 'reject-once', name: 'Reject once', kind: 'reject_once' },
   ]
+  // ApprovalCorrelator mints UUIDs; the command parser only treats an
+  // id-shaped token as an id.
+  const APPROVAL_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301'
 
   async function setupPendingApproval(root: string) {
     const { transport, agents, client, finishPrompt, approvals } = makeTransport()
@@ -2718,9 +2721,9 @@ describe('interactive approvals from a stock client', () => {
     client.sendMessage.mockImplementation(async (arg: { content: { body: string } }) => ({
       event_id: arg.content.body.startsWith('🔐') ? '$approval-notice' : '$prose',
     }))
-    approvals.__seed('a1', approvalOptions)
+    approvals.__seed(APPROVAL_ID, approvalOptions)
     approvals.emit('registered', {
-      approvalId: 'a1',
+      approvalId: APPROVAL_ID,
       sessionId,
       toolCallId: 'tc-1',
       toolTitle: 'git push',
@@ -2741,7 +2744,7 @@ describe('interactive approvals from a stock client', () => {
     ).toBe(true)
     const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('🔐'))
     expect(notice).toBeDefined()
-    expect(noticeBody(notice![0])).toContain('approve a1')
+    expect(noticeBody(notice![0])).toContain(`approve ${APPROVAL_ID}`)
     finishPrompt()
     await settleTurn()
   })
@@ -2762,7 +2765,7 @@ describe('interactive approvals from a stock client', () => {
         },
       ],
     })
-    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+    expect(approvals.resolveById).toHaveBeenCalledWith(APPROVAL_ID, {
       decision: 'allow',
       optionId: 'allow-once',
     })
@@ -2786,7 +2789,7 @@ describe('interactive approvals from a stock client', () => {
         },
       ],
     })
-    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+    expect(approvals.resolveById).toHaveBeenCalledWith(APPROVAL_ID, {
       decision: 'allow',
       optionId: 'reject-once',
     })
@@ -2845,11 +2848,11 @@ describe('interactive approvals from a stock client', () => {
           event_id: '$cmd5',
           room_id: '!r:example.com',
           sender: '@alice:example.com',
-          content: { msgtype: 'm.text', body: 'approve a1' },
+          content: { msgtype: 'm.text', body: `approve ${APPROVAL_ID}` },
         },
       ],
     })
-    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+    expect(approvals.resolveById).toHaveBeenCalledWith(APPROVAL_ID, {
       decision: 'allow',
       optionId: 'allow-once',
     })
@@ -2866,11 +2869,11 @@ describe('interactive approvals from a stock client', () => {
           event_id: '$cmd6',
           room_id: '!r:example.com',
           sender: '@alice:example.com',
-          content: { msgtype: 'm.text', body: 'deny a1' },
+          content: { msgtype: 'm.text', body: `deny ${APPROVAL_ID}` },
         },
       ],
     })
-    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+    expect(approvals.resolveById).toHaveBeenCalledWith(APPROVAL_ID, {
       decision: 'allow',
       optionId: 'reject-once',
     })
@@ -2878,7 +2881,7 @@ describe('interactive approvals from a stock client', () => {
     await settleTurn()
   })
 
-  it('resolves a bare "approve" when exactly one approval is pending', async () => {
+  it('resolves a bare "approve" replied inside the approval thread', async () => {
     const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap7')
     await postTxn(transport.app, {
       events: [
@@ -2887,11 +2890,15 @@ describe('interactive approvals from a stock client', () => {
           event_id: '$cmd7',
           room_id: '!r:example.com',
           sender: '@alice:example.com',
-          content: { msgtype: 'm.text', body: 'approve' },
+          content: {
+            msgtype: 'm.text',
+            body: 'approve',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$ap7' },
+          },
         },
       ],
     })
-    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+    expect(approvals.resolveById).toHaveBeenCalledWith(APPROVAL_ID, {
       decision: 'allow',
       optionId: 'allow-once',
     })
@@ -2909,7 +2916,7 @@ describe('interactive approvals from a stock client', () => {
           event_id: '$cmd8',
           room_id: '!r:example.com',
           sender: '@alice:example.com',
-          content: { msgtype: 'm.text', body: 'approve nope' },
+          content: { msgtype: 'm.text', body: 'approve 00000000-0000-4000-8000-000000000000' },
         },
       ],
     })
@@ -2932,7 +2939,7 @@ describe('interactive approvals from a stock client', () => {
           event_id: '$cmd9a',
           room_id: '!r:example.com',
           sender: '@alice:example.com',
-          content: { msgtype: 'm.text', body: 'approve a1' },
+          content: { msgtype: 'm.text', body: `approve ${APPROVAL_ID}` },
         },
       ],
     })
@@ -2944,7 +2951,7 @@ describe('interactive approvals from a stock client', () => {
           event_id: '$cmd9b',
           room_id: '!r:example.com',
           sender: '@alice:example.com',
-          content: { msgtype: 'm.text', body: 'approve a1' },
+          content: { msgtype: 'm.text', body: `approve ${APPROVAL_ID}` },
         },
       ],
     })
@@ -2996,5 +3003,118 @@ describe('interactive approvals from a stock client', () => {
     await settleTurn()
     expect(agents.ensureSession.mock.calls.length).toBeGreaterThan(ensureBefore)
     expect(client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('No pending approval'))).toBe(false)
+  })
+
+  it('does not resolve a reaction to an unrelated event', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap11')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.reaction',
+          event_id: '$react11',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            'm.relates_to': { rel_type: 'm.annotation', event_id: '$some-other-message' },
+            key: '✅',
+          },
+        },
+      ],
+    })
+    expect(approvals.resolveById).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('refuses an explicit id sent from a different thread', async () => {
+    const { transport, client, approvals, finishPrompt } = await setupPendingApproval('$ap12')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd12',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: `approve ${APPROVAL_ID}`,
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$different-thread' },
+          },
+        },
+      ],
+    })
+    expect(approvals.resolveById).not.toHaveBeenCalled()
+    expect(
+      client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('not pending in this thread')),
+    ).toBe(true)
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('refuses an explicit id sent from a different room', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap13')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd13',
+          room_id: '!other:example.com',
+          sender: '@alice:example.com',
+          content: { msgtype: 'm.text', body: `approve ${APPROVAL_ID}` },
+        },
+      ],
+    })
+    expect(approvals.resolveById).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('does not swallow prose that merely starts with the command word', async () => {
+    const { transport, agents, approvals, finishPrompt } = await setupPendingApproval('$ap14')
+    finishPrompt()
+    await settleTurn()
+    const ensureBefore = agents.ensureSession.mock.calls.length
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd14',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'approve please',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$ap14' },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(approvals.resolveById).not.toHaveBeenCalled()
+    // It reached the agent instead of being consumed as a command.
+    expect(agents.ensureSession.mock.calls.length).toBeGreaterThan(ensureBefore)
+  })
+
+  it('ignores a legacy dev.zooid.approval_response from a bot user', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap15')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'dev.zooid.approval_response',
+          event_id: '$resp15',
+          room_id: '!r:example.com',
+          sender: '@architect:example.com',
+          content: {
+            approval_id: APPROVAL_ID,
+            session_id: 'sess-$ap15',
+            decision: 'allow',
+            option_id: 'allow-once',
+          },
+        },
+      ],
+    })
+    expect(approvals.resolve).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
   })
 })
