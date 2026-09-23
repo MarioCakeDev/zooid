@@ -34,6 +34,7 @@ import {
   toTurnEndBody,
   toActivityNoticeBody,
   activityDetail,
+  createsTurnLine,
   turnWorkingBody,
   turnFinalBody,
   turnMirrorNoticeContent,
@@ -459,10 +460,13 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   // event (which spammed the timeline), a turn gets ONE threaded notice that is
   // edited in place with `m.replace` as tools run and finalized on turn end.
   // `tool_call`, `tool_call_update`, `plan` and `available_commands_update` are
-  // folded into it; the raw custom events still go out (visible via Element's
-  // "show hidden events"). `approval_request` and `error` stay standalone
-  // because they must be actionable. The line is marked (see
-  // `TURN_MIRROR_MARKER`) so the Zooid web client can hide it.
+  // folded into it — but tool activity and a plan update create the line;
+  // `available_commands_update` only updates one that already exists, so a
+  // prose-only turn (whose session replayed its command roster) gets no line.
+  // The raw custom events still go out (visible via Element's "show hidden
+  // events"). `approval_request` and `error` stay standalone because they must
+  // be actionable. The line is marked (see `TURN_MIRROR_MARKER`) so the Zooid
+  // web client can hide it.
   interface TurnMirrorState {
     /** Event id of the editable notice; '' until it is created. */
     eventId: string
@@ -479,9 +483,13 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   const turnMirrors = new Map<string, TurnMirrorState>()
 
   function isMissingEventError(err: unknown): boolean {
+    // The status is authoritative. The fallback must stay narrow: the thrown
+    // message carries the homeserver body, so a broad `/not found/` would
+    // misread a `403 Room not found` as a redacted original and recreate the
+    // line. Only the Matrix not-found errcode / event wording counts.
     if ((err as { status?: number } | null)?.status === 404) return true
     const msg = err instanceof Error ? err.message : String(err)
-    return /M_NOT_FOUND|not found|unknown event/i.test(msg)
+    return /M_NOT_FOUND|unknown event|event not found/i.test(msg)
   }
 
   async function createTurnMirror(ctx: SessionContext, body: string): Promise<string | undefined> {
@@ -534,6 +542,9 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   ): Promise<void> {
     let state = turnMirrors.get(sessionId)
     if (state?.finalized) return
+    // Only tool activity may create the line (see `createsTurnLine`); `plan` and
+    // `available_commands_update` update an existing line only.
+    if (!state && !createsTurnLine(input.eventType)) return
     if (!state) {
       state = {
         eventId: '',
@@ -559,6 +570,11 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (detail) state.detail = detail
     const body = turnWorkingBody(ctx.agent.name, state.detail, state.toolCallIds.size)
     if (!state.eventId) {
+      // Only tool activity ever reaches here with no line yet (see the
+      // `createsTurnLine` guard above); `available_commands_update` is only
+      // filtered again so a line whose creation failed is not retried from an
+      // informational event.
+      if (!createsTurnLine(input.eventType)) return
       const eventId = await createTurnMirror(ctx, body)
       if (eventId) {
         state.eventId = eventId

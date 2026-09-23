@@ -2703,16 +2703,52 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
     })
   })
 
-  it('does not create a mirror line for a turn with no folded activity', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t4')
+  it('does not create a mirror line for a prose-only turn that advertised commands', async () => {
+    // The reviewer's case: `available_commands_update` is advertised during
+    // ensureSession and replayed at turn start, so treating it as line-creating
+    // activity would put a 🔧 line — finalized `✅ 0 tools · 0 files` — on every
+    // session's first turn, prose or not.
+    const { transport, agents, client, finishPrompt } = makeTransport()
+    agents.ensureSession.mockImplementation(async (_name: string, threadId: string) => {
+      const sessionId = `sess-${threadId}`
+      await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+        type: 'available_commands',
+        sessionId,
+        commands: [{ name: 'compact', description: 'Compact the context' }],
+      })
+      return sessionId
+    })
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$t4',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
     await onEvent(agents, 'architect', {
       type: 'agent_message_chunk',
-      sessionId,
+      sessionId: 'sess-$t4',
       content: { type: 'text', text: 'just prose' },
     })
     finishPrompt()
     await settleTurn()
     expect(client.sendMessage.mock.calls.some(([a]) => contentOf(a)['dev.zooid.mirror'])).toBe(false)
+    // The raw custom event is still sent.
+    expect(
+      client.sendCustomEvent.mock.calls.some(
+        ([a]) => (a as { eventType: string }).eventType === 'dev.zooid.available_commands_update',
+      ),
+    ).toBe(true)
   })
 
   it('marks a failed turn with a ⚠️ summary', async () => {
@@ -2751,7 +2787,7 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
       String(contentOf(a).body ?? '').includes('⚠️'),
     )
     expect(finalEdit).toBeDefined()
-    expect(contentOf(finalEdit![0]).body).toBe('* ⚠️ 1 tools · 0 files')
+    expect(contentOf(finalEdit![0]).body).toBe('* ⚠️ 1 tool · 0 files')
   })
 
   it('skips an edit whose body is unchanged (idempotent)', async () => {
@@ -2791,6 +2827,36 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
     })
     await settleTurn()
     expect(creates(client)).toHaveLength(2)
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('does not recreate on an unrelated "not found" error (403 Room not found)', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t8')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    })
+    await settleTurn()
+    client.sendMessage.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'sendEvent(m.room.message) failed: 403 {"errcode":"M_FORBIDDEN","error":"Room not found"}',
+        ),
+        { status: 403 },
+      ),
+    )
+    await onEvent(agents, 'architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'completed',
+    })
+    await settleTurn()
+    // Not a missing-original signal — no recreate, no duplicate line.
+    expect(creates(client)).toHaveLength(1)
     finishPrompt()
     await settleTurn()
   })

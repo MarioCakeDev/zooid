@@ -197,7 +197,25 @@ export function turnWorkingBody(agentId: string, detail: string, toolCount: numb
 
 /** Body of the per-turn mirror line once the turn ends. */
 export function turnFinalBody(counts: TurnMirrorCounts, failed: boolean): string {
-  return `${failed ? '⚠️' : '✅'} ${counts.toolCount} tools · ${counts.fileCount} files`
+  const tools = `${counts.toolCount} tool${counts.toolCount === 1 ? '' : 's'}`
+  const files = `${counts.fileCount} file${counts.fileCount === 1 ? '' : 's'}`
+  return `${failed ? '⚠️' : '✅'} ${tools} · ${files}`
+}
+
+/**
+ * Whether a foldable `dev.zooid.*` event may *create* the per-turn mirror line.
+ * Tool activity and a plan update do; `available_commands_update` does not.
+ * The session advertises its command roster during `ensureSession` (and the
+ * shim replays it at turn start), so treating commands as line-creating would
+ * put a `✅ 0 tools · 0 files` line on a prose-only turn. Commands still fold
+ * into a line that already exists (see `transport.ts` `updateTurnMirror`).
+ */
+export function createsTurnLine(eventType: string): boolean {
+  return (
+    eventType === 'dev.zooid.tool_call' ||
+    eventType === 'dev.zooid.tool_call_update' ||
+    eventType === 'dev.zooid.plan'
+  )
 }
 
 /**

@@ -13,6 +13,7 @@ import {
   toTurnEndBody,
   toActivityNoticeBody,
   activityDetail,
+  createsTurnLine,
   turnWorkingBody,
   turnFinalBody,
   turnMirrorNoticeContent,
@@ -381,8 +382,28 @@ describe('turnFinalBody', () => {
     expect(turnFinalBody({ toolCount: 3, fileCount: 2 }, false)).toBe('✅ 3 tools · 2 files')
   })
 
+  it('pluralizes a single tool and a single file', () => {
+    expect(turnFinalBody({ toolCount: 1, fileCount: 1 }, false)).toBe('✅ 1 tool · 1 file')
+    expect(turnFinalBody({ toolCount: 2, fileCount: 1 }, false)).toBe('✅ 2 tools · 1 file')
+  })
+
   it('marks a failed turn', () => {
-    expect(turnFinalBody({ toolCount: 1, fileCount: 0 }, true)).toBe('⚠️ 1 tools · 0 files')
+    expect(turnFinalBody({ toolCount: 1, fileCount: 0 }, true)).toBe('⚠️ 1 tool · 0 files')
+  })
+})
+
+describe('createsTurnLine', () => {
+  it('is true for tool activity and a plan update', () => {
+    expect(createsTurnLine('dev.zooid.tool_call')).toBe(true)
+    expect(createsTurnLine('dev.zooid.tool_call_update')).toBe(true)
+    expect(createsTurnLine('dev.zooid.plan')).toBe(true)
+  })
+
+  it('is false for available_commands and everything else', () => {
+    expect(createsTurnLine('dev.zooid.available_commands_update')).toBe(false)
+    expect(createsTurnLine('dev.zooid.error')).toBe(false)
+    expect(createsTurnLine('dev.zooid.turn.end')).toBe(false)
+    expect(createsTurnLine('dev.zooid.unknown')).toBe(false)
   })
 })
 
