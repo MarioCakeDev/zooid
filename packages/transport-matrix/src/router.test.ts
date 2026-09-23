@@ -205,6 +205,56 @@ describe('media events', () => {
   })
 })
 
+describe('mirrored activity notices (dev.zooid.mirror)', () => {
+  it('never routes a marked mirror notice, even with a mention and trigger=any', () => {
+    const mirror = {
+      type: 'm.room.message',
+      room_id: '!alerts:example.com',
+      sender: '@architect:example.com',
+      event_id: '$mirror',
+      content: {
+        msgtype: 'm.notice',
+        body: '🔧 architect: zooid_get_history — @monitor:example.com @architect:example.com',
+        'dev.zooid.mirror': true,
+      },
+    }
+    expect(route(mirror, agents)).toEqual([])
+  })
+
+  it('never routes an m.replace edit of the mirror line (marker in m.new_content)', () => {
+    const edit = {
+      type: 'm.room.message',
+      room_id: '!alerts:example.com',
+      sender: '@architect:example.com',
+      event_id: '$edit',
+      content: {
+        msgtype: 'm.notice',
+        body: '* 🔧 architect: @monitor:example.com',
+        'dev.zooid.mirror': true,
+        'm.new_content': {
+          msgtype: 'm.notice',
+          body: '🔧 architect: @monitor:example.com',
+          'dev.zooid.mirror': true,
+        },
+        'm.relates_to': { rel_type: 'm.replace', event_id: '$mirror' },
+      },
+    }
+    expect(route(edit, agents)).toEqual([])
+  })
+
+  it('still routes a real agent prose message that quotes a mention', () => {
+    const matches = route(
+      msg({
+        room: '!room1:example.com',
+        sender: '@monitor:example.com',
+        body: 'handing off to @architect:example.com',
+      }),
+      agents,
+    )
+    expect(matches.map((m) => m.name)).toEqual(['architect'])
+  })
+})
+
 describe('directional thread continuation (agent-to-agent handoffs)', () => {
   const parent: AgentBinding = {
     name: 'parent',

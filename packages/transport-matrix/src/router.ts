@@ -1,4 +1,5 @@
 import type { RoomBinding } from '@zooid/core'
+import { TURN_MIRROR_MARKER } from './event-encoders.js'
 import { extractMentions } from './mentions.js'
 import { isExpiredTrigger } from './trigger-freshness.js'
 
@@ -27,6 +28,28 @@ export const MEDIA_MSGTYPES = new Set(['m.image', 'm.file', 'm.video', 'm.audio'
 
 export function isMediaMsgtype(t: string | undefined): boolean {
   return t !== undefined && MEDIA_MSGTYPES.has(t)
+}
+
+/**
+ * True when a Matrix message is the transport's own per-turn display mirror
+ * rather than real content. The marker rides on the notice and is repeated in
+ * `m.new_content`, which is the content a client applies for an `m.replace`
+ * edit, so both the create and each edit are recognised.
+ *
+ * The mirror echoes tool activity verbatim, and a context-MCP result such as
+ * `zooid_get_history` quotes old messages — including their `@agent` mentions.
+ * Routing must never treat that as a fresh mention, or an agent wakes itself
+ * or a peer in a loop with no actual question. See [[ZOD039]].
+ */
+export function isMirrorNotice(content: Record<string, unknown> | undefined): boolean {
+  if (!content) return false
+  if (content[TURN_MIRROR_MARKER] === true) return true
+  const replacement = content['m.new_content']
+  return (
+    typeof replacement === 'object' &&
+    replacement !== null &&
+    (replacement as Record<string, unknown>)[TURN_MIRROR_MARKER] === true
+  )
 }
 
 export interface ThreadState {
@@ -83,6 +106,7 @@ export function route(
   if (event.type !== 'm.room.message') return []
   if (!event.content?.msgtype) return []
   if (isMediaMsgtype(event.content.msgtype)) return []
+  if (isMirrorNotice(event.content as Record<string, unknown> | undefined)) return []
   if (isExpiredTrigger(event, Date.now())) {
     const stamp = event.content['dev.zooid.trigger']
     const ageMs = stamp?.fired_at !== undefined ? Date.now() - stamp.fired_at : undefined
