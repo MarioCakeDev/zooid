@@ -28,21 +28,37 @@ function fakeRegistry() {
 
 function fakeApprovals() {
   const e = new EventEmitter()
+  // Minimal in-memory model of ApprovalCorrelator's pending map so the
+  // interactive-approval paths (get / resolveById) behave realistically,
+  // including idempotency: a resolved approval leaves the map.
+  const pending = new Map<string, { options: Array<{ optionId: string; name: string; kind: string }> }>()
   return Object.assign(e, {
     register: vi.fn(),
     resolve: vi.fn(() => true),
+    get: vi.fn((id: string) => pending.get(id)),
+    resolveById: vi.fn((id: string) => {
+      if (!pending.has(id)) return false
+      pending.delete(id)
+      e.emit('resolved', { approvalId: id })
+      return true
+    }),
     cancelSession: vi.fn(),
     listPending: vi.fn(() => []),
+    /** Test helper: make an approval id resolvable. */
+    __seed(approvalId: string, options: Array<{ optionId: string; name: string; kind: string }> = []) {
+      pending.set(approvalId, { options })
+    },
   })
 }
 
 function fakeClient() {
+  let n = 0
   return {
     registerBot: vi.fn(async () => undefined),
     joinRoom: vi.fn(async () => undefined),
     leaveRoom: vi.fn(async () => undefined),
-    sendMessage: vi.fn(async () => ({ event_id: '$x' })),
-    sendCustomEvent: vi.fn(async () => ({ event_id: '$x' })),
+    sendMessage: vi.fn(async () => ({ event_id: `$msg-${++n}` })),
+    sendCustomEvent: vi.fn(async () => ({ event_id: `$custom-${++n}` })),
     setTyping: vi.fn(async () => {}),
     setPresence: vi.fn(async () => {}),
   }
@@ -1347,14 +1363,19 @@ describe('agent_message_chunk message-boundary buffering', () => {
     finishPrompt()
     await settleTurn()
 
-    expect(sentBodies(client)).toEqual(['Sure, making a list.', 'Working through them.'])
+    // Prose only — the plan's mirrored m.notice (see element mirror tests) is
+    // also a sendMessage call.
+    expect(sentBodies(client).filter((b) => !b.startsWith('🗒'))).toEqual([
+      'Sure, making a list.',
+      'Working through them.',
+    ])
     const planIdx = client.sendCustomEvent.mock.calls.findIndex(
       ([arg]) => (arg as { eventType: string }).eventType === 'dev.zooid.plan',
     )
     expect(planIdx).toBeGreaterThanOrEqual(0)
     // Order across both mocks: msg1 → plan → msg2.
     const msg1 = client.sendMessage.mock.invocationCallOrder[0]!
-    const msg2 = client.sendMessage.mock.invocationCallOrder[1]!
+    const msg2 = client.sendMessage.mock.invocationCallOrder.at(-1)!
     const plan = client.sendCustomEvent.mock.invocationCallOrder[planIdx]!
     expect(msg1).toBeLessThan(plan)
     expect(plan).toBeLessThan(msg2)
@@ -2525,5 +2546,455 @@ describe('taskActions.describeRole', () => {
       sessionKey: '$other',
     })
     expect(role).toEqual({ is_task_assignee: false, can_start_task_threads: true })
+  })
+})
+
+describe('element mirror (dev.zooid.* → threaded m.notice)', () => {
+  async function startTurnAndGetSession(root: string) {
+    const { transport, agents, client, finishPrompt, approvals } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: root,
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    return { transport, agents, client, finishPrompt, approvals, sessionId: `sess-${root}` }
+  }
+
+  const noticeBody = (arg: unknown) => (arg as { content: { body: string } }).content.body
+
+  it('mirrors a tool_call as a threaded m.notice next to the custom event', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$m1')
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+      kind: 'execute',
+      status: 'pending',
+    })
+    await settleTurn()
+    expect(
+      client.sendCustomEvent.mock.calls.some(
+        ([arg]) => (arg as { eventType: string }).eventType === 'dev.zooid.tool_call',
+      ),
+    ).toBe(true)
+    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('🔧'))
+    expect(notice).toBeDefined()
+    expect(notice![0]).toMatchObject({
+      roomId: '!r:example.com',
+      asUserId: '@architect:example.com',
+      threadRoot: '$m1',
+      content: { msgtype: 'm.notice', body: '🔧 Run tests — pending' },
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('mirrors a plan update', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$m2')
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'plan',
+      sessionId,
+      entries: [{ content: 'Buy milk', priority: 'high', status: 'pending' }],
+    })
+    await settleTurn()
+    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('🗒'))
+    expect(notice).toBeDefined()
+    expect(noticeBody(notice![0])).toBe('🗒 Plan (1 steps): Buy milk')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('mirrors the available-commands roster', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$m3')
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'available_commands',
+      sessionId,
+      commands: [{ name: 'compact', description: 'Compact context' }],
+    })
+    await settleTurn()
+    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('⌘'))
+    expect(notice).toBeDefined()
+    expect(noticeBody(notice![0])).toBe('⌘ Commands: compact')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('mirrors a dev.zooid.error, reusing its body', async () => {
+    const { transport, agents, client, finishPrompt } = makeTransport()
+    agents.prompt.mockRejectedValueOnce(new Error('boom'))
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$m4',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(
+      client.sendCustomEvent.mock.calls.some(
+        ([arg]) => (arg as { eventType: string }).eventType === 'dev.zooid.error',
+      ),
+    ).toBe(true)
+    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('⚠'))
+    expect(notice).toBeDefined()
+    expect(notice![0]).toMatchObject({
+      threadRoot: '$m4',
+      content: { msgtype: 'm.notice' },
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('does not mirror the dev.zooid.turn.end boundary marker', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$m5')
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'agent_message_chunk',
+      sessionId,
+      content: { type: 'text', text: 'done' },
+    })
+    finishPrompt()
+    await settleTurn()
+    expect(
+      client.sendCustomEvent.mock.calls.some(
+        ([arg]) => (arg as { eventType: string }).eventType === 'dev.zooid.turn.end',
+      ),
+    ).toBe(true)
+    expect(client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('finished'))).toBe(false)
+  })
+})
+
+describe('interactive approvals from a stock client', () => {
+  const approvalOptions = [
+    { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+    { optionId: 'reject-once', name: 'Reject once', kind: 'reject_once' },
+  ]
+
+  async function setupPendingApproval(root: string) {
+    const { transport, agents, client, finishPrompt, approvals } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: root,
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    const sessionId = `sess-${root}`
+    // Deterministic event ids so the tests can target the correlation map.
+    client.sendCustomEvent.mockImplementation(async (arg: { eventType: string }) => ({
+      event_id: arg.eventType === 'dev.zooid.approval_request' ? '$approval-custom' : '$other',
+    }))
+    client.sendMessage.mockImplementation(async (arg: { content: { body: string } }) => ({
+      event_id: arg.content.body.startsWith('🔐') ? '$approval-notice' : '$prose',
+    }))
+    approvals.__seed('a1', approvalOptions)
+    approvals.emit('registered', {
+      approvalId: 'a1',
+      sessionId,
+      toolCallId: 'tc-1',
+      toolTitle: 'git push',
+      options: approvalOptions,
+    })
+    await new Promise((r) => setImmediate(r))
+    return { transport, agents, client, finishPrompt, approvals, sessionId }
+  }
+
+  const noticeBody = (arg: unknown) => (arg as { content: { body: string } }).content.body
+
+  it('sends the custom approval event plus a mirrored notice', async () => {
+    const { client, finishPrompt } = await setupPendingApproval('$ap0')
+    expect(
+      client.sendCustomEvent.mock.calls.some(
+        ([arg]) => (arg as { eventType: string }).eventType === 'dev.zooid.approval_request',
+      ),
+    ).toBe(true)
+    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('🔐'))
+    expect(notice).toBeDefined()
+    expect(noticeBody(notice![0])).toContain('approve a1')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('resolves via a ✅ reaction on the custom approval event', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap1')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.reaction',
+          event_id: '$react1',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-custom' },
+            key: '✅',
+          },
+        },
+      ],
+    })
+    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+      decision: 'allow',
+      optionId: 'allow-once',
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('resolves via a ❌ reaction on the mirrored notice', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap2')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.reaction',
+          event_id: '$react2',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-notice' },
+            key: '❌',
+          },
+        },
+      ],
+    })
+    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+      decision: 'allow',
+      optionId: 'reject-once',
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('ignores a reaction from one of our own bot users', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap3')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.reaction',
+          event_id: '$react3',
+          room_id: '!r:example.com',
+          sender: '@architect:example.com',
+          content: {
+            'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-custom' },
+            key: '✅',
+          },
+        },
+      ],
+    })
+    expect(approvals.resolveById).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('ignores a reaction with a non-canonical key', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap4')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.reaction',
+          event_id: '$react4',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-custom' },
+            key: '👍',
+          },
+        },
+      ],
+    })
+    expect(approvals.resolveById).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('resolves via an "approve <id>" message', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap5')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd5',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: { msgtype: 'm.text', body: 'approve a1' },
+        },
+      ],
+    })
+    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+      decision: 'allow',
+      optionId: 'allow-once',
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('resolves via a "deny <id>" message, selecting the reject option', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap6')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd6',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: { msgtype: 'm.text', body: 'deny a1' },
+        },
+      ],
+    })
+    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+      decision: 'allow',
+      optionId: 'reject-once',
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('resolves a bare "approve" when exactly one approval is pending', async () => {
+    const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap7')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd7',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: { msgtype: 'm.text', body: 'approve' },
+        },
+      ],
+    })
+    expect(approvals.resolveById).toHaveBeenCalledWith('a1', {
+      decision: 'allow',
+      optionId: 'allow-once',
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('answers an unknown id with a notice instead of resolving or routing', async () => {
+    const { transport, agents, client, approvals, finishPrompt } = await setupPendingApproval('$ap8')
+    const ensureCalls = agents.ensureSession.mock.calls.length
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd8',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: { msgtype: 'm.text', body: 'approve nope' },
+        },
+      ],
+    })
+    expect(approvals.resolveById).not.toHaveBeenCalled()
+    expect(
+      client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('No pending approval')),
+    ).toBe(true)
+    // It must not have started a turn for the agent.
+    expect(agents.ensureSession.mock.calls.length).toBe(ensureCalls)
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('is idempotent — a second approve is refused, not re-resolved', async () => {
+    const { transport, client, approvals, finishPrompt } = await setupPendingApproval('$ap9')
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd9a',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: { msgtype: 'm.text', body: 'approve a1' },
+        },
+      ],
+    })
+    expect(approvals.resolveById).toHaveBeenCalledTimes(1)
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd9b',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: { msgtype: 'm.text', body: 'approve a1' },
+        },
+      ],
+    })
+    expect(approvals.resolveById).toHaveBeenCalledTimes(1)
+    expect(
+      client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('No pending approval')),
+    ).toBe(true)
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('does not swallow a bare "approve" when nothing is pending — it routes normally', async () => {
+    const { transport, agents, client, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$ap10',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    finishPrompt()
+    await settleTurn()
+    const ensureBefore = agents.ensureSession.mock.calls.length
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$follow10',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'approve',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$ap10' },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.ensureSession.mock.calls.length).toBeGreaterThan(ensureBefore)
+    expect(client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('No pending approval'))).toBe(false)
   })
 })

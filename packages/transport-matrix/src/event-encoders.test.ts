@@ -11,6 +11,7 @@ import {
   toErrorBody,
   toAvailableCommandsBody,
   toTurnEndBody,
+  toActivityNoticeBody,
 } from './event-encoders.js'
 
 describe('toToolCallBody', () => {
@@ -296,5 +297,99 @@ describe('toTurnEndBody', () => {
   it('carries no msgtype — a vestigial m.notice here would collide with .m.rule.suppress_notices', () => {
     const out = toTurnEndBody({ agentId: 'a', sessionId: 's', producedOutput: true }, '$r')
     expect(out).not.toHaveProperty('msgtype')
+  })
+})
+
+describe('toActivityNoticeBody', () => {
+  it('summarizes a tool_call with its title and status', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.tool_call', {
+        session_id: 's',
+        tool_call_id: 'tc-1',
+        title: 'Run tests',
+        kind: 'execute',
+        status: 'pending',
+      }),
+    ).toBe('🔧 Run tests — pending')
+  })
+
+  it('summarizes a tool_call_update with its content text and short id', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.tool_call_update', {
+        tool_call_id: 'abcdef1234567890',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+      }),
+    ).toBe('↳ ok, 12 passed (abcdef12)')
+  })
+
+  it('falls back to the status when a tool_call_update has no content', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.tool_call_update', {
+        tool_call_id: 'tc-1',
+        status: 'in_progress',
+      }),
+    ).toBe('↳ in_progress (tc-1)')
+  })
+
+  it('lists plan entries, capped', () => {
+    const entries = Array.from({ length: 6 }, (_, i) => ({ content: `step ${i}`, status: 'pending' }))
+    const body = toActivityNoticeBody('dev.zooid.plan', { entries })
+    expect(body).toContain('🗒 Plan (6 steps):')
+    expect(body).toContain('step 0; step 1; step 2; step 3')
+    expect(body).toContain('(+2 more)')
+  })
+
+  it('lists available commands', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.available_commands_update', {
+        available_commands: [{ name: 'help' }, { name: 'clear' }],
+      }),
+    ).toBe('⌘ Commands: help, clear')
+  })
+
+  it('announces an approval request with the id and both interactive replies', () => {
+    const body = toActivityNoticeBody('dev.zooid.approval_request', {
+      approval_id: 'a1b2',
+      tool_call_id: 'tc-1',
+      tool_title: 'git push',
+      options: [],
+    })
+    expect(body).toContain('🔐 Approval needed: git push (id a1b2)')
+    expect(body).toContain('approve a1b2')
+    expect(body).toContain('deny a1b2')
+    expect(body).toContain('✅')
+  })
+
+  it('mirrors an error, reusing its body (a stock client cannot render the custom event)', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.error', { body: '⚠ [x] boom', code: 'x' }),
+    ).toBe('⚠ [x] boom')
+  })
+
+  it('does not mirror the turn.end boundary marker', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.turn.end', { body: 'claude finished', agent_id: 'claude' }),
+    ).toBeNull()
+  })
+
+  it('does not mirror the workforce state event or unknown types', () => {
+    expect(toActivityNoticeBody('dev.zooid.workforce', { version: 1 })).toBeNull()
+    expect(toActivityNoticeBody('dev.zooid.something_new', { foo: 1 })).toBeNull()
+  })
+
+  it('does not mirror a body-carrying event other than error', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.plan', { body: 'custom', entries: [] }),
+    ).toBeNull()
+  })
+
+  it('caps a very long mirror body on one line', () => {
+    const body = toActivityNoticeBody('dev.zooid.tool_call', {
+      title: 'x'.repeat(1000),
+    }) as string
+    expect(body.length).toBe(400)
+    expect(body.endsWith('…')).toBe(true)
+    expect(body).not.toContain('\n')
   })
 })

@@ -126,4 +126,75 @@ describe('ApprovalCorrelator', () => {
       expect(settled).toBe('still-pending')
     })
   })
+
+  describe('resolveById (stock-client path)', () => {
+    it('resolves without knowing the session id', async () => {
+      const c = new ApprovalCorrelator()
+      const handle = c.register('agent', 's-1', req('tc-1'))
+      expect(c.resolveById(handle.approvalId, { decision: 'allow', optionId: 'allow-once' })).toBe(true)
+      await expect(handle.decisionPromise).resolves.toEqual({
+        decision: 'allow',
+        optionId: 'allow-once',
+      })
+    })
+
+    it('returns false for an unknown id', () => {
+      const c = new ApprovalCorrelator()
+      expect(c.resolveById('made-up', { decision: 'cancel' })).toBe(false)
+    })
+
+    it('is idempotent: a second resolve of the same id is a no-op', () => {
+      const c = new ApprovalCorrelator()
+      const handle = c.register('agent', 's-1', req('tc-1'))
+      expect(c.resolveById(handle.approvalId, { decision: 'cancel' })).toBe(true)
+      expect(c.resolveById(handle.approvalId, { decision: 'cancel' })).toBe(false)
+      expect(c.size()).toBe(0)
+      expect(c.listPending('s-1')).toHaveLength(0)
+    })
+
+    it('emits resolved with the decision so transports can drop correlation state', () => {
+      const c = new ApprovalCorrelator()
+      const onResolved = vi.fn()
+      c.on('resolved', onResolved)
+      const handle = c.register('agent', 's-1', req('tc-1'))
+      c.resolveById(handle.approvalId, { decision: 'allow', optionId: 'allow-once' })
+      expect(onResolved).toHaveBeenCalledWith(
+        expect.objectContaining({
+          approvalId: handle.approvalId,
+          sessionId: 's-1',
+          decision: { decision: 'allow', optionId: 'allow-once' },
+        }),
+      )
+    })
+
+    it('cancelSession also emits resolved', () => {
+      const c = new ApprovalCorrelator()
+      const onResolved = vi.fn()
+      c.on('resolved', onResolved)
+      const handle = c.register('agent', 's-1', req('tc-1'))
+      c.cancelSession('s-1')
+      expect(onResolved).toHaveBeenCalledWith(
+        expect.objectContaining({ approvalId: handle.approvalId, decision: { decision: 'cancel' } }),
+      )
+    })
+  })
+
+  describe('get', () => {
+    it('returns the pending approval including its options', () => {
+      const c = new ApprovalCorrelator()
+      const handle = c.register('agent', 's-1', req('tc-1'))
+      expect(c.get(handle.approvalId)).toMatchObject({
+        approvalId: handle.approvalId,
+        sessionId: 's-1',
+        options: handle.options,
+      })
+    })
+
+    it('returns undefined once resolved', () => {
+      const c = new ApprovalCorrelator()
+      const handle = c.register('agent', 's-1', req('tc-1'))
+      c.resolveById(handle.approvalId, { decision: 'cancel' })
+      expect(c.get(handle.approvalId)).toBeUndefined()
+    })
+  })
 })

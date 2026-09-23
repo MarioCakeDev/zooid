@@ -32,7 +32,14 @@ import {
   toAvailableCommandsBody,
   toErrorBody,
   toTurnEndBody,
+  toActivityNoticeBody,
 } from './event-encoders.js'
+import {
+  decisionForCommand,
+  parseApprovalCommand,
+  reactionCommand,
+  type ApprovalCommand,
+} from './approval-commands.js'
 import { classify } from '@zooid/acp-client'
 import { toMatrixHtml } from './markdown-to-matrix-html.js'
 import { PendingMediaStore, type PendingMediaItem } from './pending-media.js'
@@ -253,31 +260,70 @@ async function buildMediaBlocks(
   return { blocks, pathLines }
 }
 
+/**
+ * Emit the stock-client mirror for an activity event, if it has one. Returns
+ * the notice's event id (for approval correlation) or undefined. Best-effort:
+ * a failed mirror never breaks the custom-event path.
+ */
+async function sendMirrorNotice(
+  client: MatrixClient,
+  input: {
+    roomId: string
+    asUserId: string
+    threadRoot: string
+    eventType: string
+    content: Record<string, unknown>
+  },
+): Promise<string | undefined> {
+  const body = toActivityNoticeBody(input.eventType, input.content)
+  if (!body) return undefined
+  try {
+    const { event_id } = await client.sendMessage({
+      roomId: input.roomId,
+      asUserId: input.asUserId,
+      threadRoot: input.threadRoot,
+      content: { msgtype: 'm.notice', body },
+    })
+    return event_id
+  } catch (err) {
+    console.warn(`[matrix] mirror notice for ${input.eventType} failed:`, err)
+    return undefined
+  }
+}
+
 async function sendMediaError(
   ctx: { agent: AgentBinding; roomId: string; threadRoot: string },
   _err: unknown,
   message: string,
   client: MatrixClient,
 ): Promise<void> {
+  const content = toErrorBody(
+    {
+      kind: 'error' as const,
+      agentId: ctx.agent.name,
+      sessionId: null,
+      turnId: null,
+      code: 'media_failed',
+      message: message.slice(0, 250),
+      transient: false,
+    },
+    ctx.threadRoot,
+  )
   await client
     .sendCustomEvent({
       roomId: ctx.roomId,
       asUserId: ctx.agent.userId,
       eventType: 'dev.zooid.error',
-      content: toErrorBody(
-        {
-          kind: 'error' as const,
-          agentId: ctx.agent.name,
-          sessionId: null,
-          turnId: null,
-          code: 'media_failed',
-          message: message.slice(0, 250),
-          transient: false,
-        },
-        ctx.threadRoot,
-      ),
+      content,
     })
     .catch((e) => console.warn(`[matrix:${ctx.agent.name}] dev.zooid.error send failed:`, e))
+  void sendMirrorNotice(client, {
+    roomId: ctx.roomId,
+    asUserId: ctx.agent.userId,
+    threadRoot: ctx.threadRoot,
+    eventType: 'dev.zooid.error',
+    content,
+  })
 }
 const SEEN_EVENT_CAP = 5_000
 
@@ -356,6 +402,198 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
    */
   const pendingReturns = new Map<string, PendingReturn>()
   const returnKey = (agentName: string, threadRoot: string) => `${agentName}::${threadRoot}`
+
+  // ── Element-compatible mirror + interactive approvals ───────────────────
+  // Correlation for approvals answered from a stock Matrix client instead of a
+  // `dev.zooid.approval_response` custom event. `approvalByEvent` maps the
+  // event ids of the approval's custom event and its mirrored notice back to
+  // the approval; `approvalMeta` maps the approval to where it lives so a
+  // command can be scope-checked to the right room/thread and a confirmation
+  // posted in the right place.
+  interface ApprovalMeta {
+    roomId: string
+    threadRoot: string
+    asUserId: string
+  }
+  const approvalByEvent = new Map<string, string>()
+  const approvalMeta = new Map<string, ApprovalMeta>()
+
+  function forgetApproval(approvalId: string): void {
+    approvalMeta.delete(approvalId)
+    for (const [eventId, id] of approvalByEvent) {
+      if (id === approvalId) approvalByEvent.delete(eventId)
+    }
+  }
+
+  /**
+   * Send an outbound `dev.zooid.*` activity event and, when it has a mirror
+   * (see `toActivityNoticeBody`), a threaded `m.notice` so stock Element
+   * clients show it. The custom event is always sent — the Zooid client needs
+   * it. Returns both event ids.
+   */
+  async function sendActivity(input: {
+    roomId: string
+    asUserId: string
+    eventType: string
+    content: Record<string, unknown>
+    threadRoot: string
+  }): Promise<{ event_id: string; noticeEventId?: string }> {
+    const { event_id } = await client.sendCustomEvent({
+      roomId: input.roomId,
+      asUserId: input.asUserId,
+      eventType: input.eventType,
+      content: input.content,
+    })
+    const noticeEventId = await sendMirrorNotice(client, input)
+    return { event_id, noticeEventId }
+  }
+
+  function firstAgentUserIdForRoom(roomId: string): string | undefined {
+    return bindings.find((b) => b.rooms.some((r) => r.alias === roomId))?.userId
+  }
+
+  async function postApprovalNotice(
+    roomId: string | undefined,
+    threadRoot: string | undefined,
+    asUserId: string | undefined,
+    body: string,
+  ): Promise<void> {
+    if (!roomId) return
+    const sender = asUserId ?? firstAgentUserIdForRoom(roomId)
+    if (!sender) return
+    await client
+      .sendMessage({
+        roomId,
+        asUserId: sender,
+        ...(threadRoot ? { threadRoot } : {}),
+        content: { msgtype: 'm.notice', body },
+      })
+      .catch((e) => console.warn('[matrix] approval notice send failed:', e))
+  }
+
+  /**
+   * Resolve a pending approval from a command. The read of `get()` and the
+   * `resolveById()` below happen in the same synchronous tick with no `await`
+   * between them, and `resolveById` deletes the entry, so two commands for the
+   * same approval cannot both win — the loser sees `already resolved`.
+   */
+  function resolveApprovalCommand(
+    approvalId: string,
+    command: ApprovalCommand,
+  ): { resolved: boolean; reason?: string } {
+    const approval = approvals.get(approvalId)
+    if (!approval) return { resolved: false, reason: 'already resolved' }
+    const mapped = decisionForCommand(command, approval.options)
+    if (!mapped.ok) return { resolved: false, reason: mapped.reason }
+    const ok = approvals.resolveById(approvalId, mapped.decision)
+    return { resolved: ok, reason: ok ? undefined : 'already resolved' }
+  }
+
+  /**
+   * Resolve a pending approval and post the outcome notice in its thread.
+   * Shared by the reaction, explicit-id, and bare-command paths.
+   */
+  async function applyApprovalCommand(
+    approvalId: string,
+    command: ApprovalCommand,
+    meta: ApprovalMeta,
+  ): Promise<void> {
+    const result = resolveApprovalCommand(approvalId, command)
+    await postApprovalNotice(
+      meta.roomId,
+      meta.threadRoot,
+      meta.asUserId,
+      approvalOutcomeNotice(approvalId, command, result),
+    )
+  }
+
+  function approvalOutcomeNotice(
+    approvalId: string,
+    command: ApprovalCommand,
+    result: { resolved: boolean; reason?: string },
+  ): string {
+    if (result.resolved) return `✅ Approval ${command === 'approve' ? 'granted' : 'denied'}.`
+    // A `decisionForCommand` failure leaves the approval pending — say so,
+    // rather than claiming it was resolved.
+    if (result.reason && result.reason !== 'already resolved') {
+      return `Could not ${command} approval ${approvalId}: ${result.reason}.`
+    }
+    return `Approval ${approvalId} was already resolved.`
+  }
+
+  /** Returns true when the reaction was an approval decision we handled. */
+  async function handleApprovalReaction(evt: MatrixEvent): Promise<boolean> {
+    const rel = evt.content?.['m.relates_to'] as
+      | { rel_type?: string; event_id?: string; key?: string }
+      | undefined
+    if (!rel || rel.rel_type !== 'm.annotation' || !rel.event_id) return false
+    // The reaction key is top-level `key` per the m.reaction schema; some
+    // clients duplicate it into the relation. Accept either.
+    const command = reactionCommand(evt.content?.key ?? rel.key)
+    if (!command) return false
+    // Agents must not approve their own (or each other's) requests.
+    if (evt.sender && ourBotUserIds.has(evt.sender)) return false
+    const approvalId = approvalByEvent.get(rel.event_id)
+    if (!approvalId) return false
+    const meta = approvalMeta.get(approvalId)
+    if (!meta || meta.roomId !== evt.room_id) return false
+    await applyApprovalCommand(approvalId, command, meta)
+    return true
+  }
+
+  async function maybeHandleApprovalMessage(evt: MatrixEvent): Promise<boolean> {
+    const body = typeof evt.content?.body === 'string' ? evt.content.body : ''
+    const parsed = parseApprovalCommand(body)
+    if (!parsed) return false
+    if (evt.sender && ourBotUserIds.has(evt.sender)) return false
+    const threadRoot = inboundThreadRoot(evt)
+
+    if (parsed.approvalId) {
+      const meta = approvalMeta.get(parsed.approvalId)
+      if (!meta) {
+        await postApprovalNotice(
+          evt.room_id,
+          threadRoot,
+          undefined,
+          `No pending approval \`${parsed.approvalId}\`.`,
+        )
+        return true
+      }
+      if (meta.roomId !== evt.room_id || (threadRoot && meta.threadRoot !== threadRoot)) {
+        await postApprovalNotice(
+          evt.room_id,
+          threadRoot,
+          undefined,
+          `Approval \`${parsed.approvalId}\` is not pending in this thread.`,
+        )
+        return true
+      }
+      await applyApprovalCommand(parsed.approvalId, parsed.command, meta)
+      return true
+    }
+
+    // Bare `approve` / `deny`: only meaningful when exactly one approval is
+    // pending in this room/thread. Zero pending → not an approval command (it
+    // may be ordinary prose), so let it route normally; more than one → refuse
+    // rather than guess.
+    const candidates = [...approvalMeta.entries()].filter(
+      ([, m]) => m.roomId === evt.room_id && (threadRoot ? m.threadRoot === threadRoot : true),
+    )
+    if (candidates.length === 0) return false
+    if (candidates.length > 1) {
+      await postApprovalNotice(
+        evt.room_id,
+        threadRoot,
+        undefined,
+        `${candidates.length} approvals are pending here — include the id: ` +
+          '`approve <id>` or `deny <id>`.',
+      )
+      return true
+    }
+    const [approvalId, meta] = candidates[0]
+    await applyApprovalCommand(approvalId, parsed.command, meta)
+    return true
+  }
 
   function stashReturn(
     sender: AgentBinding,
@@ -527,9 +765,13 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       const callee = bindings.find((binding) => binding.userId === userId)
       if (!callee || callee.name === ctx.agent.name) continue
       if (invocations.isOutstandingAncestor(sessionKey, callee.name)) {
+        const content = { body: `⚠ [handoff_circular] Cannot hand off to ${callee.name}: it is waiting on ${ctx.agent.name}`, code: 'handoff_circular', message: `Cannot hand off to ${callee.name}: it is waiting on ${ctx.agent.name}`, transient: false, 'm.relates_to': { rel_type: 'm.thread', event_id: ctx.threadRoot } }
         void client.sendCustomEvent({
-          roomId: ctx.roomId, asUserId: ctx.agent.userId, eventType: 'dev.zooid.error',
-          content: { body: `⚠ [handoff_circular] Cannot hand off to ${callee.name}: it is waiting on ${ctx.agent.name}`, code: 'handoff_circular', message: `Cannot hand off to ${callee.name}: it is waiting on ${ctx.agent.name}`, transient: false, 'm.relates_to': { rel_type: 'm.thread', event_id: ctx.threadRoot } },
+          roomId: ctx.roomId, asUserId: ctx.agent.userId, eventType: 'dev.zooid.error', content,
+        })
+        void sendMirrorNotice(client, {
+          roomId: ctx.roomId, asUserId: ctx.agent.userId, threadRoot: ctx.threadRoot,
+          eventType: 'dev.zooid.error', content,
         })
         continue
       }
@@ -652,14 +894,15 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     body['m.relates_to'] = { rel_type: 'm.thread', event_id: ctx.threadRoot }
     const tail = (sendQueue.get(event.sessionId) ?? Promise.resolve()).then(async () => {
       try {
-        await client.sendCustomEvent({
+        await sendActivity({
           roomId: ctx.roomId,
           asUserId: ctx.agent.userId,
           eventType,
           content: body,
+          threadRoot: ctx.threadRoot,
         })
       } catch (err) {
-        console.warn(`[matrix:${name}] sendCustomEvent(${eventType}) failed:`, err)
+        console.warn(`[matrix:${name}] sendActivity(${eventType}) failed:`, err)
       }
     })
     sendQueue.set(event.sessionId, tail)
@@ -689,13 +932,33 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (handle.toolKind !== undefined) content.tool_kind = handle.toolKind
     if (handle.toolTitle !== undefined) content.tool_title = handle.toolTitle
     if (handle.toolInput !== undefined) content.tool_input = handle.toolInput
-    void client.sendCustomEvent({
+    approvalMeta.set(handle.approvalId, {
       roomId: ctx.roomId,
+      threadRoot: ctx.threadRoot,
       asUserId: ctx.agent.userId,
-      eventType: 'dev.zooid.approval_request',
-      content,
     })
+    void (async () => {
+      try {
+        const { event_id, noticeEventId } = await sendActivity({
+          roomId: ctx.roomId,
+          asUserId: ctx.agent.userId,
+          eventType: 'dev.zooid.approval_request',
+          content,
+          threadRoot: ctx.threadRoot,
+        })
+        // Both the custom event and its mirror are valid reaction targets.
+        approvalByEvent.set(event_id, handle.approvalId)
+        if (noticeEventId) approvalByEvent.set(noticeEventId, handle.approvalId)
+      } catch (err) {
+        console.warn(`[matrix] approval_request send failed:`, err)
+      }
+    })()
   })
+
+  // Drop correlation state as soon as an approval leaves the pending map, so a
+  // late reaction cannot resolve a different approval and the maps don't grow.
+  approvals.on('resolved', ({ approvalId }: { approvalId: string }) => forgetApproval(approvalId))
+  approvals.on('timeout', ({ approvalId }: { approvalId: string }) => forgetApproval(approvalId))
 
   function reportTurnFailure(agent: AgentBinding, input: TurnInput, err: unknown): void {
     console.error(`[matrix] runTurn failed for ${agent.name}:`, err)
@@ -722,6 +985,13 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         content: body,
       })
       .catch((e) => console.warn(`[matrix:${agent.name}] dev.zooid.error send failed:`, e))
+    void sendMirrorNotice(client, {
+      roomId: input.roomId,
+      asUserId: agent.userId,
+      threadRoot: input.threadRoot,
+      eventType: 'dev.zooid.error',
+      content: body,
+    })
   }
 
   function enqueueTurn(agent: AgentBinding, input: TurnInput): Promise<void> {
@@ -915,6 +1185,16 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         : { decision: content.decision }
       const ok = approvals.resolve(content.session_id, content.approval_id, decision as never)
       if (!ok) console.warn(`[matrix] unknown approval ${content.approval_id}`)
+      return
+    }
+
+    // Interactive approvals from a stock client: a ✅/❌ reaction on the
+    // approval message, or a plain `approve <id>` / `deny <id>` message. These
+    // never reach the router — an approval command is not a prompt.
+    if (evt.type === 'm.reaction' && (await handleApprovalReaction(evt))) {
+      return
+    }
+    if (evt.type === 'm.room.message' && (await maybeHandleApprovalMessage(evt))) {
       return
     }
     logInbound(evt)

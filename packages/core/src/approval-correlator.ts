@@ -35,6 +35,9 @@ interface PendingEntry extends RegisteredApproval {
  *     `approval.request` on the right SSE stream.
  *   - `'timeout'`    — fires when an entry is auto-cancelled by the timer
  *     so the transport can emit `approval.timeout`.
+ *   - `'resolved'`   — fires whenever a pending entry leaves the map with a
+ *     decision (via `resolve`, `resolveById`, `cancelSession`, or the timeout)
+ *     so transports can drop any correlation state they kept for it.
  */
 export class ApprovalCorrelator extends EventEmitter {
   private readonly pending = new Map<string, PendingEntry>()
@@ -66,9 +69,7 @@ export class ApprovalCorrelator extends EventEmitter {
     if (opts.timeoutMs && opts.timeoutMs > 0) {
       entry.timer = setTimeout(() => {
         if (this.pending.get(approvalId) !== entry) return
-        entry.resolve({ decision: 'cancel' })
-        this.pending.delete(approvalId)
-        this.bySession.get(sessionId)?.delete(approvalId)
+        this.settle(entry, { decision: 'cancel' })
         this.emit('timeout', { approvalId, sessionId, agentName })
       }, opts.timeoutMs)
       entry.timer.unref?.()
@@ -91,11 +92,40 @@ export class ApprovalCorrelator extends EventEmitter {
   ): boolean {
     const entry = this.pending.get(approvalId)
     if (!entry || entry.sessionId !== sessionId) return false
+    this.settle(entry, decision)
+    return true
+  }
+
+  /**
+   * Resolve without the caller having to know the session id — used by the
+   * Matrix transport's reaction / `approve <id>` paths, which correlate the
+   * approval id to its message first. Returns false when the approval is
+   * unknown or already resolved, so a double approve is a no-op.
+   */
+  resolveById(approvalId: string, decision: ApprovalDecision): boolean {
+    const entry = this.pending.get(approvalId)
+    if (!entry) return false
+    this.settle(entry, decision)
+    return true
+  }
+
+  /** The pending approval with this id, or undefined. */
+  get(approvalId: string): RegisteredApproval | undefined {
+    const entry = this.pending.get(approvalId)
+    return entry ? this.toPublic(entry) : undefined
+  }
+
+  private settle(entry: PendingEntry, decision: ApprovalDecision): void {
     if (entry.timer) clearTimeout(entry.timer)
     entry.resolve(decision)
-    this.pending.delete(approvalId)
-    this.bySession.get(sessionId)?.delete(approvalId)
-    return true
+    this.pending.delete(entry.approvalId)
+    this.bySession.get(entry.sessionId)?.delete(entry.approvalId)
+    this.emit('resolved', {
+      approvalId: entry.approvalId,
+      sessionId: entry.sessionId,
+      agentName: entry.agentName,
+      decision,
+    })
   }
 
   cancelSession(sessionId: string): void {
@@ -103,11 +133,7 @@ export class ApprovalCorrelator extends EventEmitter {
     if (!ids) return
     for (const id of [...ids]) {
       const entry = this.pending.get(id)
-      if (entry) {
-        if (entry.timer) clearTimeout(entry.timer)
-        entry.resolve({ decision: 'cancel' })
-        this.pending.delete(id)
-      }
+      if (entry) this.settle(entry, { decision: 'cancel' })
     }
     this.bySession.delete(sessionId)
   }

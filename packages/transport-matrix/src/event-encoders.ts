@@ -111,6 +111,102 @@ export function toErrorBody(evt: ErrorTap, threadRoot: string): Record<string, u
   return out
 }
 
+/** Cap a mirror notice so a huge plan / command roster stays glanceable. */
+const NOTICE_MAX = 400
+
+function clamp(s: string, max = NOTICE_MAX): string {
+  const oneLine = s.replace(/\s+/g, ' ').trim()
+  return oneLine.length > max ? oneLine.slice(0, max - 1) + '…' : oneLine
+}
+
+function nonEmptyString(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined
+}
+
+/** First display-ready text block in a tool_call_update's `content[]`. */
+function summarizeToolContent(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined
+  for (const item of content) {
+    const block = item as { text?: unknown; content?: { text?: unknown } } | null
+    if (!block) continue
+    const text = nonEmptyString(block.text) ?? nonEmptyString(block.content?.text)
+    if (text) return text
+  }
+  return undefined
+}
+
+/**
+ * Compact, human-readable mirror body for an outbound `dev.zooid.*` activity
+ * event, so a stock Matrix client (Element X / Desktop / Web) that cannot render
+ * the custom event still shows what the agent is doing. The custom event is
+ * still sent — the Zooid client needs it.
+ *
+ * Returns `null` (do not mirror) for:
+ *  - `dev.zooid.turn.end`: a per-turn boundary marker whose `body` is a
+ *    push-notification preview, not timeline content — mirroring it would add
+ *    a redundant "agent finished" line every turn;
+ *  - the `dev.zooid.workforce` state event, which lives in an `m.space`
+ *    container (Element surfaces membership through the space, not a message
+ *    timeline);
+ *  - thread results and any unknown type.
+ *
+ * `dev.zooid.error` is mirrored even though it carries a body: it is rare,
+ * high-value, and a stock client cannot render the custom event, so the
+ * duplicate line in a client that *does* render it is acceptable.
+ */
+export function toActivityNoticeBody(
+  eventType: string,
+  content: Record<string, unknown>,
+): string | null {
+  if (eventType === 'dev.zooid.error') {
+    const body = nonEmptyString(content.body)
+    return body ? clamp(body) : null
+  }
+  if (nonEmptyString(content.body)) return null
+  switch (eventType) {
+    case 'dev.zooid.tool_call': {
+      const title = nonEmptyString(content.title) ?? nonEmptyString(content.tool_call_id) ?? 'tool'
+      const detail = nonEmptyString(content.status) ?? nonEmptyString(content.kind)
+      return clamp(`🔧 ${title}${detail ? ` — ${detail}` : ''}`)
+    }
+    case 'dev.zooid.tool_call_update': {
+      const detail =
+        summarizeToolContent(content.content) ??
+        nonEmptyString(content.status) ??
+        'updated'
+      const id = nonEmptyString(content.tool_call_id)
+      return clamp(`↳ ${detail}${id ? ` (${id.slice(0, 8)})` : ''}`)
+    }
+    case 'dev.zooid.plan': {
+      const entries = Array.isArray(content.entries) ? content.entries : []
+      const lines = entries
+        .map((e) => nonEmptyString((e as Record<string, unknown> | null)?.content))
+        .filter((x): x is string => Boolean(x))
+      const head = lines.slice(0, 4).join('; ')
+      const more = lines.length > 4 ? ` (+${lines.length - 4} more)` : ''
+      return clamp(`🗒 Plan (${lines.length} steps): ${head}${more}`)
+    }
+    case 'dev.zooid.available_commands_update': {
+      const cmds = Array.isArray(content.available_commands) ? content.available_commands : []
+      const names = cmds
+        .map((c) => nonEmptyString((c as Record<string, unknown> | null)?.name))
+        .filter((x): x is string => Boolean(x))
+      return clamp(`⌘ Commands: ${names.join(', ')}`)
+    }
+    case 'dev.zooid.approval_request': {
+      const id = nonEmptyString(content.approval_id)
+      const title = nonEmptyString(content.tool_title) ?? nonEmptyString(content.tool_call_id) ?? 'a tool call'
+      const idPart = id ? ` (id ${id})` : ''
+      return clamp(
+        `🔐 Approval needed: ${title}${idPart} — reply "approve ${id ?? '<id>'}" or ` +
+          `"deny ${id ?? '<id>'}", or react ✅/❌`,
+      )
+    }
+    default:
+      return null
+  }
+}
+
 export interface TurnEnd {
   agentId: string
   sessionId: string
