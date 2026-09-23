@@ -136,23 +136,26 @@ function summarizeToolContent(content: unknown): string | undefined {
 }
 
 /**
+ * Marker on the per-turn mirror line (see `turnMirrorNoticeContent`). It rides
+ * in the notice's content and in `m.new_content`, so a client that renders the
+ * native `dev.zooid.*` events (the Zooid web client) can hide the line with a
+ * single check. Stock Element ignores the unknown field and shows the line.
+ */
+export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
+
+/**
  * Compact, human-readable mirror body for an outbound `dev.zooid.*` activity
- * event, so a stock Matrix client (Element X / Desktop / Web) that cannot render
- * the custom event still shows what the agent is doing. The custom event is
- * still sent — the Zooid client needs it.
+ * event that must stand alone in the timeline. Since the per-turn mirror line
+ * folds tool/plan/command activity into one editable notice, the only events
+ * mirrored individually are the ones a user must be able to act on:
+ *  - `dev.zooid.approval_request` — actionable (approve/deny);
+ *  - `dev.zooid.error` — rare, high-value, and a stock client cannot render
+ *    the custom event; its existing `body` is reused verbatim.
  *
- * Returns `null` (do not mirror) for:
- *  - `dev.zooid.turn.end`: a per-turn boundary marker whose `body` is a
- *    push-notification preview, not timeline content — mirroring it would add
- *    a redundant "agent finished" line every turn;
- *  - the `dev.zooid.workforce` state event, which lives in an `m.space`
- *    container (Element surfaces membership through the space, not a message
- *    timeline);
- *  - thread results and any unknown type.
- *
- * `dev.zooid.error` is mirrored even though it carries a body: it is rare,
- * high-value, and a stock client cannot render the custom event, so the
- * duplicate line in a client that *does* render it is acceptable.
+ * Returns `null` (do not mirror) for everything else, including the foldable
+ * activity events, `dev.zooid.turn.end` (a per-turn boundary marker whose
+ * `body` is a push-notification preview, not timeline content), and the
+ * `dev.zooid.workforce` state event.
  */
 export function toActivityNoticeBody(
   eventType: string,
@@ -163,47 +166,125 @@ export function toActivityNoticeBody(
     return body ? clamp(body) : null
   }
   if (nonEmptyString(content.body)) return null
+  if (eventType === 'dev.zooid.approval_request') {
+    const id = nonEmptyString(content.approval_id)
+    const title =
+      nonEmptyString(content.tool_title) ?? nonEmptyString(content.tool_call_id) ?? 'a tool call'
+    const idPart = id ? ` (id ${id})` : ''
+    return clamp(
+      `🔐 Approval needed: ${title}${idPart} — reply "approve ${id ?? '<id>'}" or ` +
+        `"deny ${id ?? '<id>'}", or react ✅/❌`,
+    )
+  }
+  return null
+}
+
+/** Distinct tools and files a turn has touched, for the final mirror line. */
+export interface TurnMirrorCounts {
+  toolCount: number
+  fileCount: number
+}
+
+/**
+ * Body of the single per-turn mirror line while the turn runs. `detail` is the
+ * latest activity (see `activityDetail`); the tool tally only appears once a
+ * tool has actually run.
+ */
+export function turnWorkingBody(agentId: string, detail: string, toolCount: number): string {
+  const tools = toolCount > 0 ? ` · ${toolCount} tool${toolCount === 1 ? '' : 's'}` : ''
+  return clamp(`🔧 ${agentId}: ${detail}${tools}`)
+}
+
+/** Body of the per-turn mirror line once the turn ends. */
+export function turnFinalBody(counts: TurnMirrorCounts, failed: boolean): string {
+  const tools = `${counts.toolCount} tool${counts.toolCount === 1 ? '' : 's'}`
+  const files = `${counts.fileCount} file${counts.fileCount === 1 ? '' : 's'}`
+  return `${failed ? '⚠️' : '✅'} ${tools} · ${files}`
+}
+
+/**
+ * Whether a foldable `dev.zooid.*` event may *create* the per-turn mirror line.
+ * Tool activity and a plan update do; `available_commands_update` does not.
+ * The session advertises its command roster during `ensureSession` (and the
+ * shim replays it at turn start), so treating commands as line-creating would
+ * put a `✅ 0 tools · 0 files` line on a prose-only turn. Commands still fold
+ * into a line that already exists (see `transport.ts` `updateTurnMirror`).
+ */
+export function createsTurnLine(eventType: string): boolean {
+  return (
+    eventType === 'dev.zooid.tool_call' ||
+    eventType === 'dev.zooid.tool_call_update' ||
+    eventType === 'dev.zooid.plan'
+  )
+}
+
+/**
+ * Latest human-readable activity from a foldable `dev.zooid.*` event, folded
+ * into the per-turn mirror line instead of being mirrored on its own.
+ */
+export function activityDetail(
+  eventType: string,
+  content: Record<string, unknown>,
+): string | undefined {
   switch (eventType) {
     case 'dev.zooid.tool_call': {
       const title = nonEmptyString(content.title) ?? nonEmptyString(content.tool_call_id) ?? 'tool'
-      const detail = nonEmptyString(content.status) ?? nonEmptyString(content.kind)
-      return clamp(`🔧 ${title}${detail ? ` — ${detail}` : ''}`)
+      const status = nonEmptyString(content.status)
+      return status ? `${title} — ${status}` : title
     }
-    case 'dev.zooid.tool_call_update': {
-      const detail =
-        summarizeToolContent(content.content) ??
-        nonEmptyString(content.status) ??
-        'updated'
-      const id = nonEmptyString(content.tool_call_id)
-      return clamp(`↳ ${detail}${id ? ` (${id.slice(0, 8)})` : ''}`)
-    }
+    case 'dev.zooid.tool_call_update':
+      return summarizeToolContent(content.content) ?? nonEmptyString(content.status) ?? 'updated'
     case 'dev.zooid.plan': {
       const entries = Array.isArray(content.entries) ? content.entries : []
-      const lines = entries
-        .map((e) => nonEmptyString((e as Record<string, unknown> | null)?.content))
-        .filter((x): x is string => Boolean(x))
-      const head = lines.slice(0, 4).join('; ')
-      const more = lines.length > 4 ? ` (+${lines.length - 4} more)` : ''
-      return clamp(`🗒 Plan (${lines.length} steps): ${head}${more}`)
+      return entries.length > 0
+        ? `plan (${entries.length} step${entries.length === 1 ? '' : 's'})`
+        : 'plan'
     }
     case 'dev.zooid.available_commands_update': {
       const cmds = Array.isArray(content.available_commands) ? content.available_commands : []
-      const names = cmds
-        .map((c) => nonEmptyString((c as Record<string, unknown> | null)?.name))
-        .filter((x): x is string => Boolean(x))
-      return clamp(`⌘ Commands: ${names.join(', ')}`)
-    }
-    case 'dev.zooid.approval_request': {
-      const id = nonEmptyString(content.approval_id)
-      const title = nonEmptyString(content.tool_title) ?? nonEmptyString(content.tool_call_id) ?? 'a tool call'
-      const idPart = id ? ` (id ${id})` : ''
-      return clamp(
-        `🔐 Approval needed: ${title}${idPart} — reply "approve ${id ?? '<id>'}" or ` +
-          `"deny ${id ?? '<id>'}", or react ✅/❌`,
-      )
+      return `commands (${cmds.length})`
     }
     default:
-      return null
+      return undefined
+  }
+}
+
+/** Content of the initial per-turn mirror notice: threaded and marked. */
+export function turnMirrorNoticeContent(
+  body: string,
+  threadRoot: string,
+): { msgtype: string; body: string; [k: string]: unknown } {
+  return {
+    msgtype: 'm.notice',
+    body,
+    [TURN_MIRROR_MARKER]: true,
+    'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
+  }
+}
+
+/**
+ * Content of an `m.replace` edit of the per-turn mirror notice. The replacement
+ * relation rides in the top-level `m.relates_to`; the thread relation goes in
+ * `m.new_content.m.relates_to` (MSC2676 + MSC3440) so Element keeps the edited
+ * line inside its thread. The marker is repeated in `m.new_content` because
+ * that is the content a client applies.
+ */
+export function turnMirrorEditContent(
+  eventId: string,
+  body: string,
+  threadRoot: string,
+): { msgtype: string; body: string; [k: string]: unknown } {
+  return {
+    msgtype: 'm.notice',
+    body: `* ${body}`,
+    [TURN_MIRROR_MARKER]: true,
+    'm.new_content': {
+      msgtype: 'm.notice',
+      body,
+      [TURN_MIRROR_MARKER]: true,
+      'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
+    },
+    'm.relates_to': { rel_type: 'm.replace', event_id: eventId },
   }
 }
 
