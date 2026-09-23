@@ -33,6 +33,11 @@ import {
   toErrorBody,
   toTurnEndBody,
   toActivityNoticeBody,
+  activityDetail,
+  turnWorkingBody,
+  turnFinalBody,
+  turnMirrorNoticeContent,
+  turnMirrorEditContent,
 } from './event-encoders.js'
 import {
   decisionForCommand,
@@ -447,6 +452,142 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     })
     const noticeEventId = await sendMirrorNotice(client, input)
     return { event_id, noticeEventId }
+  }
+
+  // ── Per-turn editable mirror line ───────────────────────────────────────
+  // v2 of the Element mirror: instead of one `m.notice` per `dev.zooid.*`
+  // event (which spammed the timeline), a turn gets ONE threaded notice that is
+  // edited in place with `m.replace` as tools run and finalized on turn end.
+  // `tool_call`, `tool_call_update`, `plan` and `available_commands_update` are
+  // folded into it; the raw custom events still go out (visible via Element's
+  // "show hidden events"). `approval_request` and `error` stay standalone
+  // because they must be actionable. The line is marked (see
+  // `TURN_MIRROR_MARKER`) so the Zooid web client can hide it.
+  interface TurnMirrorState {
+    /** Event id of the editable notice; '' until it is created. */
+    eventId: string
+    /** Last body applied — used to skip no-op (idempotent) edits. */
+    lastBody: string
+    /** Latest activity detail, folded from the most recent event. */
+    detail: string
+    /** Distinct tool_call ids seen this turn. */
+    toolCallIds: Set<string>
+    /** Distinct file paths touched this turn (from tool locations). */
+    files: Set<string>
+    finalized: boolean
+  }
+  const turnMirrors = new Map<string, TurnMirrorState>()
+
+  function isMissingEventError(err: unknown): boolean {
+    if ((err as { status?: number } | null)?.status === 404) return true
+    const msg = err instanceof Error ? err.message : String(err)
+    return /M_NOT_FOUND|not found|unknown event/i.test(msg)
+  }
+
+  async function createTurnMirror(ctx: SessionContext, body: string): Promise<string | undefined> {
+    try {
+      const { event_id } = await client.sendMessage({
+        roomId: ctx.roomId,
+        asUserId: ctx.agent.userId,
+        threadRoot: ctx.threadRoot,
+        content: turnMirrorNoticeContent(body, ctx.threadRoot),
+      })
+      return event_id
+    } catch (err) {
+      console.warn('[matrix] turn mirror create failed:', err)
+      return undefined
+    }
+  }
+
+  async function editTurnMirror(
+    ctx: SessionContext,
+    state: TurnMirrorState,
+    body: string,
+  ): Promise<void> {
+    try {
+      await client.sendMessage({
+        roomId: ctx.roomId,
+        asUserId: ctx.agent.userId,
+        content: turnMirrorEditContent(state.eventId, body, ctx.threadRoot),
+      })
+      state.lastBody = body
+    } catch (err) {
+      if (isMissingEventError(err)) {
+        // The original was redacted or otherwise gone — recreate so the summary
+        // is not silently lost, and retarget later edits at the new event.
+        const eventId = await createTurnMirror(ctx, body)
+        if (eventId) {
+          state.eventId = eventId
+          state.lastBody = body
+        }
+        return
+      }
+      // Best-effort: a failed edit never breaks the custom-event path.
+      console.warn('[matrix] turn mirror edit failed:', err)
+    }
+  }
+
+  async function updateTurnMirror(
+    sessionId: string,
+    ctx: SessionContext,
+    input: { eventType: string; content: Record<string, unknown> },
+  ): Promise<void> {
+    let state = turnMirrors.get(sessionId)
+    if (state?.finalized) return
+    if (!state) {
+      state = {
+        eventId: '',
+        lastBody: '',
+        detail: 'working…',
+        toolCallIds: new Set(),
+        files: new Set(),
+        finalized: false,
+      }
+      turnMirrors.set(sessionId, state)
+    }
+    const toolCallId =
+      typeof input.content.tool_call_id === 'string' ? input.content.tool_call_id : undefined
+    if (toolCallId) state.toolCallIds.add(toolCallId)
+    const locations = input.content.locations
+    if (Array.isArray(locations)) {
+      for (const loc of locations) {
+        const path = (loc as { path?: unknown } | null)?.path
+        if (typeof path === 'string') state.files.add(path)
+      }
+    }
+    const detail = activityDetail(input.eventType, input.content)
+    if (detail) state.detail = detail
+    const body = turnWorkingBody(ctx.agent.name, state.detail, state.toolCallIds.size)
+    if (!state.eventId) {
+      const eventId = await createTurnMirror(ctx, body)
+      if (eventId) {
+        state.eventId = eventId
+        state.lastBody = body
+      }
+      return
+    }
+    if (body === state.lastBody) return
+    await editTurnMirror(ctx, state, body)
+  }
+
+  async function finalizeTurnMirror(
+    sessionId: string,
+    ctx: SessionContext,
+    failed: boolean,
+  ): Promise<void> {
+    const state = turnMirrors.get(sessionId)
+    if (!state || state.finalized) return
+    state.finalized = true
+    if (!state.eventId) {
+      turnMirrors.delete(sessionId)
+      return
+    }
+    const body = turnFinalBody(
+      { toolCount: state.toolCallIds.size, fileCount: state.files.size },
+      failed,
+    )
+    if (body !== state.lastBody) await editTurnMirror(ctx, state, body)
+    turnMirrors.delete(sessionId)
   }
 
   function firstAgentUserIdForRoom(roomId: string): string | undefined {
@@ -901,16 +1042,18 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     body['m.relates_to'] = { rel_type: 'm.thread', event_id: ctx.threadRoot }
     const tail = (sendQueue.get(event.sessionId) ?? Promise.resolve()).then(async () => {
       try {
-        await sendActivity({
+        await client.sendCustomEvent({
           roomId: ctx.roomId,
           asUserId: ctx.agent.userId,
           eventType,
           content: body,
-          threadRoot: ctx.threadRoot,
         })
       } catch (err) {
-        console.warn(`[matrix:${name}] sendActivity(${eventType}) failed:`, err)
+        console.warn(`[matrix:${name}] sendCustomEvent(${eventType}) failed:`, err)
       }
+      // Folded into the single per-turn mirror line rather than mirrored
+      // individually. Best-effort: never affects the custom-event path.
+      await updateTurnMirror(event.sessionId, ctx, { eventType, content: body })
     })
     sendQueue.set(event.sessionId, tail)
     await tail
@@ -1537,6 +1680,14 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       // flush) to settle before announcing the turn's end — and run this even
       // when the turn above threw, so the room never hangs on a spinner.
       await (sendQueue.get(sessionId) ?? Promise.resolve())
+      // Finalize the per-turn mirror line (if the turn touched any tools) to
+      // `✅ N tools · M files`, or `⚠️` when the turn failed. Done before the
+      // turn.end below so the boundary lands after the finalized line.
+      await finalizeTurnMirror(
+        sessionId,
+        { agent, roomId, threadRoot },
+        turnError !== undefined,
+      )
       const producedOutput = (flushedCounts.get(sessionId) ?? 0) > 0
       if (!producedOutput) {
         console.warn(
@@ -1587,6 +1738,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       flushedCounts.delete(sessionId)
       lastFlushed.delete(sessionId)
       sendQueue.delete(sessionId)
+      turnMirrors.delete(sessionId)
     }
   }
 

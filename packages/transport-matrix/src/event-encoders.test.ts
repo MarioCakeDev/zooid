@@ -12,6 +12,11 @@ import {
   toAvailableCommandsBody,
   toTurnEndBody,
   toActivityNoticeBody,
+  activityDetail,
+  turnWorkingBody,
+  turnFinalBody,
+  turnMirrorNoticeContent,
+  turnMirrorEditContent,
 } from './event-encoders.js'
 
 describe('toToolCallBody', () => {
@@ -301,53 +306,6 @@ describe('toTurnEndBody', () => {
 })
 
 describe('toActivityNoticeBody', () => {
-  it('summarizes a tool_call with its title and status', () => {
-    expect(
-      toActivityNoticeBody('dev.zooid.tool_call', {
-        session_id: 's',
-        tool_call_id: 'tc-1',
-        title: 'Run tests',
-        kind: 'execute',
-        status: 'pending',
-      }),
-    ).toBe('🔧 Run tests — pending')
-  })
-
-  it('summarizes a tool_call_update with its content text and short id', () => {
-    expect(
-      toActivityNoticeBody('dev.zooid.tool_call_update', {
-        tool_call_id: 'abcdef1234567890',
-        status: 'completed',
-        content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
-      }),
-    ).toBe('↳ ok, 12 passed (abcdef12)')
-  })
-
-  it('falls back to the status when a tool_call_update has no content', () => {
-    expect(
-      toActivityNoticeBody('dev.zooid.tool_call_update', {
-        tool_call_id: 'tc-1',
-        status: 'in_progress',
-      }),
-    ).toBe('↳ in_progress (tc-1)')
-  })
-
-  it('lists plan entries, capped', () => {
-    const entries = Array.from({ length: 6 }, (_, i) => ({ content: `step ${i}`, status: 'pending' }))
-    const body = toActivityNoticeBody('dev.zooid.plan', { entries })
-    expect(body).toContain('🗒 Plan (6 steps):')
-    expect(body).toContain('step 0; step 1; step 2; step 3')
-    expect(body).toContain('(+2 more)')
-  })
-
-  it('lists available commands', () => {
-    expect(
-      toActivityNoticeBody('dev.zooid.available_commands_update', {
-        available_commands: [{ name: 'help' }, { name: 'clear' }],
-      }),
-    ).toBe('⌘ Commands: help, clear')
-  })
-
   it('announces an approval request with the id and both interactive replies', () => {
     const body = toActivityNoticeBody('dev.zooid.approval_request', {
       approval_id: 'a1b2',
@@ -367,6 +325,19 @@ describe('toActivityNoticeBody', () => {
     ).toBe('⚠ [x] boom')
   })
 
+  it('does not mirror the foldable activity events (folded into the per-turn line)', () => {
+    expect(
+      toActivityNoticeBody('dev.zooid.tool_call', { title: 'Run tests', status: 'pending' }),
+    ).toBeNull()
+    expect(
+      toActivityNoticeBody('dev.zooid.tool_call_update', { tool_call_id: 'tc-1', status: 'completed' }),
+    ).toBeNull()
+    expect(toActivityNoticeBody('dev.zooid.plan', { entries: [{ content: 'a' }] })).toBeNull()
+    expect(
+      toActivityNoticeBody('dev.zooid.available_commands_update', { available_commands: [] }),
+    ).toBeNull()
+  })
+
   it('does not mirror the turn.end boundary marker', () => {
     expect(
       toActivityNoticeBody('dev.zooid.turn.end', { body: 'claude finished', agent_id: 'claude' }),
@@ -379,17 +350,112 @@ describe('toActivityNoticeBody', () => {
   })
 
   it('does not mirror a body-carrying event other than error', () => {
-    expect(
-      toActivityNoticeBody('dev.zooid.plan', { body: 'custom', entries: [] }),
-    ).toBeNull()
+    expect(toActivityNoticeBody('dev.zooid.plan', { body: 'custom', entries: [] })).toBeNull()
+  })
+})
+
+describe('turnWorkingBody', () => {
+  it('starts as a working line with no tool tally', () => {
+    expect(turnWorkingBody('architect', 'working…', 0)).toBe('🔧 architect: working…')
   })
 
-  it('caps a very long mirror body on one line', () => {
-    const body = toActivityNoticeBody('dev.zooid.tool_call', {
-      title: 'x'.repeat(1000),
-    }) as string
+  it('appends the latest detail and a pluralized tool tally', () => {
+    expect(turnWorkingBody('architect', 'Run tests — pending', 1)).toBe(
+      '🔧 architect: Run tests — pending · 1 tool',
+    )
+    expect(turnWorkingBody('architect', 'Edit file', 2)).toBe(
+      '🔧 architect: Edit file · 2 tools',
+    )
+  })
+
+  it('clamps to one line', () => {
+    const body = turnWorkingBody('architect', 'x'.repeat(1000), 3)
     expect(body.length).toBe(400)
     expect(body.endsWith('…')).toBe(true)
     expect(body).not.toContain('\n')
+  })
+})
+
+describe('turnFinalBody', () => {
+  it('summarizes the turn', () => {
+    expect(turnFinalBody({ toolCount: 3, fileCount: 2 }, false)).toBe('✅ 3 tools · 2 files')
+  })
+
+  it('marks a failed turn', () => {
+    expect(turnFinalBody({ toolCount: 1, fileCount: 0 }, true)).toBe('⚠️ 1 tools · 0 files')
+  })
+})
+
+describe('activityDetail', () => {
+  it('uses the tool title and status for a tool_call', () => {
+    expect(
+      activityDetail('dev.zooid.tool_call', { title: 'Run tests', status: 'pending' }),
+    ).toBe('Run tests — pending')
+  })
+
+  it('falls back to the tool_call_id when there is no title', () => {
+    expect(activityDetail('dev.zooid.tool_call', { tool_call_id: 'tc-1' })).toBe('tc-1')
+  })
+
+  it('uses the content text for a tool_call_update', () => {
+    expect(
+      activityDetail('dev.zooid.tool_call_update', {
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+      }),
+    ).toBe('ok, 12 passed')
+  })
+
+  it('falls back to the status for a contentless tool_call_update', () => {
+    expect(activityDetail('dev.zooid.tool_call_update', { status: 'in_progress' })).toBe(
+      'in_progress',
+    )
+  })
+
+  it('summarizes a plan by step count', () => {
+    expect(activityDetail('dev.zooid.plan', { entries: [{ content: 'a' }, { content: 'b' }] })).toBe(
+      'plan (2 steps)',
+    )
+    expect(activityDetail('dev.zooid.plan', { entries: [] })).toBe('plan')
+  })
+
+  it('summarizes the command roster by count', () => {
+    expect(
+      activityDetail('dev.zooid.available_commands_update', {
+        available_commands: [{ name: 'help' }, { name: 'clear' }],
+      }),
+    ).toBe('commands (2)')
+  })
+
+  it('returns undefined for a non-foldable event', () => {
+    expect(activityDetail('dev.zooid.error', { body: 'x' })).toBeUndefined()
+  })
+})
+
+describe('turnMirrorNoticeContent', () => {
+  it('is a threaded m.notice carrying the mirror marker', () => {
+    expect(turnMirrorNoticeContent('🔧 architect: working…', '$root')).toEqual({
+      msgtype: 'm.notice',
+      body: '🔧 architect: working…',
+      'dev.zooid.mirror': true,
+      'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
+    })
+  })
+})
+
+describe('turnMirrorEditContent', () => {
+  it('is an m.replace of the original, with the thread relation in m.new_content', () => {
+    expect(turnMirrorEditContent('$notice', '✅ 1 tools · 0 files', '$root')).toEqual({
+      msgtype: 'm.notice',
+      body: '* ✅ 1 tools · 0 files',
+      'dev.zooid.mirror': true,
+      'm.new_content': {
+        msgtype: 'm.notice',
+        body: '✅ 1 tools · 0 files',
+        'dev.zooid.mirror': true,
+        'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
+      },
+      'm.relates_to': { rel_type: 'm.replace', event_id: '$notice' },
+    })
   })
 })

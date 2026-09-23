@@ -1363,22 +1363,20 @@ describe('agent_message_chunk message-boundary buffering', () => {
     finishPrompt()
     await settleTurn()
 
-    // Prose only — the plan's mirrored m.notice (see element mirror tests) is
-    // also a sendMessage call.
-    expect(sentBodies(client).filter((b) => !b.startsWith('🗒'))).toEqual([
-      'Sure, making a list.',
-      'Working through them.',
-    ])
+    // Prose only — the folded per-turn mirror line (its create + finalize
+    // edits) also goes through sendMessage, so select the prose by body.
+    const prose = sentBodies(client)
+      .map((body, i) => ({ body, order: client.sendMessage.mock.invocationCallOrder[i]! }))
+      .filter((c) => c.body === 'Sure, making a list.' || c.body === 'Working through them.')
+    expect(prose.map((c) => c.body)).toEqual(['Sure, making a list.', 'Working through them.'])
     const planIdx = client.sendCustomEvent.mock.calls.findIndex(
       ([arg]) => (arg as { eventType: string }).eventType === 'dev.zooid.plan',
     )
     expect(planIdx).toBeGreaterThanOrEqual(0)
     // Order across both mocks: msg1 → plan → msg2.
-    const msg1 = client.sendMessage.mock.invocationCallOrder[0]!
-    const msg2 = client.sendMessage.mock.invocationCallOrder.at(-1)!
     const plan = client.sendCustomEvent.mock.invocationCallOrder[planIdx]!
-    expect(msg1).toBeLessThan(plan)
-    expect(plan).toBeLessThan(msg2)
+    expect(prose[0]!.order).toBeLessThan(plan)
+    expect(plan).toBeLessThan(prose[1]!.order)
   })
 })
 
@@ -2549,7 +2547,7 @@ describe('taskActions.describeRole', () => {
   })
 })
 
-describe('element mirror (dev.zooid.* → threaded m.notice)', () => {
+describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
   async function startTurnAndGetSession(root: string) {
     const { transport, agents, client, finishPrompt, approvals } = makeTransport()
     await postTxn(transport.app, {
@@ -2572,11 +2570,23 @@ describe('element mirror (dev.zooid.* → threaded m.notice)', () => {
     return { transport, agents, client, finishPrompt, approvals, sessionId: `sess-${root}` }
   }
 
-  const noticeBody = (arg: unknown) => (arg as { content: { body: string } }).content.body
+  type SendArg = { content: Record<string, unknown> & { body?: string } }
+  type Agents = ReturnType<typeof makeTransport>['agents']
+  const contentOf = (arg: unknown) => (arg as SendArg).content
+  const noticeBody = (arg: unknown) => String(contentOf(arg).body ?? '')
+  const onEvent = (agents: Agents, name: string, event: unknown) =>
+    (agents.onEvent as (n: string, e: unknown) => unknown)(name, event)
 
-  it('mirrors a tool_call as a threaded m.notice next to the custom event', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$m1')
-    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+  const creates = (client: ReturnType<typeof makeTransport>['client']) =>
+    client.sendMessage.mock.calls.filter(([a]) => String(contentOf(a).body ?? '').startsWith('🔧'))
+  const edits = (client: ReturnType<typeof makeTransport>['client']) =>
+    client.sendMessage.mock.calls.filter(
+      ([a]) => (contentOf(a)['m.relates_to'] as { rel_type?: string } | undefined)?.rel_type === 'm.replace',
+    )
+
+  it('creates one editable threaded notice for a tool_call, marked and next to the custom event', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t1')
+    await onEvent(agents, 'architect', {
       type: 'tool_call',
       sessionId,
       toolCallId: 'tc-1',
@@ -2590,44 +2600,197 @@ describe('element mirror (dev.zooid.* → threaded m.notice)', () => {
         ([arg]) => (arg as { eventType: string }).eventType === 'dev.zooid.tool_call',
       ),
     ).toBe(true)
-    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('🔧'))
-    expect(notice).toBeDefined()
-    expect(notice![0]).toMatchObject({
+    const notices = creates(client)
+    expect(notices).toHaveLength(1)
+    expect(notices[0]![0]).toMatchObject({
       roomId: '!r:example.com',
       asUserId: '@architect:example.com',
-      threadRoot: '$m1',
-      content: { msgtype: 'm.notice', body: '🔧 Run tests — pending' },
+      threadRoot: '$t1',
+      content: {
+        msgtype: 'm.notice',
+        body: '🔧 architect: Run tests — pending · 1 tool',
+        'dev.zooid.mirror': true,
+        'm.relates_to': { rel_type: 'm.thread', event_id: '$t1' },
+      },
     })
     finishPrompt()
     await settleTurn()
   })
 
-  it('mirrors a plan update', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$m2')
-    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+  it('edits the same notice with m.replace as more activity arrives (no new notices)', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t2')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+      status: 'pending',
+    })
+    await onEvent(agents, 'architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+    })
+    await onEvent(agents, 'architect', {
       type: 'plan',
       sessionId,
-      entries: [{ content: 'Buy milk', priority: 'high', status: 'pending' }],
+      entries: [{ content: 'a', priority: 'high', status: 'pending' }],
     })
-    await settleTurn()
-    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('🗒'))
-    expect(notice).toBeDefined()
-    expect(noticeBody(notice![0])).toBe('🗒 Plan (1 steps): Buy milk')
-    finishPrompt()
-    await settleTurn()
-  })
-
-  it('mirrors the available-commands roster', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$m3')
-    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+    await onEvent(agents, 'architect', {
       type: 'available_commands',
       sessionId,
       commands: [{ name: 'compact', description: 'Compact context' }],
     })
     await settleTurn()
-    const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('⌘'))
-    expect(notice).toBeDefined()
-    expect(noticeBody(notice![0])).toBe('⌘ Commands: compact')
+    expect(creates(client)).toHaveLength(1)
+    const createIdx = client.sendMessage.mock.calls.findIndex(([a]) =>
+      String(contentOf(a).body ?? '').startsWith('🔧'),
+    )
+    const createdId = (
+      (await client.sendMessage.mock.results[createIdx]!.value) as { event_id: string }
+    ).event_id
+    const replaces = edits(client)
+    expect(replaces).toHaveLength(3)
+    for (const [arg] of replaces) {
+      const content = contentOf(arg)
+      // Same original event id for every edit.
+      expect(content['m.relates_to']).toEqual({ rel_type: 'm.replace', event_id: createdId })
+      // Thread relation and marker survive in the applied content.
+      expect(content['m.new_content']).toMatchObject({
+        'dev.zooid.mirror': true,
+        'm.relates_to': { rel_type: 'm.thread', event_id: '$t2' },
+      })
+    }
+    // No foldable event got a standalone notice.
+    expect(
+      client.sendMessage.mock.calls.filter(([a]) => {
+        const body = String(contentOf(a).body ?? '')
+        return body.startsWith('↳') || body.startsWith('🗒') || body.startsWith('⌘')
+      }),
+    ).toHaveLength(0)
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('counts distinct tools and files and finalizes on turn end', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t3')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Read file',
+      locations: [{ path: '/a' }, { path: '/b' }],
+    })
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-2',
+      title: 'Edit file',
+      locations: [{ path: '/a' }],
+    })
+    finishPrompt()
+    await settleTurn()
+    const finalEdit = edits(client).find(([a]) =>
+      String(contentOf(a).body ?? '').includes('✅'),
+    )
+    expect(finalEdit).toBeDefined()
+    expect(contentOf(finalEdit![0]).body).toBe('* ✅ 2 tools · 2 files')
+    expect(contentOf(finalEdit![0])['m.new_content']).toMatchObject({
+      body: '✅ 2 tools · 2 files',
+      'dev.zooid.mirror': true,
+    })
+  })
+
+  it('does not create a mirror line for a turn with no folded activity', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t4')
+    await onEvent(agents, 'architect', {
+      type: 'agent_message_chunk',
+      sessionId,
+      content: { type: 'text', text: 'just prose' },
+    })
+    finishPrompt()
+    await settleTurn()
+    expect(client.sendMessage.mock.calls.some(([a]) => contentOf(a)['dev.zooid.mirror'])).toBe(false)
+  })
+
+  it('marks a failed turn with a ⚠️ summary', async () => {
+    const { transport, agents, client } = makeTransport()
+    let rejectPrompt: ((err: unknown) => void) | undefined
+    agents.prompt.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => (rejectPrompt = reject)),
+    )
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$t5',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId: 'sess-$t5',
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    })
+    await settleTurn()
+    rejectPrompt!(new Error('boom'))
+    await settleTurn()
+    const finalEdit = edits(client).find(([a]) =>
+      String(contentOf(a).body ?? '').includes('⚠️'),
+    )
+    expect(finalEdit).toBeDefined()
+    expect(contentOf(finalEdit![0]).body).toBe('* ⚠️ 1 tools · 0 files')
+  })
+
+  it('skips an edit whose body is unchanged (idempotent)', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t6')
+    const evt = {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    }
+    await onEvent(agents, 'architect', evt)
+    await onEvent(agents, 'architect', evt)
+    await settleTurn()
+    expect(creates(client)).toHaveLength(1)
+    expect(edits(client)).toHaveLength(0)
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('recreates the notice when the edit target is gone', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t7')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    })
+    await settleTurn()
+    client.sendMessage.mockRejectedValueOnce(
+      Object.assign(new Error('M_NOT_FOUND: unknown event'), { status: 404 }),
+    )
+    await onEvent(agents, 'architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'completed',
+    })
+    await settleTurn()
+    expect(creates(client)).toHaveLength(2)
     finishPrompt()
     await settleTurn()
   })
