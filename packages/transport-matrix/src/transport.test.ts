@@ -3027,6 +3027,17 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
   })
 
+  it('ignores an orphan tool_call_update (no raw-id line)', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g14')
+    // An update for an id we never saw as a `tool_call` must not materialise a
+    // `• tc-1` line: `ToolCallUpdateEvent` carries no title to name it.
+    await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
+    await settleTurn()
+    expect(lines(client)).toEqual([])
+    finishPrompt()
+    await settleTurn()
+  })
+
   it('mirrors a dev.zooid.error, reusing its body', async () => {
     const { transport, agents, client, finishPrompt } = makeTransport()
     agents.prompt.mockRejectedValueOnce(new Error('boom'))

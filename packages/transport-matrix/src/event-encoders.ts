@@ -124,10 +124,11 @@ function nonEmptyString(v: unknown): string | undefined {
 }
 
 /**
- * Marker on the per-turn mirror line (see `turnMirrorNoticeContent`). It rides
- * in the notice's content and in `m.new_content`, so a client that renders the
- * native `dev.zooid.*` events (the Zooid web client) can hide the line with a
- * single check. Stock Element ignores the unknown field and shows the line.
+ * Marker on every mirror line (create and edit; see `turnMirrorNoticeContent` /
+ * `turnMirrorEditContent`). It rides in the notice's content and in
+ * `m.new_content`, so a client that renders the native `dev.zooid.*` events (the
+ * Zooid web client) can hide the line with a single check, and the router guard
+ * never routes it as a mention. Stock Element ignores the unknown field.
  */
 export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
 
@@ -175,11 +176,10 @@ export interface TurnMirrorCounts {
 
 /**
  * One tool's latest state, keyed by `tool_call_id` and held in first-seen
- * order. The per-turn `<details>` list is an append-only list of these: a new
- * `tool_call_id` appends one, and a later `tool_call_update` for the same id
- * mutates that entry in place (title/status) — never a duplicate. Only the
- * title and status are kept: the block is titles + status, never raw tool
- * output.
+ * order. A mirror line lists the entries of one prose gap: a new `tool_call_id`
+ * appends one, and a later `tool_call_update` for the same id mutates that entry
+ * in place (title/status) — never a duplicate. Only the title and status are
+ * kept: the line is titles + status, never raw tool output.
  */
 export interface TurnToolEntry {
   toolCallId: string

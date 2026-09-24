@@ -653,6 +653,11 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         // prose has since closed that group.
         group = seen
       } else {
+        // A `tool_call_update` for an id we never saw as a `tool_call` is
+        // orphaned: `ToolCallUpdateEvent` carries no title, so it could only
+        // materialise a useless raw-id line (`• tc-1`). Drop it — only a real
+        // `tool_call` starts an entry.
+        if (eventType === 'dev.zooid.tool_call_update') return
         group = state.current ?? newMirrorGroup()
         state.current = group
         state.toolGroup.set(toolCallId, group)

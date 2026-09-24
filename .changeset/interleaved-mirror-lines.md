@@ -22,8 +22,11 @@ place as more tools run:
   execution is clear;
 - a `plan` joins the same line as its gap's tools (`· 🗒 plan (2 steps)`);
   `available_commands_update` is session metadata and is not mirrored;
+- an orphan `tool_call_update` (an id never seen as a `tool_call`) is ignored —
+  it carries no title, so it could only produce a useless raw-id line `• tc-1`;
 - turn end posts one `✅ <agent>: done · N tools · M files` line
-  (`⚠️ … failed`); a turn with no tool/plan activity still gets no line.
+  (`⚠️ … failed`); the counts are distinct tools, not lines; a turn with no
+  tool/plan activity still gets no line.
 
 Each line carries the `dev.zooid.mirror` marker, so the router guard still drops
 it as a mention and the Zooid web client can hide it. `approval_request` and
