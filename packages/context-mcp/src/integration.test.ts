@@ -180,6 +180,73 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
     expect(JSON.parse((infoA.content as Array<{ text: string }>)[0].text).id).toBe('!a:hs')
     expect(JSON.parse((infoB.content as Array<{ text: string }>)[0].text).id).toBe('!b:hs')
   })
+
+  async function startClientAgainst(registry: SpawnRegistry, spawnId: string) {
+    const sockPath = join(tmpdir(), `zooid-it-${randomUUID()}.sock`)
+    const server = await startDaemonSocketServer({ sockPath, registry, agentName: 'architect' })
+    cleanup.push(() => server.close())
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [BIN, '--spawn-id', spawnId],
+      env: { ...process.env, ZOOID_DAEMON_SOCK: sockPath } as Record<string, string>,
+    })
+    const client = new Client({ name: 'it', version: '0.0.1' }, { capabilities: {} })
+    await client.connect(transport)
+    cleanup.push(async () => {
+      await client.close()
+    })
+    return client
+  }
+
+  it('connects and serves read tools while the daemon role query never returns', async () => {
+    const registry = new SpawnRegistry()
+    const spawnId = registry.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!room:hs', threadId: '!room:hs' },
+      provider: fakeProvider({
+        getRoomInfo: async () => ({ id: '!room:hs', name: 'room', transport: 'matrix' }),
+      }),
+    })
+    // A cold/blocked daemon: the role query never settles. The MCP transport
+    // must still come up, or the agent's first tool call hits `Not connected`.
+    registry.setTaskActions({
+      startTasks: async () => ({ results: [], notify: 'caller', delivery: 'd' }),
+      completeTask: async () => ({ status: 'recorded' }),
+      describeRole: () => new Promise(() => {}),
+    })
+    const client = await startClientAgainst(registry, spawnId)
+
+    const info = await client.callTool({ name: 'zooid_get_room_info', arguments: {} })
+    expect(JSON.parse((info.content as Array<{ text: string }>)[0].text).id).toBe('!room:hs')
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    expect(names).not.toContain('zooid_start_task_threads')
+  })
+
+  it('adds task tools once a slow role query resolves', async () => {
+    const registry = new SpawnRegistry()
+    const spawnId = registry.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!room:hs', threadId: '!room:hs' },
+      provider: fakeProvider(),
+    })
+    registry.setTaskActions({
+      startTasks: async () => ({ results: [], notify: 'caller', delivery: 'd' }),
+      completeTask: async () => ({ status: 'recorded' }),
+      describeRole: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        return { is_task_assignee: false, can_start_task_threads: true }
+      },
+    })
+    const client = await startClientAgainst(registry, spawnId)
+
+    let names: string[] = []
+    for (let i = 0; i < 40; i++) {
+      names = (await client.listTools()).tools.map((t) => t.name)
+      if (names.includes('zooid_start_task_threads')) break
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(names).toContain('zooid_start_task_threads')
+  })
 })
 
 describe('per-agent sockets (integration)', () => {

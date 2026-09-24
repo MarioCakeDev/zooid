@@ -378,4 +378,30 @@ describe('daemon-socket caller identity', () => {
   })
 })
 
+describe('daemon-socket cold-connect retry', () => {
+  it('retries once when the listener binds just after the first refusal', async () => {
+    const registry = new SpawnRegistry()
+    const spawnId = registry.register({
+      agentName: 'a', threadRef: { channelId: 'c', threadId: 't' }, provider: defaultProvider,
+    })
+    const sockPath = join(tmpdir(), `zooid-test-${randomUUID()}.sock`)
+    const serverPromise = new Promise<void>((resolve) => setTimeout(resolve, 10)).then(() =>
+      startDaemonSocketServer({ sockPath, registry, agentName: 'a' }),
+    )
+
+    const result = await callDaemon(sockPath, { spawnId, method: 'getRoomInfo', params: {} })
+
+    const server = await serverPromise
+    cleanup.push(() => server.close())
+    expect(result).toMatchObject({ id: '!r:hs' })
+  })
+
+  it('surfaces the connection error when the socket never appears', async () => {
+    const sockPath = join(tmpdir(), `zooid-test-${randomUUID()}.sock`)
+    await expect(
+      callDaemon(sockPath, { spawnId: 'x', method: 'getRoomInfo', params: {} }),
+    ).rejects.toThrow(/ENOENT|ECONNREFUSED/)
+  })
+})
+
 const NOT_OWNED = 'binding not owned by caller'

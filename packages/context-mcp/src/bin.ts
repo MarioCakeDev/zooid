@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { buildContextMcpServer } from './mcp-server.js'
+import { buildContextMcpServer, registerTaskTools } from './mcp-server.js'
 import { callDaemon } from './daemon-socket.js'
 import type {
   StartTasksOutput,
@@ -87,17 +87,28 @@ const remoteTasks: TaskActions = {
     }) as Promise<TaskRole>,
 }
 
-// A failed role query yields undefined, which registers neither task tool —
-// the safe direction for MCP: the tools are additive, and a spawn that
-// cannot reach the daemon cannot usefully call them anyway ([[ZOD084]]).
-const role = await callDaemon(sockPath, { spawnId, method: 'describeRole', params: {} })
-  .then((r) => r as TaskRole)
-  .catch(() => undefined)
-
+// Connect the MCP transport BEFORE the daemon role query. The old order
+// awaited a daemon round-trip first, so on a cold session (daemon recreating,
+// socket slow) the agent's first tool call reached the SDK before the transport
+// was up and failed with `Not connected` — only a manual retry worked. The
+// query is additive: the read tools are live immediately, and an allowed role
+// adds the task tools afterwards.
 const server = buildContextMcpServer({
   resolve: async () => remoteProvider,
   resolveTasks: async () => remoteTasks,
-  role,
 })
 await server.connect(new StdioServerTransport())
 process.stderr.write(`zooid-context-mcp: ready (spawnId=${spawnId})\n`)
+
+// A failed role query yields undefined, which registers neither task tool —
+// the safe direction for MCP: the tools are additive, and a spawn that
+// cannot reach the daemon cannot usefully call them anyway ([[ZOD084]]).
+// Deliberately not awaited: the stdio transport keeps the process alive, and a
+// role query that never settles must not surface as an unsettled top-level
+// await (nor delay the read tools that are already live).
+void callDaemon(sockPath, { spawnId, method: 'describeRole', params: {} })
+  .then((r) => r as TaskRole)
+  .catch(() => undefined)
+  .then((role) => {
+    if (role) registerTaskTools(server, { resolveTasks: async () => remoteTasks, role })
+  })

@@ -247,12 +247,30 @@ export async function startAgentSocketServers(opts: {
   }
 }
 
-export async function callDaemon(sockPath: string, req: DaemonRequest): Promise<unknown> {
+/** A socket error tagged with whether the connection was ever established. */
+interface SocketConnectError extends Error {
+  neverConnected?: boolean
+}
+
+/**
+ * One request per connection. A connect-phase failure (daemon recreating, its
+ * listener not yet bound) is tagged `neverConnected` so `callDaemon` can retry
+ * it without risking a duplicate write.
+ */
+function callDaemonOnce(sockPath: string, req: DaemonRequest): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(sockPath)
+    let connected = false
     let buf = ''
     socket.setEncoding('utf8')
-    socket.on('error', reject)
+    socket.on('connect', () => {
+      connected = true
+    })
+    socket.on('error', (err) => {
+      const e: SocketConnectError = err instanceof Error ? err : new Error(String(err))
+      if (!connected) e.neverConnected = true
+      reject(e)
+    })
     socket.on('data', (chunk) => {
       buf += chunk
       const idx = buf.indexOf('\n')
@@ -272,4 +290,24 @@ export async function callDaemon(sockPath: string, req: DaemonRequest): Promise<
     })
     socket.write(JSON.stringify(req) + '\n')
   })
+}
+
+/**
+ * Send one request to the daemon socket, retrying once if the connection could
+ * not be established. The daemon socket is normally listening before any agent
+ * spawns, but a daemon recreate briefly removes it; the first request then
+ * refuses and the immediate retry succeeds (the documented cold-connect race).
+ * A request that reached the server is never retried, so a `sendMessage` cannot
+ * be delivered twice.
+ */
+const CONNECT_RETRY_DELAY_MS = 50
+
+export async function callDaemon(sockPath: string, req: DaemonRequest): Promise<unknown> {
+  try {
+    return await callDaemonOnce(sockPath, req)
+  } catch (err) {
+    if (!(err as SocketConnectError).neverConnected) throw err
+    await new Promise((resolve) => setTimeout(resolve, CONNECT_RETRY_DELAY_MS))
+    return await callDaemonOnce(sockPath, req)
+  }
 }

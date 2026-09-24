@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { buildContextMcpServer } from './mcp-server.js'
+import { buildContextMcpServer, registerTaskTools } from './mcp-server.js'
 import type { TaskActions, TransportContextProvider } from '@zooid/core'
 
 function makeProvider(over: Partial<TransportContextProvider> = {}): TransportContextProvider {
@@ -81,6 +81,26 @@ describe('buildContextMcpServer', () => {
     const names = (await (await connect(server)).listTools()).tools.map((t) => t.name)
     expect(names).toContain('zooid_complete_task')
     expect(names).not.toContain('zooid_start_task_threads')
+  })
+
+  it('registerTaskTools adds task tools to an already-connected server', async () => {
+    const server = buildContextMcpServer({
+      resolve: async () => makeProvider(),
+      resolveTasks: async () => makeTasks(),
+    })
+    const client = await connect(server)
+    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain(
+      'zooid_start_task_threads',
+    )
+
+    registerTaskTools(server, {
+      resolveTasks: async () => makeTasks(),
+      role: { is_task_assignee: false, can_start_task_threads: true },
+    })
+
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    expect(names).toContain('zooid_start_task_threads')
+    expect(names).not.toContain('zooid_complete_task')
   })
 
   it('omits both task tools when no role is resolved', async () => {
