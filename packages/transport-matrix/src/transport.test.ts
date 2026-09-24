@@ -2608,11 +2608,13 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
       threadRoot: '$t1',
       content: {
         msgtype: 'm.notice',
-        body: '🔧 architect: Run tests — pending · 1 tool',
+        body: '🔧 architect: Run tests — pending',
+        format: 'org.matrix.custom.html',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$t1' },
       },
     })
+    expect(String(contentOf(notices[0]![0]).formatted_body)).toContain('<summary>🔧 architect: Run tests — pending</summary>')
     finishPrompt()
     await settleTurn()
   })
@@ -2696,9 +2698,9 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
       String(contentOf(a).body ?? '').includes('✅'),
     )
     expect(finalEdit).toBeDefined()
-    expect(contentOf(finalEdit![0]).body).toBe('* ✅ 2 tools · 2 files')
+    expect(contentOf(finalEdit![0]).body).toBe('* ✅ architect: done · 2 tools · 2 files')
     expect(contentOf(finalEdit![0])['m.new_content']).toMatchObject({
-      body: '✅ 2 tools · 2 files',
+      body: '✅ architect: done · 2 tools · 2 files',
       'dev.zooid.mirror': true,
     })
   })
@@ -2787,7 +2789,7 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
       String(contentOf(a).body ?? '').includes('⚠️'),
     )
     expect(finalEdit).toBeDefined()
-    expect(contentOf(finalEdit![0]).body).toBe('* ⚠️ 1 tool · 0 files')
+    expect(contentOf(finalEdit![0]).body).toBe('* ⚠️ architect: failed · 1 tool · 0 files')
   })
 
   it('skips an edit whose body is unchanged (idempotent)', async () => {

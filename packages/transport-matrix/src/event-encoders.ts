@@ -124,7 +124,7 @@ function nonEmptyString(v: unknown): string | undefined {
 }
 
 /** First display-ready text block in a tool_call_update's `content[]`. */
-function summarizeToolContent(content: unknown): string | undefined {
+export function summarizeToolContent(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined
   for (const item of content) {
     const block = item as { text?: unknown; content?: { text?: unknown } } | null
@@ -142,6 +142,7 @@ function summarizeToolContent(content: unknown): string | undefined {
  * single check. Stock Element ignores the unknown field and shows the line.
  */
 export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
+
 
 /**
  * Compact, human-readable mirror body for an outbound `dev.zooid.*` activity
@@ -186,20 +187,112 @@ export interface TurnMirrorCounts {
 }
 
 /**
- * Body of the single per-turn mirror line while the turn runs. `detail` is the
- * latest activity (see `activityDetail`); the tool tally only appears once a
- * tool has actually run.
+ * One tool's latest state, keyed by `tool_call_id` and held in first-seen
+ * order. The per-turn `<details>` list is an append-only list of these: a new
+ * `tool_call_id` appends one, and a later `tool_call_update` for the same id
+ * mutates that entry in place (title/status/text) — never a duplicate.
  */
-export function turnWorkingBody(agentId: string, detail: string, toolCount: number): string {
-  const tools = toolCount > 0 ? ` · ${toolCount} tool${toolCount === 1 ? '' : 's'}` : ''
-  return clamp(`🔧 ${agentId}: ${detail}${tools}`)
+export interface TurnToolEntry {
+  toolCallId: string
+  title: string
+  /** ACP `ToolCallStatus`: pending | in_progress | completed | failed. */
+  status?: string
+  /** Latest display-ready text from a `tool_call_update`'s `content[]`. */
+  text?: string
 }
 
-/** Body of the per-turn mirror line once the turn ends. */
-export function turnFinalBody(counts: TurnMirrorCounts, failed: boolean): string {
+/**
+ * Human label for an ACP `ToolCallStatus`. `in_progress` reads as "running" —
+ * the status vocabulary the summary example uses.
+ */
+export function toolStatusLabel(status: string | undefined): string | undefined {
+  switch (status) {
+    case 'pending':
+      return 'pending'
+    case 'in_progress':
+      return 'running'
+    case 'completed':
+      return 'done'
+    case 'failed':
+      return 'failed'
+    default:
+      return undefined
+  }
+}
+
+/** Leading glyph for a tool entry in the collapsed list. */
+function toolStatusIcon(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return '✓'
+    case 'failed':
+      return '✗'
+    case 'in_progress':
+      return '⏳'
+    default:
+      return '•'
+  }
+}
+
+/** Cap a single collapsed tool line so a long title stays glanceable. */
+const TOOL_LINE_MAX = 200
+
+/**
+ * Compact one-line rendering of a tool entry: `✓ bash — done`,
+ * `⏳ edit src/x.ts`, `✗ edit — failed`. The status label is appended only for
+ * terminal states — the ⏳/• glyphs already convey in-flight/pending.
+ */
+export function toolEntryLine(entry: TurnToolEntry): string {
+  const terminal = entry.status === 'completed' || entry.status === 'failed'
+  const label = terminal ? ` — ${toolStatusLabel(entry.status)}` : ''
+  return clamp(`${toolStatusIcon(entry.status)} ${entry.title}${label}`, TOOL_LINE_MAX)
+}
+
+/**
+ * Summary detail for the most recent tool: `<title>` when it has no known
+ * status, `<title> — <label>` otherwise (e.g. `bash — running`, `edit src/x.ts`).
+ */
+export function toolSummaryDetail(entry: TurnToolEntry): string {
+  const label = toolStatusLabel(entry.status)
+  return label ? `${entry.title} — ${label}` : entry.title
+}
+
+/** Escape the handful of characters that would break the formatted_body HTML. */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * The collapsible `<details>` block for the per-turn mirror line: `<summary>`
+ * (the last activity) is the first child, followed by one compact line per tool
+ * in first-seen order. There is no `open` attribute, so Element renders it
+ * collapsed by default.
+ */
+export function renderTurnDetails(summary: string, tools: TurnToolEntry[]): string {
+  const lines = tools.map((t) => escapeHtml(toolEntryLine(t))).join('<br>')
+  return `<details><summary>${escapeHtml(summary)}</summary>${lines}</details>`
+}
+
+/**
+ * Summary of the single per-turn mirror line while the turn runs: the most
+ * recent activity (a tool title, or a plan/command detail). It is the line's
+ * plain-text `body` fallback and the `<summary>` of the `<details>` block.
+ */
+export function turnWorkingBody(agentId: string, detail: string): string {
+  return clamp(`🔧 ${agentId}: ${detail}`)
+}
+
+/**
+ * Summary of the per-turn mirror line once the turn ends. Finalizing replaces
+ * the last-activity summary with the turn outcome (documented choice): a stock
+ * client's collapsed line then reads `✅ dev: done · N tools · M files` rather
+ * than a stale in-flight tool. `⚠️ … failed` when the turn threw.
+ */
+export function turnFinalBody(agentId: string, counts: TurnMirrorCounts, failed: boolean): string {
   const tools = `${counts.toolCount} tool${counts.toolCount === 1 ? '' : 's'}`
   const files = `${counts.fileCount} file${counts.fileCount === 1 ? '' : 's'}`
-  return `${failed ? '⚠️' : '✅'} ${tools} · ${files}`
+  const outcome = failed ? '⚠️' : '✅'
+  return `${outcome} ${agentId}: ${failed ? 'failed' : 'done'} · ${tools} · ${files}`
 }
 
 /**
@@ -219,21 +312,16 @@ export function createsTurnLine(eventType: string): boolean {
 }
 
 /**
- * Latest human-readable activity from a foldable `dev.zooid.*` event, folded
- * into the per-turn mirror line instead of being mirrored on its own.
+ * Latest human-readable summary detail for a foldable non-tool `dev.zooid.*`
+ * event. Tool activity is rendered from its `TurnToolEntry` (see
+ * `toolSummaryDetail`) so an update mutates one entry rather than replacing the
+ * whole line's detail with opaque content text.
  */
 export function activityDetail(
   eventType: string,
   content: Record<string, unknown>,
 ): string | undefined {
   switch (eventType) {
-    case 'dev.zooid.tool_call': {
-      const title = nonEmptyString(content.title) ?? nonEmptyString(content.tool_call_id) ?? 'tool'
-      const status = nonEmptyString(content.status)
-      return status ? `${title} — ${status}` : title
-    }
-    case 'dev.zooid.tool_call_update':
-      return summarizeToolContent(content.content) ?? nonEmptyString(content.status) ?? 'updated'
     case 'dev.zooid.plan': {
       const entries = Array.isArray(content.entries) ? content.entries : []
       return entries.length > 0
@@ -249,14 +337,27 @@ export function activityDetail(
   }
 }
 
-/** Content of the initial per-turn mirror notice: threaded and marked. */
+/**
+ * Content of the initial per-turn mirror notice: threaded and marked. `body` is
+ * the plain-text summary line (the fallback a client without HTML rendering
+ * shows); `formatted_body` is the collapsed `<details>` block.
+ */
 export function turnMirrorNoticeContent(
-  body: string,
+  summary: string,
+  formattedBody: string,
   threadRoot: string,
-): { msgtype: string; body: string; [k: string]: unknown } {
+): {
+  msgtype: string
+  body: string
+  format: string
+  formatted_body: string
+  [k: string]: unknown
+} {
   return {
     msgtype: 'm.notice',
-    body,
+    body: summary,
+    format: 'org.matrix.custom.html',
+    formatted_body: formattedBody,
     [TURN_MIRROR_MARKER]: true,
     'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
   }
@@ -267,20 +368,32 @@ export function turnMirrorNoticeContent(
  * relation rides in the top-level `m.relates_to`; the thread relation goes in
  * `m.new_content.m.relates_to` (MSC2676 + MSC3440) so Element keeps the edited
  * line inside its thread. The marker is repeated in `m.new_content` because
- * that is the content a client applies.
+ * that is the content a client applies. The top-level `body` is the `* `-prefixed
+ * fallback; `m.new_content` carries the plain summary and the HTML details.
  */
 export function turnMirrorEditContent(
   eventId: string,
-  body: string,
+  summary: string,
+  formattedBody: string,
   threadRoot: string,
-): { msgtype: string; body: string; [k: string]: unknown } {
+): {
+  msgtype: string
+  body: string
+  format: string
+  formatted_body: string
+  [k: string]: unknown
+} {
   return {
     msgtype: 'm.notice',
-    body: `* ${body}`,
+    body: `* ${summary}`,
+    format: 'org.matrix.custom.html',
+    formatted_body: formattedBody,
     [TURN_MIRROR_MARKER]: true,
     'm.new_content': {
       msgtype: 'm.notice',
-      body,
+      body: summary,
+      format: 'org.matrix.custom.html',
+      formatted_body: formattedBody,
       [TURN_MIRROR_MARKER]: true,
       'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
     },
