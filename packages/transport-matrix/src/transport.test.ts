@@ -2141,6 +2141,18 @@ describe('directional agent-to-agent handoffs', () => {
   })
 
   it('rebuildThreadState ignores a marked mirror notice when seeding mentions and callers', async () => {
+    // The mirror quotes `bebop`, which the real prose never mentions — so these
+    // assertions fail if the mirror is not skipped. (Quoting the same `@sub` the
+    // prose mentions would make the case pass with the guard removed.)
+    const bindings = [
+      ...parentSub,
+      {
+        name: 'bebop',
+        userId: '@bebop:example.com',
+        rooms: [{ alias: '!r:example.com' }],
+        trigger: 'mention' as const,
+      },
+    ]
     const client = {
       // root: human @mentions parent.
       fetchEvent: vi.fn(async () => ({
@@ -2148,8 +2160,8 @@ describe('directional agent-to-agent handoffs', () => {
         sender: '@alice:example.com',
         content: { 'm.mentions': { user_ids: ['@parent:example.com'] } },
       })),
-      // thread: a marked mirror notice from parent quotes @sub (must be ignored),
-      // then parent's real prose @mentions sub — the only genuine call.
+      // thread: a marked mirror notice from parent quotes @bebop (must be
+      // ignored), then parent's real prose @mentions sub — the only genuine call.
       fetchThreadRelations: vi.fn(async () => ({
         chunk: [
           {
@@ -2157,7 +2169,7 @@ describe('directional agent-to-agent handoffs', () => {
             sender: '@parent:example.com',
             content: {
               msgtype: 'm.notice',
-              body: '🔧 parent: zooid_get_history — @sub:example.com',
+              body: '🔧 parent: zooid_get_history — @bebop:example.com',
               'dev.zooid.mirror': true,
             },
           },
@@ -2173,7 +2185,7 @@ describe('directional agent-to-agent handoffs', () => {
         ],
       })),
     }
-    const state = await rebuildThreadState(client as never, '!r:example.com', '$root', parentSub)
+    const state = await rebuildThreadState(client as never, '!r:example.com', '$root', bindings)
     // Only the real @sub call seeded a mention/caller; the mirror quote did not.
     expect(state.rootMentions).toEqual(['parent', 'sub'])
     expect(state.callers).toEqual({ sub: 'parent' })
