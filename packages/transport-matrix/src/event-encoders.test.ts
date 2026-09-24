@@ -13,12 +13,9 @@ import {
   toTurnEndBody,
   toActivityNoticeBody,
   activityDetail,
-  createsTurnLine,
   toolStatusLabel,
   toolEntryLine,
-  toolSummaryDetail,
-  renderTurnDetails,
-  turnWorkingBody,
+  turnGroupBody,
   turnFinalBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
@@ -360,18 +357,33 @@ describe('toActivityNoticeBody', () => {
   })
 })
 
-describe('turnWorkingBody', () => {
-  it('starts as a working line', () => {
-    expect(turnWorkingBody('architect', 'working…')).toBe('🔧 architect: working…')
+describe('turnGroupBody', () => {
+  const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
+    toolCallId: 'tc-1',
+    title: 'bash',
+    ...over,
   })
 
-  it('shows the latest activity — a tool title with its status label', () => {
-    expect(turnWorkingBody('architect', 'bash — running')).toBe('🔧 architect: bash — running')
-    expect(turnWorkingBody('architect', 'edit src/x.ts')).toBe('🔧 architect: edit src/x.ts')
+  it('joins every tool in the group onto one line, in order', () => {
+    expect(
+      turnGroupBody('dev', [
+        entry({ title: 'bash', status: 'in_progress' }),
+        entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
+      ]),
+    ).toBe('🔧 dev: ⏳ bash · ✓ edit src/x.ts — done')
   })
 
-  it('clamps to one line', () => {
-    const body = turnWorkingBody('architect', 'x'.repeat(1000))
+  it('appends the plan detail as the last segment', () => {
+    expect(turnGroupBody('dev', [entry({ title: 'Read file' })], 'plan (2 steps)')).toBe(
+      '🔧 dev: • Read file · 🗒 plan (2 steps)',
+    )
+  })
+
+  it('clamps a long group line to one line', () => {
+    const many = Array.from({ length: 5 }, (_, i) =>
+      entry({ toolCallId: `tc-${i}`, title: 'y'.repeat(180), status: 'completed' }),
+    )
+    const body = turnGroupBody('dev', many)
     expect(body.length).toBe(400)
     expect(body.endsWith('…')).toBe(true)
     expect(body).not.toContain('\n')
@@ -447,75 +459,6 @@ describe('toolEntryLine', () => {
   })
 })
 
-describe('toolSummaryDetail', () => {
-  it('uses the title alone when the status is unknown', () => {
-    expect(toolSummaryDetail({ toolCallId: 'tc-1', title: 'edit src/x.ts' })).toBe(
-      'edit src/x.ts',
-    )
-  })
-
-  it('appends the human status label', () => {
-    expect(toolSummaryDetail({ toolCallId: 'tc-1', title: 'bash', status: 'in_progress' })).toBe(
-      'bash — running',
-    )
-    expect(toolSummaryDetail({ toolCallId: 'tc-1', title: 'bash', status: 'completed' })).toBe(
-      'bash — done',
-    )
-  })
-})
-
-describe('renderTurnDetails', () => {
-  it('is a collapsed <details> whose first child is <summary>', () => {
-    const html = renderTurnDetails('🔧 dev: bash — running', [
-      { toolCallId: 'tc-1', title: 'bash', status: 'in_progress' },
-    ])
-    expect(html.startsWith('<details><summary>')).toBe(true)
-    expect(html).not.toContain('open')
-    expect(html).toContain('<summary>🔧 dev: bash — running</summary>')
-    expect(html).toContain('⏳ bash')
-    expect(html.endsWith('</details>')).toBe(true)
-  })
-
-  it('lists tools in first-seen order, one line each', () => {
-    const html = renderTurnDetails('🔧 dev: edit', [
-      { toolCallId: 'tc-1', title: 'bash', status: 'completed' },
-      { toolCallId: 'tc-2', title: 'edit', status: 'failed' },
-    ])
-    expect(html.indexOf('✓ bash — done')).toBeLessThan(html.indexOf('✗ edit — failed'))
-    expect(html).toContain('✓ bash — done<br>✗ edit — failed')
-  })
-
-  it('escapes HTML-special characters in titles and summary', () => {
-    const html = renderTurnDetails('🔧 dev: <x>', [
-      { toolCallId: 'tc-1', title: 'a <b> & c', status: 'completed' },
-    ])
-    expect(html).toContain('&lt;x&gt;')
-    expect(html).toContain('a &lt;b&gt; &amp; c')
-    expect(html).not.toContain('<b>')
-  })
-
-  it('still renders a valid empty block when no tool has run yet (plan-only line)', () => {
-    expect(renderTurnDetails('🔧 dev: plan (2 steps)', [])).toBe(
-      '<details><summary>🔧 dev: plan (2 steps)</summary></details>',
-    )
-  })
-})
-
-describe('createsTurnLine', () => {
-  it('is true for tool activity and a plan update', () => {
-    expect(createsTurnLine('dev.zooid.tool_call')).toBe(true)
-    expect(createsTurnLine('dev.zooid.tool_call_update')).toBe(true)
-    expect(createsTurnLine('dev.zooid.plan')).toBe(true)
-  })
-
-  it('is false for available_commands and everything else', () => {
-    expect(createsTurnLine('dev.zooid.available_commands_update')).toBe(false)
-    expect(createsTurnLine('dev.zooid.error')).toBe(false)
-    expect(createsTurnLine('dev.zooid.turn.end')).toBe(false)
-    expect(createsTurnLine('dev.zooid.unknown')).toBe(false)
-  })
-})
-
 describe('activityDetail', () => {
   it('returns undefined for tool activity — rendered from the entry list instead', () => {
     expect(
@@ -550,13 +493,10 @@ describe('activityDetail', () => {
 })
 
 describe('turnMirrorNoticeContent', () => {
-  it('is a threaded m.notice carrying the marker, a plain summary and HTML details', () => {
-    const details = '<details><summary>🔧 architect: bash — running</summary>⏳ bash</details>'
-    expect(turnMirrorNoticeContent('🔧 architect: bash — running', details, '$root')).toEqual({
+  it('is a single threaded m.notice line carrying the marker', () => {
+    expect(turnMirrorNoticeContent('⏳ bash', '$root')).toEqual({
       msgtype: 'm.notice',
-      body: '🔧 architect: bash — running',
-      format: 'org.matrix.custom.html',
-      formatted_body: details,
+      body: '⏳ bash',
       'dev.zooid.mirror': true,
       'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
     })
@@ -565,20 +505,13 @@ describe('turnMirrorNoticeContent', () => {
 
 describe('turnMirrorEditContent', () => {
   it('is an m.replace of the original, with the thread relation in m.new_content', () => {
-    const details = '<details><summary>✅ dev: done · 1 tool · 0 files</summary>✓ bash — done</details>'
-    expect(
-      turnMirrorEditContent('$notice', '✅ dev: done · 1 tool · 0 files', details, '$root'),
-    ).toEqual({
+    expect(turnMirrorEditContent('$notice', '✓ bash — done', '$root')).toEqual({
       msgtype: 'm.notice',
-      body: '* ✅ dev: done · 1 tool · 0 files',
-      format: 'org.matrix.custom.html',
-      formatted_body: details,
+      body: '* ✓ bash — done',
       'dev.zooid.mirror': true,
       'm.new_content': {
         msgtype: 'm.notice',
-        body: '✅ dev: done · 1 tool · 0 files',
-        format: 'org.matrix.custom.html',
-        formatted_body: details,
+        body: '✓ bash — done',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
       },

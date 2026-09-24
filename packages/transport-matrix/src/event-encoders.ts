@@ -124,10 +124,11 @@ function nonEmptyString(v: unknown): string | undefined {
 }
 
 /**
- * Marker on the per-turn mirror line (see `turnMirrorNoticeContent`). It rides
- * in the notice's content and in `m.new_content`, so a client that renders the
- * native `dev.zooid.*` events (the Zooid web client) can hide the line with a
- * single check. Stock Element ignores the unknown field and shows the line.
+ * Marker on every mirror line (create and edit; see `turnMirrorNoticeContent` /
+ * `turnMirrorEditContent`). It rides in the notice's content and in
+ * `m.new_content`, so a client that renders the native `dev.zooid.*` events (the
+ * Zooid web client) can hide the line with a single check, and the router guard
+ * never routes it as a mention. Stock Element ignores the unknown field.
  */
 export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
 
@@ -175,11 +176,10 @@ export interface TurnMirrorCounts {
 
 /**
  * One tool's latest state, keyed by `tool_call_id` and held in first-seen
- * order. The per-turn `<details>` list is an append-only list of these: a new
- * `tool_call_id` appends one, and a later `tool_call_update` for the same id
- * mutates that entry in place (title/status) — never a duplicate. Only the
- * title and status are kept: the block is titles + status, never raw tool
- * output.
+ * order. A mirror line lists the entries of one prose gap: a new `tool_call_id`
+ * appends one, and a later `tool_call_update` for the same id mutates that entry
+ * in place (title/status) — never a duplicate. Only the title and status are
+ * kept: the line is titles + status, never raw tool output.
  */
 export interface TurnToolEntry {
   toolCallId: string
@@ -237,44 +237,28 @@ export function toolEntryLine(entry: TurnToolEntry): string {
 }
 
 /**
- * Summary detail for the most recent tool: `<title>` when it has no known
- * status, `<title> — <label>` otherwise (e.g. `bash — running`, `edit src/x.ts`).
+ * The single line for one run of tool/plan activity: **every tool call since the
+ * previous prose message**, joined with ` · ` — e.g.
+ * `🔧 dev: ⏳ bash · ✓ edit src/x.ts`. The line is created on the first activity
+ * after a prose message and edited in place as more tools run, so the gap
+ * between two prose messages is exactly one line (never one line per tool).
  */
-export function toolSummaryDetail(entry: TurnToolEntry): string {
-  const label = toolStatusLabel(entry.status)
-  return label ? `${entry.title} — ${label}` : entry.title
-}
-
-/** Escape the handful of characters that would break the formatted_body HTML. */
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+export function turnGroupBody(
+  agentId: string,
+  entries: TurnToolEntry[],
+  planDetail?: string,
+): string {
+  const parts = entries.map(toolEntryLine)
+  if (planDetail) parts.push(`🗒 ${planDetail}`)
+  return clamp(`🔧 ${agentId}: ${parts.join(' · ')}`)
 }
 
 /**
- * The collapsible `<details>` block for the per-turn mirror line: `<summary>`
- * (the last activity) is the first child, followed by one compact line per tool
- * in first-seen order. There is no `open` attribute, so Element renders it
- * collapsed by default.
- */
-export function renderTurnDetails(summary: string, tools: TurnToolEntry[]): string {
-  const lines = tools.map((t) => escapeHtml(toolEntryLine(t))).join('<br>')
-  return `<details><summary>${escapeHtml(summary)}</summary>${lines}</details>`
-}
-
-/**
- * Summary of the single per-turn mirror line while the turn runs: the most
- * recent activity (a tool title, or a plan/command detail). It is the line's
- * plain-text `body` fallback and the `<summary>` of the `<details>` block.
- */
-export function turnWorkingBody(agentId: string, detail: string): string {
-  return clamp(`🔧 ${agentId}: ${detail}`)
-}
-
-/**
- * Summary of the per-turn mirror line once the turn ends. Finalizing replaces
- * the last-activity summary with the turn outcome (documented choice): a stock
- * client's collapsed line then reads `✅ dev: done · N tools · M files` rather
- * than a stale in-flight tool. `⚠️ … failed` when the turn threw.
+ * The line posted once the turn ends: one new `✅ <agent>: done · N tools ·
+ * M files` notice after the last prose-gap line (`⚠️ … failed` when the turn
+ * threw). It does not edit an earlier line — the counts are the distinct tools
+ * and files for the whole turn. A turn with no tool/plan activity gets no
+ * summary.
  */
 export function turnFinalBody(agentId: string, counts: TurnMirrorCounts, failed: boolean): string {
   const tools = `${counts.toolCount} tool${counts.toolCount === 1 ? '' : 's'}`
@@ -284,25 +268,9 @@ export function turnFinalBody(agentId: string, counts: TurnMirrorCounts, failed:
 }
 
 /**
- * Whether a foldable `dev.zooid.*` event may *create* the per-turn mirror line.
- * Tool activity and a plan update do; `available_commands_update` does not.
- * The session advertises its command roster during `ensureSession` (and the
- * shim replays it at turn start), so treating commands as line-creating would
- * put a `✅ 0 tools · 0 files` line on a prose-only turn. Commands still fold
- * into a line that already exists (see `transport.ts` `updateTurnMirror`).
- */
-export function createsTurnLine(eventType: string): boolean {
-  return (
-    eventType === 'dev.zooid.tool_call' ||
-    eventType === 'dev.zooid.tool_call_update' ||
-    eventType === 'dev.zooid.plan'
-  )
-}
-
-/**
  * Latest human-readable summary detail for a foldable non-tool `dev.zooid.*`
  * event. Tool activity is rendered from its `TurnToolEntry` (see
- * `toolSummaryDetail`) so an update mutates one entry rather than replacing the
+ * `toolEntryLine`) so an update mutates one entry rather than replacing the
  * whole line's detail with opaque content text.
  */
 export function activityDetail(
@@ -326,62 +294,53 @@ export function activityDetail(
 }
 
 /**
- * Content of the initial per-turn mirror notice: threaded and marked. `body` is
- * the plain-text summary line (the fallback a client without HTML rendering
- * shows); `formatted_body` is the collapsed `<details>` block.
+ * Content of an interleaved mirror line: one threaded, marked `m.notice` for
+ * every tool/plan activity since the previous prose message. It is created on
+ * the first activity after a prose flush and edited in place as more tools run,
+ * so the timeline reads prose → tool line → prose → tool line and the order of
+ * execution is clear. The line carries no HTML — it is a single compact line of
+ * text (see `turnGroupBody`).
  */
 export function turnMirrorNoticeContent(
-  summary: string,
-  formattedBody: string,
+  body: string,
   threadRoot: string,
 ): {
   msgtype: string
   body: string
-  format: string
-  formatted_body: string
   [k: string]: unknown
 } {
   return {
     msgtype: 'm.notice',
-    body: summary,
-    format: 'org.matrix.custom.html',
-    formatted_body: formattedBody,
+    body,
     [TURN_MIRROR_MARKER]: true,
     'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
   }
 }
 
 /**
- * Content of an `m.replace` edit of the per-turn mirror notice. The replacement
- * relation rides in the top-level `m.relates_to`; the thread relation goes in
- * `m.new_content.m.relates_to` (MSC2676 + MSC3440) so Element keeps the edited
- * line inside its thread. The marker is repeated in `m.new_content` because
- * that is the content a client applies. The top-level `body` is the `* `-prefixed
- * fallback; `m.new_content` carries the plain summary and the HTML details.
+ * Content of an `m.replace` edit of an interleaved mirror line, used to mutate
+ * one tool/task line in place as its status changes (never a duplicate). The
+ * replacement relation rides in the top-level `m.relates_to`; the thread
+ * relation goes in `m.new_content.m.relates_to` (MSC2676 + MSC3440) so Element
+ * keeps the edited line inside its thread. The marker is repeated in
+ * `m.new_content` because that is the content a client applies.
  */
 export function turnMirrorEditContent(
   eventId: string,
-  summary: string,
-  formattedBody: string,
+  body: string,
   threadRoot: string,
 ): {
   msgtype: string
   body: string
-  format: string
-  formatted_body: string
   [k: string]: unknown
 } {
   return {
     msgtype: 'm.notice',
-    body: `* ${summary}`,
-    format: 'org.matrix.custom.html',
-    formatted_body: formattedBody,
+    body: `* ${body}`,
     [TURN_MIRROR_MARKER]: true,
     'm.new_content': {
       msgtype: 'm.notice',
-      body: summary,
-      format: 'org.matrix.custom.html',
-      formatted_body: formattedBody,
+      body,
       [TURN_MIRROR_MARKER]: true,
       'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
     },
