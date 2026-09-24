@@ -2676,6 +2676,50 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
     await settleTurn()
   })
 
+  it('mutates an existing tool entry in place instead of duplicating it', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$tdup')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+      status: 'pending',
+    })
+    await onEvent(agents, 'architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+    })
+    await settleTurn()
+
+    // The update mutated the tc-1 entry: its line is now the completed one,
+    // exactly once, and the pending line is gone.
+    const afterUpdate = String(contentOf(edits(client).at(-1)![0]).formatted_body)
+    expect(afterUpdate.split('✓ Run tests — done')).toHaveLength(2)
+    expect(afterUpdate).not.toContain('⏳ Run tests')
+    // Raw tool output is not folded into the mirror.
+    expect(afterUpdate).not.toContain('ok, 12 passed')
+
+    // A distinct tool_call_id appends a second line, in first-seen order.
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-2',
+      title: 'Edit file',
+      status: 'completed',
+    })
+    await settleTurn()
+    const afterSecond = String(contentOf(edits(client).at(-1)![0]).formatted_body)
+    expect(afterSecond).toContain('✓ Run tests — done<br>✓ Edit file — done')
+    expect(afterSecond.split('<br>')).toHaveLength(2)
+    expect(creates(client)).toHaveLength(1)
+
+    finishPrompt()
+    await settleTurn()
+  })
+
   it('counts distinct tools and files and finalizes on turn end', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t3')
     await onEvent(agents, 'architect', {

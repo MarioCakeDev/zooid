@@ -35,7 +35,6 @@ import {
   toActivityNoticeBody,
   activityDetail,
   createsTurnLine,
-  summarizeToolContent,
   toolSummaryDetail,
   renderTurnDetails,
   turnWorkingBody,
@@ -589,8 +588,6 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       const status = nonEmptyString(content.status)
       if (status) entry.status = status
     }
-    const text = summarizeToolContent(content.content)
-    if (text) entry.text = text
     return entry
   }
 

@@ -123,18 +123,6 @@ function nonEmptyString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined
 }
 
-/** First display-ready text block in a tool_call_update's `content[]`. */
-export function summarizeToolContent(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined
-  for (const item of content) {
-    const block = item as { text?: unknown; content?: { text?: unknown } } | null
-    if (!block) continue
-    const text = nonEmptyString(block.text) ?? nonEmptyString(block.content?.text)
-    if (text) return text
-  }
-  return undefined
-}
-
 /**
  * Marker on the per-turn mirror line (see `turnMirrorNoticeContent`). It rides
  * in the notice's content and in `m.new_content`, so a client that renders the
@@ -142,7 +130,6 @@ export function summarizeToolContent(content: unknown): string | undefined {
  * single check. Stock Element ignores the unknown field and shows the line.
  */
 export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
-
 
 /**
  * Compact, human-readable mirror body for an outbound `dev.zooid.*` activity
@@ -190,15 +177,15 @@ export interface TurnMirrorCounts {
  * One tool's latest state, keyed by `tool_call_id` and held in first-seen
  * order. The per-turn `<details>` list is an append-only list of these: a new
  * `tool_call_id` appends one, and a later `tool_call_update` for the same id
- * mutates that entry in place (title/status/text) — never a duplicate.
+ * mutates that entry in place (title/status) — never a duplicate. Raw
+ * `tool_call_update` output is deliberately not carried here: the mirror shows
+ * activity, not tool output.
  */
 export interface TurnToolEntry {
   toolCallId: string
   title: string
   /** ACP `ToolCallStatus`: pending | in_progress | completed | failed. */
   status?: string
-  /** Latest display-ready text from a `tool_call_update`'s `content[]`. */
-  text?: string
 }
 
 /**
