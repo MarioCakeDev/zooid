@@ -29,6 +29,52 @@ const CALLER_FROM_BINDING: TaskCallerRef = {
   sessionKey: '',
 }
 
+/**
+ * Register the task-writing tools a role is allowed to use. Separate from
+ * `buildContextMcpServer` so the stdio transport can connect before the daemon
+ * role query returns (the cold-connect race): the read tools are live at once,
+ * and an allowed role adds these afterwards, which the SDK announces with
+ * `notifications/tools/list_changed`.
+ */
+export function registerTaskTools(
+  server: McpServer,
+  opts: { resolveTasks: () => Promise<TaskActions>; role: TaskRole },
+): void {
+  const { resolveTasks, role } = opts
+  if (role.can_start_task_threads) {
+    server.tool(
+      'zooid_start_task_threads',
+      'Assign concurrent work to other agents in this room. Each task opens a separate thread. The return payload states how the result comes back — read `delivery` before deciding what to do next.',
+      {
+        tasks: z.array(z.object({ agent: z.string(), prompt: z.string() })).min(1),
+        notify: z.enum(['caller', 'none']).optional(),
+      },
+      async ({ tasks, notify }) => {
+        const out = await resolveTasks().then((actions) =>
+          actions.startTasks(CALLER_FROM_BINDING, {
+            tasks,
+            notify: notify ?? 'caller',
+          }),
+        )
+        return { content: [{ type: 'text', text: JSON.stringify(out) }] }
+      },
+    )
+  }
+  if (role.is_task_assignee) {
+    server.tool(
+      'zooid_complete_task',
+      'Record an explicit result for the delegated task you were assigned.',
+      { summary: z.string().min(1) },
+      async ({ summary }) => {
+        const out = await resolveTasks().then((actions) =>
+          actions.completeTask(CALLER_FROM_BINDING, { summary }),
+        )
+        return { content: [{ type: 'text', text: JSON.stringify(out) }] }
+      },
+    )
+  }
+}
+
 export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServer {
   const server = new McpServer({ name: 'zooid-context', version: '0.0.1' })
 
@@ -50,37 +96,8 @@ export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServe
     },
   )
 
-  if (opts.resolveTasks && opts.role?.can_start_task_threads) {
-    server.tool(
-      'zooid_start_task_threads',
-      'Assign concurrent work to other agents in this room. Each task opens a separate thread. The return payload states how the result comes back — read `delivery` before deciding what to do next.',
-      {
-        tasks: z.array(z.object({ agent: z.string(), prompt: z.string() })).min(1),
-        notify: z.enum(['caller', 'none']).optional(),
-      },
-      async ({ tasks, notify }) => {
-        const out = await opts.resolveTasks!().then((actions) =>
-          actions.startTasks(CALLER_FROM_BINDING, {
-            tasks,
-            notify: notify ?? 'caller',
-          }),
-        )
-        return { content: [{ type: 'text', text: JSON.stringify(out) }] }
-      },
-    )
-  }
-  if (opts.resolveTasks && opts.role?.is_task_assignee) {
-    server.tool(
-      'zooid_complete_task',
-      'Record an explicit result for the delegated task you were assigned.',
-      { summary: z.string().min(1) },
-      async ({ summary }) => {
-        const out = await opts.resolveTasks!().then((actions) =>
-          actions.completeTask(CALLER_FROM_BINDING, { summary }),
-        )
-        return { content: [{ type: 'text', text: JSON.stringify(out) }] }
-      },
-    )
+  if (opts.resolveTasks && opts.role) {
+    registerTaskTools(server, { resolveTasks: opts.resolveTasks, role: opts.role })
   }
 
   server.tool(
