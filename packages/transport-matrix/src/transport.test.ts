@@ -2139,6 +2139,64 @@ describe('directional agent-to-agent handoffs', () => {
     expect(state.rootMentions).toEqual(['parent', 'sub'])
     expect(state.participants).toEqual(['parent', 'sub'])
   })
+
+  it('rebuildThreadState ignores a marked mirror notice when seeding mentions and callers', async () => {
+    // The mirror quotes `bebop`, which the real prose never mentions — so these
+    // assertions fail if the mirror is not skipped. (Quoting the same `@sub` the
+    // prose mentions would make the case pass with the guard removed.)
+    const bindings = [
+      ...parentSub,
+      {
+        name: 'bebop',
+        userId: '@bebop:example.com',
+        rooms: [{ alias: '!r:example.com' }],
+        trigger: 'mention' as const,
+      },
+    ]
+    const client = {
+      // root: human @mentions parent.
+      fetchEvent: vi.fn(async () => ({
+        type: 'm.room.message',
+        sender: '@alice:example.com',
+        content: { 'm.mentions': { user_ids: ['@parent:example.com'] } },
+      })),
+      // thread: a marked mirror notice from parent quotes @bebop (must be
+      // ignored), then parent's real prose @mentions sub — the only genuine call.
+      fetchThreadRelations: vi.fn(async () => ({
+        chunk: [
+          {
+            event_id: '$mirror',
+            type: 'm.room.message',
+            sender: '@parent:example.com',
+            content: {
+              msgtype: 'm.notice',
+              body: '🔧 parent: zooid_get_history — @bebop:example.com',
+              'dev.zooid.mirror': true,
+            },
+          },
+          {
+            event_id: '$prose',
+            type: 'm.room.message',
+            sender: '@parent:example.com',
+            content: {
+              msgtype: 'm.text',
+              body: '@sub:example.com please run the suite',
+              'm.mentions': { user_ids: ['@sub:example.com'] },
+            },
+          },
+        ],
+      })),
+    }
+    const state = await rebuildThreadState(client as never, '!r:example.com', '$root', bindings)
+    // Only the real @sub call seeded a mention/caller; the mirror quote did not.
+    expect(state.rootMentions).toEqual(['parent', 'sub'])
+    expect(state.callers).toEqual({ sub: 'parent' })
+    // Only the genuine @sub arc is recorded — the mirror's `$mirror` event id
+    // must never become a handoff arc (the arc is what actually re-routes).
+    expect(state.handoffs).toEqual({ sub: ['$prose'] })
+    // The mirror notice is not parent "participating" in the thread.
+    expect(state.participants).toEqual(['parent'])
+  })
 })
 
 describe('per-handoff session isolation ([[ZOD071]])', () => {
