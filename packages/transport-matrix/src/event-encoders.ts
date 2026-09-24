@@ -254,10 +254,11 @@ export function turnGroupBody(
 }
 
 /**
- * Summary of the per-turn mirror line once the turn ends. Finalizing replaces
- * the last-activity summary with the turn outcome (documented choice): a stock
- * client's collapsed line then reads `✅ dev: done · N tools · M files` rather
- * than a stale in-flight tool. `⚠️ … failed` when the turn threw.
+ * The line posted once the turn ends: one new `✅ <agent>: done · N tools ·
+ * M files` notice after the last prose-gap line (`⚠️ … failed` when the turn
+ * threw). It does not edit an earlier line — the counts are the distinct tools
+ * and files for the whole turn. A turn with no tool/plan activity gets no
+ * summary.
  */
 export function turnFinalBody(agentId: string, counts: TurnMirrorCounts, failed: boolean): string {
   const tools = `${counts.toolCount} tool${counts.toolCount === 1 ? '' : 's'}`
