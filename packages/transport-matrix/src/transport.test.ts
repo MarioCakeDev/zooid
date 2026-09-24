@@ -2641,8 +2641,22 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
     client.sendMessage.mock.calls.filter(
       ([a]) => (contentOf(a)['m.relates_to'] as { rel_type?: string } | undefined)?.rel_type === 'm.replace',
     )
+  /** The last formatted_body a client would apply (create or the latest edit). */
+  const currentHtml = (client: ReturnType<typeof makeTransport>['client']) => {
+    let html = ''
+    for (const [arg] of client.sendMessage.mock.calls) {
+      const content = contentOf(arg)
+      const isEdit =
+        (content['m.relates_to'] as { rel_type?: string } | undefined)?.rel_type === 'm.replace'
+      const applied = isEdit
+        ? (content['m.new_content'] as Record<string, unknown> | undefined)
+        : content
+      if (applied && typeof applied.formatted_body === 'string') html = applied.formatted_body
+    }
+    return html
+  }
 
-  it('creates one editable threaded notice for a tool_call, marked and next to the custom event', async () => {
+  it('creates one collapsed <details> notice for a tool_call, marked and next to the custom event', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t1')
     await onEvent(agents, 'architect', {
       type: 'tool_call',
@@ -2660,17 +2674,23 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
     ).toBe(true)
     const notices = creates(client)
     expect(notices).toHaveLength(1)
+    // Plain body fallback is the summary line; formatted_body is the collapsed
+    // details block with <summary> first and no `open` attribute.
     expect(notices[0]![0]).toMatchObject({
       roomId: '!r:example.com',
       asUserId: '@architect:example.com',
       threadRoot: '$t1',
       content: {
         msgtype: 'm.notice',
-        body: '🔧 architect: Run tests — pending · 1 tool',
+        body: '🔧 architect: Run tests — pending',
+        format: 'org.matrix.custom.html',
+        formatted_body:
+          '<details><summary>🔧 architect: Run tests — pending</summary>• Run tests</details>',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$t1' },
       },
     })
+    expect(String(contentOf(notices[0]![0]).formatted_body)).not.toContain('open')
     finishPrompt()
     await settleTurn()
   })
@@ -2754,11 +2774,106 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
       String(contentOf(a).body ?? '').includes('✅'),
     )
     expect(finalEdit).toBeDefined()
-    expect(contentOf(finalEdit![0]).body).toBe('* ✅ 2 tools · 2 files')
+    expect(contentOf(finalEdit![0]).body).toBe('* ✅ architect: done · 2 tools · 2 files')
     expect(contentOf(finalEdit![0])['m.new_content']).toMatchObject({
-      body: '✅ 2 tools · 2 files',
+      body: '✅ architect: done · 2 tools · 2 files',
       'dev.zooid.mirror': true,
     })
+  })
+
+  it('appends a new line for each new tool_call_id (append-only, first-seen order)', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t3a')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'bash',
+      status: 'in_progress',
+    })
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-2',
+      title: 'edit src/x.ts',
+      status: 'pending',
+    })
+    await settleTurn()
+    expect(creates(client)).toHaveLength(1)
+    const html = currentHtml(client)
+    expect(html).toContain('⏳ bash')
+    expect(html).toContain('• edit src/x.ts')
+    // Order is first-seen within the list body (the <summary> repeats the last
+    // activity, so compare only the lines after it).
+    const body = html.slice(html.indexOf('</summary>'))
+    expect(body.indexOf('bash')).toBeLessThan(body.indexOf('edit src/x.ts'))
+    // Entries are newline-separated (`<br>`), one tool per line.
+    expect(body).toContain('⏳ bash<br>• edit src/x.ts')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('updates an existing entry in place on tool_call_update — never a duplicate', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t3b')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'bash',
+      status: 'pending',
+    })
+    await onEvent(agents, 'architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'in_progress',
+    })
+    await onEvent(agents, 'architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+    })
+    await settleTurn()
+    const html = currentHtml(client)
+    // One entry, showing the latest state — not three. The <summary> repeats the
+    // latest activity, so count only the list lines.
+    const body = html.slice(html.indexOf('</summary>'))
+    expect(body.match(/bash/g)).toHaveLength(1)
+    expect(body).toContain('✓ bash — done')
+    // Titles + status only: the update's `content[]` text is never rendered.
+    expect(body).not.toContain('ok, 12 passed')
+    expect(body).not.toContain('• bash')
+    expect(body).not.toContain('⏳ bash')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('tracks the last activity in the summary', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t3c')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'bash',
+      status: 'in_progress',
+    })
+    await settleTurn()
+    expect(String(contentOf(creates(client)[0]![0]).body)).toBe('🔧 architect: bash — running')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-2',
+      title: 'edit src/x.ts',
+    })
+    await settleTurn()
+    // The last edit's applied content reflects the newest tool.
+    const last = edits(client).at(-1)!
+    expect((contentOf(last[0])['m.new_content'] as Record<string, unknown>).body).toBe(
+      '🔧 architect: edit src/x.ts',
+    )
+    finishPrompt()
+    await settleTurn()
   })
 
   it('does not create a mirror line for a prose-only turn that advertised commands', async () => {
@@ -2845,7 +2960,7 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
       String(contentOf(a).body ?? '').includes('⚠️'),
     )
     expect(finalEdit).toBeDefined()
-    expect(contentOf(finalEdit![0]).body).toBe('* ⚠️ 1 tool · 0 files')
+    expect(contentOf(finalEdit![0]).body).toBe('* ⚠️ architect: failed · 1 tool · 0 files')
   })
 
   it('skips an edit whose body is unchanged (idempotent)', async () => {
