@@ -22,7 +22,7 @@ that sends `dev.zooid.approval_response`.
   plain `m.room.message` (`approve <id>` / `deny <id>` — the id must be
   UUID-shaped, so prose that merely starts with the word routes normally — or a
   bare `approve` / `deny` replied inside the approval's own thread when exactly
-  one is pending there) and from a ✅ / ❌ reaction on the approval's custom
+  one is pending there) and from a 👍 / 👎 reaction on the approval's custom
   event or its mirrored notice. Commands/reactions from Zooid's own bot users
   are ignored on every path, including the legacy `dev.zooid.approval_response`
   event, so an agent cannot self-approve. `approve`/`deny` prefer the narrowest
