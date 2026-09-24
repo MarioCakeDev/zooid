@@ -2849,6 +2849,25 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
     await settleTurn()
   })
 
+  it('titles an orphan tool_call_update with a friendly fallback, not the raw id', async () => {
+    // Daemon restarted mid-turn, or ACP reordered: the update arrives with no
+    // prior tool_call for this id, so there is no title to inherit.
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t3d')
+    await onEvent(agents, 'architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'in_progress',
+    })
+    await settleTurn()
+    const html = currentHtml(client)
+    const body = html.slice(html.indexOf('</summary>'))
+    expect(body).toContain('⏳ tool')
+    expect(body).not.toContain('tc-1')
+    finishPrompt()
+    await settleTurn()
+  })
+
   it('tracks the last activity in the summary', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$t3c')
     await onEvent(agents, 'architect', {

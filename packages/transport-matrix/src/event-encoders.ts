@@ -225,6 +225,17 @@ function toolStatusIcon(status: string | undefined): string {
 const TOOL_LINE_MAX = 200
 
 /**
+ * Hard bounds on the collapsed tool list. `state.tools` grows one entry per
+ * distinct `tool_call_id` and every `m.replace` re-sends the whole list, so an
+ * unbounded list can push the notice past the homeserver's event-size cap and
+ * the best-effort edit is silently swallowed. A tally line replaces the entries
+ * past the cap, so the turn outcome in the `<summary>` is never the only thing
+ * to survive.
+ */
+const TOOL_LIST_MAX_LINES = 50
+const TOOL_LIST_MAX_CHARS = 8000
+
+/**
  * Compact one-line rendering of a tool entry: `✓ bash — done`,
  * `⏳ edit src/x.ts`, `✗ edit — failed`. Only the title and status are shown —
  * no raw tool output. The status label appears only for terminal states (the
@@ -254,11 +265,30 @@ function escapeHtml(s: string): string {
  * The collapsible `<details>` block for the per-turn mirror line: `<summary>`
  * (the last activity) is the first child, followed by one compact line per tool
  * in first-seen order. There is no `open` attribute, so Element renders it
- * collapsed by default.
+ * collapsed by default. The list is bounded by both a line count and a total
+ * character budget (`TOOL_LIST_MAX_*`); entries past the bound collapse into a
+ * single `… +K more` line so the block can never outgrow the homeserver's
+ * event-size cap.
  */
 export function renderTurnDetails(summary: string, tools: TurnToolEntry[]): string {
-  const lines = tools.map((t) => escapeHtml(toolEntryLine(t))).join('<br>')
-  return `<details><summary>${escapeHtml(summary)}</summary>${lines}</details>`
+  const rendered: string[] = []
+  let used = 0
+  let omitted = 0
+  for (const t of tools) {
+    if (rendered.length >= TOOL_LIST_MAX_LINES) {
+      omitted++
+      continue
+    }
+    const line = escapeHtml(toolEntryLine(t))
+    if (used + line.length > TOOL_LIST_MAX_CHARS) {
+      omitted++
+      continue
+    }
+    rendered.push(line)
+    used += line.length
+  }
+  if (omitted > 0) rendered.push(`… +${omitted} more`)
+  return `<details><summary>${escapeHtml(summary)}</summary>${rendered.join('<br>')}</details>`
 }
 
 /**

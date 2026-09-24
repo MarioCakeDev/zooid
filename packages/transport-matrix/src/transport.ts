@@ -581,7 +581,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (existing === undefined) {
       entry = {
         toolCallId,
-        title: nonEmptyString(content.title) ?? toolCallId,
+        title: nonEmptyString(content.title) ?? 'tool',
         status: nonEmptyString(content.status),
       }
       state.toolIndex.set(toolCallId, state.tools.length)

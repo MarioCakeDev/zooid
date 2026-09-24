@@ -499,6 +499,37 @@ describe('renderTurnDetails', () => {
       '<details><summary>🔧 dev: plan (2 steps)</summary></details>',
     )
   })
+
+  it('caps the number of rendered lines and tallies the omitted entries', () => {
+    const many: TurnToolEntry[] = Array.from({ length: 60 }, (_, i) => ({
+      toolCallId: `tc-${i}`,
+      title: `tool ${i}`,
+      status: 'completed',
+    }))
+    const html = renderTurnDetails('🔧 dev: done', many)
+    expect(html).toContain('… +10 more')
+    expect(html).toContain('tool 49')
+    expect(html).not.toContain('tool 50')
+  })
+
+  it('caps the total rendered length so a huge turn cannot outgrow the event limit', () => {
+    // `&` escapes to `&amp;` (5×), so a handful of capped lines already blows
+    // the character budget; the block must stay bounded and tally the rest.
+    const many: TurnToolEntry[] = Array.from({ length: 9 }, (_, i) => ({
+      toolCallId: `tc-${i}`,
+      title: '&'.repeat(200),
+    }))
+    const html = renderTurnDetails('🔧 dev: done', many)
+    expect(html).toContain('… +1 more')
+    expect(html.length).toBeLessThan(8200)
+  })
+
+  it('does not tally when the list is within the bounds', () => {
+    const html = renderTurnDetails('🔧 dev: done', [
+      { toolCallId: 'tc-1', title: 'bash', status: 'completed' },
+    ])
+    expect(html).not.toContain('more')
+  })
 })
 
 describe('createsTurnLine', () => {
