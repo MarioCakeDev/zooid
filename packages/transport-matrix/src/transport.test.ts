@@ -2912,6 +2912,168 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
     ).toBe(true)
     expect(client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('finished'))).toBe(false)
   })
+
+  it('starts a new thread rooted on the trigger for a genuinely top-level turn', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$top1',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.ensureSession).toHaveBeenCalledWith(
+      'architect',
+      '$top1',
+      '!r:example.com',
+      '$top1',
+    )
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('posts the mirror into the existing thread for a turn triggered in-thread', async () => {
+    const { transport, agents, client, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$reply1',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'more',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$troot' },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    // The turn keeps the existing thread root — it never starts a new thread.
+    expect(agents.ensureSession).toHaveBeenCalledWith(
+      'architect',
+      '$troot',
+      '!r:example.com',
+      '$troot',
+    )
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId: 'sess-$troot',
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+      status: 'pending',
+    })
+    await settleTurn()
+    const notices = creates(client)
+    expect(notices).toHaveLength(1)
+    expect(notices[0]![0]).toMatchObject({
+      threadRoot: '$troot',
+      content: {
+        'dev.zooid.mirror': true,
+        'm.relates_to': { rel_type: 'm.thread', event_id: '$troot' },
+      },
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('resolves the existing thread root for a turn triggered by an edit', async () => {
+    const { transport, agents, client, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$edit1',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '* more @architect:example.com',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+            'm.relates_to': { rel_type: 'm.replace', event_id: '$orig' },
+            'm.new_content': {
+              msgtype: 'm.text',
+              body: 'more @architect:example.com',
+              'm.mentions': { user_ids: ['@architect:example.com'] },
+              'm.relates_to': { rel_type: 'm.thread', event_id: '$troot' },
+            },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    // Regression: the edit event itself used to be promoted to a thread root,
+    // so Synapse rejected every outbound event with "Cannot start threads from
+    // an event with a relation". The turn must reuse the edited message's
+    // thread — an edit is a reply, not a new root.
+    expect(agents.ensureSession).toHaveBeenCalledWith(
+      'architect',
+      '$troot',
+      '!r:example.com',
+      '$troot',
+    )
+    await onEvent(agents, 'architect', {
+      type: 'tool_call',
+      sessionId: 'sess-$troot',
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+      status: 'pending',
+    })
+    await settleTurn()
+    const notices = creates(client)
+    expect(notices).toHaveLength(1)
+    expect(notices[0]![0]).toMatchObject({
+      threadRoot: '$troot',
+      content: { 'm.relates_to': { rel_type: 'm.thread', event_id: '$troot' } },
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('anchors at the replied-to event when the trigger is a rich reply', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$rich1',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 're @architect:example.com',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+            'm.relates_to': { rel_type: 'm.in_reply_to', event_id: '$parent' },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    // A rich reply is not top-level, so it must never root a thread on itself.
+    expect(agents.ensureSession).toHaveBeenCalledWith(
+      'architect',
+      '$parent',
+      '!r:example.com',
+      '$parent',
+    )
+    finishPrompt()
+    await settleTurn()
+  })
 })
 
 describe('interactive approvals from a stock client', () => {

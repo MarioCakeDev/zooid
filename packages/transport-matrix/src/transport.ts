@@ -353,9 +353,62 @@ const DRAIN_MAX_MS = 30_000
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+function threadRelation(
+  content: Record<string, unknown> | undefined,
+): { rel_type?: string; event_id?: string; [k: string]: unknown } | undefined {
+  const r = content?.['m.relates_to']
+  return typeof r === 'object' && r !== null
+    ? (r as { rel_type?: string; event_id?: string; [k: string]: unknown })
+    : undefined
+}
+
+/**
+ * The thread root an inbound event belongs to, or `undefined` when the event is
+ * genuinely top-level.
+ *
+ * A message edit (`m.replace`) carries the thread relation in the content a
+ * client applies (`m.new_content`), so reading only the top-level relation made
+ * the daemon treat the edit event itself as a new thread root. Synapse refuses
+ * to root a thread at an event that already carries a relation ("Cannot start
+ * threads from an event with a relation"), so the whole turn's outbound events
+ * — the per-turn mirror line included — 400'd.
+ */
 function inboundThreadRoot(evt: MatrixEvent): string | undefined {
-  const r = evt.content?.['m.relates_to']
-  return r?.rel_type === 'm.thread' && r.event_id ? r.event_id : undefined
+  const direct = threadRelation(evt.content)
+  if (direct?.rel_type === 'm.thread' && direct.event_id) return direct.event_id
+  const replacement = evt.content?.['m.new_content']
+  const applied = threadRelation(
+    typeof replacement === 'object' && replacement !== null
+      ? (replacement as Record<string, unknown>)
+      : undefined,
+  )
+  return applied?.rel_type === 'm.thread' && applied.event_id ? applied.event_id : undefined
+}
+
+/**
+ * Resolve the thread root a turn triggered by `evt` posts into.
+ *
+ * Thread replies (and their edits) keep the existing thread via
+ * `inboundThreadRoot`. Any other relation — a rich reply (`m.in_reply_to`), a
+ * reaction, an annotation — means the event is *not* top-level, and Synapse
+ * refuses to start a thread from an event with a relation, so it must never be
+ * promoted to its own thread root: anchor the thread at the event it replies to
+ * instead. Only a relation-free event becomes a thread root of its own.
+ */
+function threadRootFor(evt: MatrixEvent): string | undefined {
+  const threaded = inboundThreadRoot(evt)
+  if (threaded) return threaded
+  const r = threadRelation(evt.content)
+  if (!r) return evt.event_id
+  if (r.rel_type === 'm.in_reply_to' && r.event_id) return r.event_id
+  const nested = r['m.in_reply_to']
+  if (typeof nested === 'object' && nested !== null) {
+    const id = (nested as { event_id?: string }).event_id
+    if (id) return id
+  }
+  // A relation we cannot resolve to a target: fall back to the event itself
+  // rather than dropping the turn.
+  return evt.event_id
 }
 
 export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
@@ -1407,9 +1460,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       return
     }
 
-    // Agent-promotion: top-level inbound event becomes the thread root.
-    // For in-thread messages the existing root is preserved.
-    const promotedRoot = inboundThreadRoot(evt) ?? evt.event_id
+    // Agent-promotion: a top-level inbound event becomes the thread root; an
+    // in-thread message (or an edit of one) keeps the existing root. Never root
+    // a thread at an event that itself carries a relation — Synapse rejects it.
+    const promotedRoot = threadRootFor(evt)
     // Self-heal: if this is a thread reply but we have no in-memory state
     // for the root (e.g. daemon was just restarted), reconstruct it by
     // fetching the thread root + relations from the server.
