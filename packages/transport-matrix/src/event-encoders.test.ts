@@ -458,6 +458,16 @@ describe('toolOutputText', () => {
     expect(out.endsWith('…')).toBe(true)
   })
 
+  it('clamps the joined output per tool, not just per entry', () => {
+    const out = toolOutputText([
+      { type: 'content', content: { type: 'text', text: 'a'.repeat(200) } },
+      { type: 'content', content: { type: 'text', text: 'b'.repeat(200) } },
+      { type: 'content', content: { type: 'text', text: 'c'.repeat(200) } },
+    ])!
+    expect(out).toHaveLength(200)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
   it('renders a terminal entry as its id', () => {
     expect(toolOutputText([{ type: 'terminal', terminalId: 't-1' }])).toBe('terminal t-1')
   })
@@ -571,6 +581,15 @@ describe('turnGroupBody', () => {
     expect(body).toMatch(/… \d+ more/)
     expect(body).not.toContain('✓ tool-0 — done')
     expect(body.length).toBeLessThan(9000)
+  })
+
+  it('always shows the newest entry, even when it alone exceeds the size budget', () => {
+    const body = turnGroupBody('dev', [
+      entry({ title: 'bash', status: 'completed', output: 'x'.repeat(9000) }),
+    ])
+    expect(body).toContain('✓ bash — done')
+    expect(body).toContain('↳ ')
+    expect(body).not.toContain('more')
   })
 })
 

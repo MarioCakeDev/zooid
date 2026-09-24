@@ -336,8 +336,10 @@ function outputEntryText(item: unknown): string | undefined {
 
 /**
  * Flatten a `tool_call_update` `content[]` into one display block: each entry is
- * collapsed and clamped (`TOOL_OUTPUT_MAX`) and the entries are joined with
- * `\n`. `undefined` when nothing renderable is present.
+ * collapsed and clamped (`TOOL_OUTPUT_MAX`), the entries are joined with `\n`,
+ * and the joined block is clamped again so one tool can never contribute more
+ * than `TOOL_OUTPUT_MAX` characters. `undefined` when nothing renderable is
+ * present.
  */
 export function toolOutputText(content: unknown): string | undefined {
   if (!Array.isArray(content) || content.length === 0) return undefined
@@ -346,7 +348,11 @@ export function toolOutputText(content: unknown): string | undefined {
     const text = outputEntryText(item)
     if (text) parts.push(clamp(text, TOOL_OUTPUT_MAX))
   }
-  return parts.length > 0 ? parts.join('\n') : undefined
+  if (parts.length === 0) return undefined
+  const joined = parts.join('\n')
+  return joined.length > TOOL_OUTPUT_MAX
+    ? joined.slice(0, TOOL_OUTPUT_MAX - 1) + '…'
+    : joined
 }
 
 /**
@@ -358,7 +364,7 @@ export function toolOutputText(content: unknown): string | undefined {
  * activity is kept and the hidden remainder summarised as `… K more`.
  */
 const GROUP_LINE_MAX = 20
-/** Total rendered body budget for one group, so 20 fat tools can't outgrow the event cap. */
+/** Total rendered body budget, measured on the HTML-escaped lines, so both the plain and formatted bodies stay under it. */
 const GROUP_CHAR_MAX = 8000
 
 /** The plain lines one tool contributes: its line, then its params and output. */
@@ -371,7 +377,9 @@ function toolSectionLines(entry: TurnToolEntry): string[] {
 
 /**
  * The newest entries that fit the entry-count (`GROUP_LINE_MAX`) and total-size
- * (`GROUP_CHAR_MAX`) caps, plus how many older entries were dropped.
+ * (`GROUP_CHAR_MAX`) caps, plus how many older entries were dropped. The newest
+ * entry is always kept, even if it alone exceeds the size budget, so the tool
+ * named in the summary can never vanish from the body.
  */
 function selectGroupEntries(entries: TurnToolEntry[]): {
   shown: TurnToolEntry[]
@@ -382,8 +390,8 @@ function selectGroupEntries(entries: TurnToolEntry[]): {
   for (let i = entries.length - 1; i >= 0; i--) {
     if (shown.length >= GROUP_LINE_MAX) break
     const entry = entries[i]!
-    const size = toolSectionLines(entry).reduce((n, l) => n + l.length + 1, 0)
-    if (used + size > GROUP_CHAR_MAX) break
+    const size = toolSectionLines(entry).reduce((n, l) => n + escapeHtml(l).length + 1, 0)
+    if (used + size > GROUP_CHAR_MAX && shown.length > 0) break
     shown.push(entry)
     used += size
   }
