@@ -37,6 +37,7 @@ import {
   activityDetail,
   turnFinalBody,
   turnGroupBody,
+  turnGroupHtml,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
   TURN_MIRROR_MARKER,
@@ -282,9 +283,11 @@ async function sendMirrorNotice(
     threadRoot: string
     eventType: string
     content: Record<string, unknown>
+    /** Agent display name, used to name the actor in an approval notice. */
+    agentName?: string
   },
 ): Promise<string | undefined> {
-  const body = toActivityNoticeBody(input.eventType, input.content)
+  const body = toActivityNoticeBody(input.eventType, input.content, input.agentName)
   if (!body) return undefined
   try {
     const { event_id } = await client.sendMessage({
@@ -449,6 +452,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     eventType: string
     content: Record<string, unknown>
     threadRoot: string
+    /** Agent display name, forwarded to the mirror notice for approvals. */
+    agentName?: string
   }): Promise<{ event_id: string; noticeEventId?: string }> {
     const { event_id } = await client.sendCustomEvent({
       roomId: input.roomId,
@@ -539,13 +544,14 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   async function createMirrorLine(
     ctx: SessionContext,
     body: string,
+    formattedBody?: string,
   ): Promise<string | undefined> {
     try {
       const { event_id } = await client.sendMessage({
         roomId: ctx.roomId,
         asUserId: ctx.agent.userId,
         threadRoot: ctx.threadRoot,
-        content: turnMirrorNoticeContent(body, ctx.threadRoot),
+        content: turnMirrorNoticeContent(body, ctx.threadRoot, formattedBody),
       })
       return event_id
     } catch (err) {
@@ -558,19 +564,20 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     ctx: SessionContext,
     line: MirrorLine,
     body: string,
+    formattedBody?: string,
   ): Promise<void> {
     try {
       await client.sendMessage({
         roomId: ctx.roomId,
         asUserId: ctx.agent.userId,
-        content: turnMirrorEditContent(line.eventId, body, ctx.threadRoot),
+        content: turnMirrorEditContent(line.eventId, body, ctx.threadRoot, formattedBody),
       })
       line.lastBody = body
     } catch (err) {
       if (isMissingEventError(err)) {
         // The original was redacted or otherwise gone — recreate so the line is
         // not silently lost, and retarget later edits at the new event.
-        const eventId = await createMirrorLine(ctx, body)
+        const eventId = await createMirrorLine(ctx, body, formattedBody)
         if (eventId) {
           line.eventId = eventId
           line.lastBody = body
@@ -673,8 +680,9 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     }
 
     const body = turnGroupBody(ctx.agent.name, group.entries, group.planDetail)
+    const formattedBody = turnGroupHtml(ctx.agent.name, group.entries, group.planDetail)
     if (!group.eventId) {
-      const eventId = await createMirrorLine(ctx, body)
+      const eventId = await createMirrorLine(ctx, body, formattedBody)
       if (eventId) {
         group.eventId = eventId
         group.lastBody = body
@@ -683,7 +691,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       return
     }
     if (body === group.lastBody) return
-    await editMirrorLine(ctx, group, body)
+    await editMirrorLine(ctx, group, body, formattedBody)
   }
 
   async function finalizeTurnMirror(
@@ -1215,6 +1223,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
           eventType: 'dev.zooid.approval_request',
           content,
           threadRoot: ctx.threadRoot,
+          agentName: ctx.agent.name,
         })
         // Both the custom event and its mirror are valid reaction targets.
         approvalByEvent.set(event_id, handle.approvalId)

@@ -123,6 +123,22 @@ function nonEmptyString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined
 }
 
+/** Escape the five HTML-significant characters for an `org.matrix.custom.html` body. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/** Read one string field from a raw (unknown-shaped) tool input object. */
+function inputString(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  return nonEmptyString((input as Record<string, unknown>)[key])
+}
+
 /**
  * Marker on every mirror line (create and edit; see `turnMirrorNoticeContent` /
  * `turnMirrorEditContent`). It rides in the notice's content and in
@@ -137,7 +153,8 @@ export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
  * event that must stand alone in the timeline. Since the per-turn mirror line
  * folds tool/plan/command activity into one editable notice, the only events
  * mirrored individually are the ones a user must be able to act on:
- *  - `dev.zooid.approval_request` — actionable (approve/deny);
+ *  - `dev.zooid.approval_request` — actionable (react 👍/👎), naming the agent
+ *    and the command / file it wants to act on;
  *  - `dev.zooid.error` — rare, high-value, and a stock client cannot render
  *    the custom event; its existing `body` is reused verbatim.
  *
@@ -146,9 +163,35 @@ export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
  * `body` is a push-notification preview, not timeline content), and the
  * `dev.zooid.workforce` state event.
  */
+/** Cap the rendered approval action so a big command / file path stays glanceable. */
+const APPROVAL_ACTION_MAX = 160
+
+/**
+ * What an approval would do, in one glanceable verb + detail: the `command` for
+ * a shell tool, the `filepath` for a write/edit, else the tool title. `toolKind`
+ * picks the verb when the input itself is opaque.
+ */
+function approvalAction(content: Record<string, unknown>): { verb: string; detail: string } {
+  const kind = nonEmptyString(content.tool_kind)
+  const title = nonEmptyString(content.tool_title)
+  const command = inputString(content.tool_input, 'command')
+  if (command) return { verb: 'run', detail: clamp(command, APPROVAL_ACTION_MAX) }
+  const filepath =
+    inputString(content.tool_input, 'filepath') ??
+    inputString(content.tool_input, 'file_path') ??
+    inputString(content.tool_input, 'path')
+  if (filepath) {
+    return { verb: kind === 'write' ? 'write' : 'edit', detail: clamp(filepath, APPROVAL_ACTION_MAX) }
+  }
+  const verb =
+    kind === 'execute' ? 'run' : kind === 'write' ? 'write' : kind === 'edit' ? 'edit' : 'use'
+  return { verb, detail: clamp(title ?? kind ?? 'a tool call', APPROVAL_ACTION_MAX) }
+}
+
 export function toActivityNoticeBody(
   eventType: string,
   content: Record<string, unknown>,
+  agentName?: string,
 ): string | null {
   if (eventType === 'dev.zooid.error') {
     const body = nonEmptyString(content.body)
@@ -156,14 +199,9 @@ export function toActivityNoticeBody(
   }
   if (nonEmptyString(content.body)) return null
   if (eventType === 'dev.zooid.approval_request') {
-    const id = nonEmptyString(content.approval_id)
-    const title =
-      nonEmptyString(content.tool_title) ?? nonEmptyString(content.tool_call_id) ?? 'a tool call'
-    const idPart = id ? ` (id ${id})` : ''
-    return clamp(
-      `🔐 Approval needed: ${title}${idPart} — reply "approve ${id ?? '<id>'}" or ` +
-        `"deny ${id ?? '<id>'}", or react 👍/👎`,
-    )
+    const { verb, detail } = approvalAction(content)
+    const who = nonEmptyString(agentName) ?? 'An agent'
+    return clamp(`🔐 ${who} wants to ${verb}: ${detail} — react 👍/👎`)
   }
   return null
 }
@@ -237,20 +275,56 @@ export function toolEntryLine(entry: TurnToolEntry): string {
 }
 
 /**
- * The single line for one run of tool/plan activity: **every tool call since the
- * previous prose message**, joined with ` · ` — e.g.
- * `🔧 dev: ⏳ bash · ✓ edit src/x.ts`. The line is created on the first activity
+ * Cap the number of rendered lines in one group. Each entry is itself clamped
+ * (`TOOL_LINE_MAX`), but a run of many tool calls before the next prose message
+ * would otherwise grow the notice without bound — and every `m.replace` resends
+ * the full roster, so a runaway turn can bloat the notice and, if the homeserver
+ * rejects the oversize edit, freeze the line. `turnGroupLines` keeps only the
+ * last N lines and summarises the rest as `… K more` so the newest activity is
+ * what stays visible.
+ */
+const GROUP_LINE_MAX = 20
+
+/** The plain lines of one group: one per tool entry, then the plan detail. */
+function turnGroupLines(entries: TurnToolEntry[], planDetail?: string): string[] {
+  const lines = entries.map(toolEntryLine)
+  if (planDetail) lines.push(`🗒 ${clamp(planDetail)}`)
+  if (lines.length <= GROUP_LINE_MAX) return lines
+  const shown = lines.slice(-GROUP_LINE_MAX)
+  return [`… ${lines.length - shown.length} more`, ...shown]
+}
+
+/**
+ * The plain fallback for one run of tool/plan activity: the tool calls since the
+ * previous prose message (capped to the last `GROUP_LINE_MAX` lines, see
+ * `turnGroupLines`), one per line — e.g.
+ * `🔧 dev: ⏳ bash\n✓ edit src/x.ts`. The header keeps the `🔧 <agent>:` prefix on
+ * the first line; each entry is on its own line so a client that honours `\n`
+ * does not show one run-on line. The group is created on the first activity
  * after a prose message and edited in place as more tools run, so the gap
- * between two prose messages is exactly one line (never one line per tool).
+ * between two prose messages is exactly one notice (never one per tool).
  */
 export function turnGroupBody(
   agentId: string,
   entries: TurnToolEntry[],
   planDetail?: string,
 ): string {
-  const parts = entries.map(toolEntryLine)
-  if (planDetail) parts.push(`🗒 ${planDetail}`)
-  return clamp(`🔧 ${agentId}: ${parts.join(' · ')}`)
+  return `🔧 ${agentId}: ${turnGroupLines(entries, planDetail).join('\n')}`
+}
+
+/**
+ * HTML rendering of the same group for `org.matrix.custom.html`: the header and
+ * each entry line are HTML-escaped, and the lines are joined with `<br>`. Element
+ * X renders separate lines for this where a bare `\n` in a plain body is shown
+ * as one line.
+ */
+export function turnGroupHtml(
+  agentId: string,
+  entries: TurnToolEntry[],
+  planDetail?: string,
+): string {
+  const lines = turnGroupLines(entries, planDetail).map(escapeHtml)
+  return `🔧 ${escapeHtml(agentId)}: ${lines.join('<br>')}`
 }
 
 /**
@@ -298,23 +372,31 @@ export function activityDetail(
  * every tool/plan activity since the previous prose message. It is created on
  * the first activity after a prose flush and edited in place as more tools run,
  * so the timeline reads prose → tool line → prose → tool line and the order of
- * execution is clear. The line carries no HTML — it is a single compact line of
- * text (see `turnGroupBody`).
+ * execution is clear. The plain `body` is the `\n`-joined fallback
+ * (see `turnGroupBody`); when `formattedBody` is given it rides alongside as
+ * `org.matrix.custom.html` (see `turnGroupHtml`) so clients that render HTML
+ * show the entries on separate lines.
  */
 export function turnMirrorNoticeContent(
   body: string,
   threadRoot: string,
+  formattedBody?: string,
 ): {
   msgtype: string
   body: string
   [k: string]: unknown
 } {
-  return {
+  const content: { msgtype: string; body: string; [k: string]: unknown } = {
     msgtype: 'm.notice',
     body,
     [TURN_MIRROR_MARKER]: true,
     'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
   }
+  if (formattedBody !== undefined) {
+    content.format = 'org.matrix.custom.html'
+    content.formatted_body = formattedBody
+  }
+  return content
 }
 
 /**
@@ -323,29 +405,40 @@ export function turnMirrorNoticeContent(
  * replacement relation rides in the top-level `m.relates_to`; the thread
  * relation goes in `m.new_content.m.relates_to` (MSC2676 + MSC3440) so Element
  * keeps the edited line inside its thread. The marker is repeated in
- * `m.new_content` because that is the content a client applies.
+ * `m.new_content` because that is the content a client applies. When
+ * `formattedBody` is given, the `org.matrix.custom.html` shape is repeated in
+ * both the top-level fallback and `m.new_content`.
  */
 export function turnMirrorEditContent(
   eventId: string,
   body: string,
   threadRoot: string,
+  formattedBody?: string,
 ): {
   msgtype: string
   body: string
   [k: string]: unknown
 } {
-  return {
+  const newContent: { msgtype: string; body: string; [k: string]: unknown } = {
+    msgtype: 'm.notice',
+    body,
+    [TURN_MIRROR_MARKER]: true,
+    'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
+  }
+  const content: { msgtype: string; body: string; [k: string]: unknown } = {
     msgtype: 'm.notice',
     body: `* ${body}`,
     [TURN_MIRROR_MARKER]: true,
-    'm.new_content': {
-      msgtype: 'm.notice',
-      body,
-      [TURN_MIRROR_MARKER]: true,
-      'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
-    },
+    'm.new_content': newContent,
     'm.relates_to': { rel_type: 'm.replace', event_id: eventId },
   }
+  if (formattedBody !== undefined) {
+    newContent.format = 'org.matrix.custom.html'
+    newContent.formatted_body = formattedBody
+    content.format = 'org.matrix.custom.html'
+    content.formatted_body = `* ${formattedBody}`
+  }
+  return content
 }
 
 export interface TurnEnd {

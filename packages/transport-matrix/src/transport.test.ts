@@ -2788,11 +2788,16 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       rel_type: 'm.replace',
       event_id: id,
     })
-    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ bash · • edit src/x.ts')
+    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ bash\n• edit src/x.ts')
     expect(contentOf(replaces[0]![0])['m.new_content']).toMatchObject({
-      body: '🔧 architect: ⏳ bash · • edit src/x.ts',
+      body: '🔧 architect: ⏳ bash\n• edit src/x.ts',
       'dev.zooid.mirror': true,
       'm.relates_to': { rel_type: 'm.thread', event_id: '$g1' },
+    })
+    // The HTML body puts the same entries on separate lines.
+    expect(contentOf(replaces[0]![0])['m.new_content']).toMatchObject({
+      format: 'org.matrix.custom.html',
+      formatted_body: '🔧 architect: ⏳ bash<br>• edit src/x.ts',
     })
     finishPrompt()
     await settleTurn()
@@ -2866,7 +2871,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
     expect(lines(client)).toEqual(['🔧 architect: ⏳ Read file'])
     const id = await createdId(client, '🔧 architect: ⏳ Read file')
-    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ Read file · 🗒 plan (2 steps)')
+    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ Read file\n🗒 plan (2 steps)')
     finishPrompt()
     await settleTurn()
   })
@@ -2904,7 +2909,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     const id = await createdId(client, '🔧 architect: • Read file')
     finishPrompt()
     await settleTurn()
-    expect(appliedEditBody(client, id)).toBe('🔧 architect: • Read file · • Edit file')
+    expect(appliedEditBody(client, id)).toBe('🔧 architect: • Read file\n• Edit file')
     expect(lines(client)).toEqual([
       '🔧 architect: • Read file',
       '✅ architect: done · 2 tools · 2 files',
@@ -3129,7 +3134,9 @@ describe('interactive approvals from a stock client', () => {
       approvalId: APPROVAL_ID,
       sessionId,
       toolCallId: 'tc-1',
-      toolTitle: 'git push',
+      toolKind: 'execute',
+      toolTitle: 'bash',
+      toolInput: { command: 'git push --force origin main' },
       options: approvalOptions,
     })
     await new Promise((r) => setImmediate(r))
@@ -3147,7 +3154,13 @@ describe('interactive approvals from a stock client', () => {
     ).toBe(true)
     const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('🔐'))
     expect(notice).toBeDefined()
-    expect(noticeBody(notice![0])).toContain(`approve ${APPROVAL_ID}`)
+    expect(noticeBody(notice![0])).toBe(
+      '🔐 architect wants to run: git push --force origin main — react 👍/👎',
+    )
+    // The reply hint is gone (the `approve <id>` path stays functional but is
+    // unadvertised).
+    expect(noticeBody(notice![0])).not.toContain('reply')
+    expect(noticeBody(notice![0])).not.toContain('approve ')
     finishPrompt()
     await settleTurn()
   })
