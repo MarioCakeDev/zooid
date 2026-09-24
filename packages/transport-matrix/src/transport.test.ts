@@ -2165,6 +2165,7 @@ describe('directional agent-to-agent handoffs', () => {
       fetchThreadRelations: vi.fn(async () => ({
         chunk: [
           {
+            event_id: '$mirror',
             type: 'm.room.message',
             sender: '@parent:example.com',
             content: {
@@ -2174,6 +2175,7 @@ describe('directional agent-to-agent handoffs', () => {
             },
           },
           {
+            event_id: '$prose',
             type: 'm.room.message',
             sender: '@parent:example.com',
             content: {
@@ -2189,6 +2191,9 @@ describe('directional agent-to-agent handoffs', () => {
     // Only the real @sub call seeded a mention/caller; the mirror quote did not.
     expect(state.rootMentions).toEqual(['parent', 'sub'])
     expect(state.callers).toEqual({ sub: 'parent' })
+    // Only the genuine @sub arc is recorded — the mirror's `$mirror` event id
+    // must never become a handoff arc (the arc is what actually re-routes).
+    expect(state.handoffs).toEqual({ sub: ['$prose'] })
     // The mirror notice is not parent "participating" in the thread.
     expect(state.participants).toEqual(['parent'])
   })
