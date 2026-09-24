@@ -272,6 +272,28 @@ const TOOL_PARAM_MAX = 200
 const TOOL_OUTPUT_MAX = 200
 
 /**
+ * Horizontal rule used both between a tool's `⚙` params and its `↳` output, and
+ * between consecutive tool sections. It is one literal line in the plain body
+ * and `<hr>` in the HTML, so the two renderings read the same on Element X
+ * (which ignores `<details>` and shows the plain body) and Element Web.
+ */
+const GROUP_DIVIDER = '────────────────'
+
+/**
+ * One rendered line of a group body: literal text, or a horizontal rule. Keeping
+ * the rule as a distinct kind (rather than a sentinel string) lets the plain and
+ * HTML renderers share one line list — text is `\n`-joined/`<br>`-joined and the
+ * rule becomes `GROUP_DIVIDER`/`<hr>`.
+ */
+type GroupLine = { kind: 'text'; text: string } | { kind: 'divider' }
+
+/** Blank line plus rule between consecutive tool sections, so each block is distinct. */
+const TOOL_SEPARATOR: GroupLine[] = [
+  { kind: 'text', text: '' },
+  { kind: 'divider' },
+]
+
+/**
  * Compact one-line rendering of a tool entry: `✓ bash — done`,
  * `⏳ edit src/x.ts`, `✗ edit — failed`. Only the title and status are shown on
  * this line — the params and output are separate indented lines. The status
@@ -367,12 +389,36 @@ const GROUP_LINE_MAX = 20
 /** Total rendered body budget, measured on the HTML-escaped lines, so both the plain and formatted bodies stay under it. */
 const GROUP_CHAR_MAX = 8000
 
-/** The plain lines one tool contributes: its line, then its params and output. */
-function toolSectionLines(entry: TurnToolEntry): string[] {
-  const lines = [toolEntryLine(entry)]
-  if (entry.params) lines.push(`⚙ ${entry.params}`)
-  if (entry.output) for (const l of entry.output.split('\n')) lines.push(`↳ ${l}`)
+/**
+ * The lines one tool contributes: its line, then its params and output. A rule
+ * separates the `⚙` input from the `↳` output (Option 3) when both are present,
+ * so the two are never mistaken for one another.
+ */
+function toolSectionLines(entry: TurnToolEntry): GroupLine[] {
+  const lines: GroupLine[] = [{ kind: 'text', text: toolEntryLine(entry) }]
+  const hasParams = Boolean(entry.params)
+  const hasOutput = Boolean(entry.output)
+  if (hasParams) lines.push({ kind: 'text', text: `⚙ ${entry.params}` })
+  if (hasParams && hasOutput) lines.push({ kind: 'divider' })
+  if (entry.output) {
+    for (const l of entry.output.split('\n')) lines.push({ kind: 'text', text: `↳ ${l}` })
+  }
   return lines
+}
+
+/** Render one group line for the plain body (`\n`-joined). */
+function renderGroupLine(line: GroupLine): string {
+  return line.kind === 'divider' ? GROUP_DIVIDER : line.text
+}
+
+/** Render one group line for the HTML body (`<br>`-joined; a rule becomes `<hr>`). */
+function renderGroupLineHtml(line: GroupLine): string {
+  return line.kind === 'divider' ? '<hr>' : escapeHtml(line.text)
+}
+
+/** The widest a rendered line can be, so the size budget covers both renderings. */
+function groupLineSize(line: GroupLine): number {
+  return Math.max(renderGroupLine(line).length, renderGroupLineHtml(line).length) + 1
 }
 
 /**
@@ -387,10 +433,13 @@ function selectGroupEntries(entries: TurnToolEntry[]): {
 } {
   const shown: TurnToolEntry[] = []
   let used = 0
+  // Charge every entry the separator too (over-estimating by one for the first),
+  // so the inter-tool blank line + rule can never push the body over budget.
+  const separatorSize = TOOL_SEPARATOR.reduce((n, l) => n + groupLineSize(l), 0)
   for (let i = entries.length - 1; i >= 0; i--) {
     if (shown.length >= GROUP_LINE_MAX) break
     const entry = entries[i]!
-    const size = toolSectionLines(entry).reduce((n, l) => n + escapeHtml(l).length + 1, 0)
+    const size = toolSectionLines(entry).reduce((n, l) => n + groupLineSize(l), separatorSize)
     if (used + size > GROUP_CHAR_MAX && shown.length > 0) break
     shown.push(entry)
     used += size
@@ -424,24 +473,28 @@ export function turnGroupSummary(
 }
 
 /** The body lines of one group (everything after the summary): sections, then plan. */
-function turnGroupBodyLines(entries: TurnToolEntry[], planDetail?: string): string[] {
+function turnGroupBodyLines(entries: TurnToolEntry[], planDetail?: string): GroupLine[] {
   const { shown, omitted } = selectGroupEntries(entries)
-  const lines: string[] = []
-  if (omitted > 0) lines.push(`… ${omitted} more`)
-  for (const entry of shown) lines.push(...toolSectionLines(entry))
-  if (planDetail) lines.push(`🗒 ${clamp(planDetail)}`)
+  const lines: GroupLine[] = []
+  if (omitted > 0) lines.push({ kind: 'text', text: `… ${omitted} more` })
+  shown.forEach((entry, i) => {
+    if (i > 0) lines.push(...TOOL_SEPARATOR)
+    lines.push(...toolSectionLines(entry))
+  })
+  if (planDetail) lines.push({ kind: 'text', text: `🗒 ${clamp(planDetail)}` })
   return lines
 }
 
 /**
  * The plain fallback for one run of tool/plan activity: the group summary
- * followed by one section per tool (the tool line, its compact params, its
- * truncated output) and the plan detail — e.g.
- * `🔧 dev: 2 tools — edit src/x.ts — done\n✓ bash — done\n…`. It carries exactly
- * the content the HTML block carries, `\n`-joined, because that is what Element X
- * and non-HTML clients show. The group is created on the first activity after a
- * prose message and edited in place as more tools run, so the gap between two
- * prose messages is exactly one notice (never one per tool).
+ * followed by one section per tool (the tool line, its compact params, a rule,
+ * its truncated output) and the plan detail. Consecutive tool sections are
+ * separated by a blank line and a rule, so each tool's block is visually
+ * distinct; a rule also sits between a tool's `⚙` params and its `↳` output. It
+ * carries exactly the content the HTML block carries, `\n`-joined, because that
+ * is what Element X and non-HTML clients show. The group is created on the first
+ * activity after a prose message and edited in place as more tools run, so the
+ * gap between two prose messages is exactly one notice (never one per tool).
  */
 export function turnGroupBody(
   agentId: string,
@@ -449,17 +502,22 @@ export function turnGroupBody(
   planDetail?: string,
 ): string {
   return [
-    turnGroupSummary(agentId, entries, planDetail),
+    { kind: 'text' as const, text: turnGroupSummary(agentId, entries, planDetail) },
     ...turnGroupBodyLines(entries, planDetail),
-  ].join('\n')
+  ]
+    .map(renderGroupLine)
+    .join('\n')
 }
 
 /**
  * HTML rendering of the same group for `org.matrix.custom.html`: one collapsible
  * `<details>` block whose `<summary>` (first child, no `open`) is the group
- * summary, and whose body is the per-tool sections joined with `<br>`. Element
- * Web/Desktop renders it collapsed; Element X ignores `<details>` and shows the
- * body expanded. Every interpolated value is HTML-escaped.
+ * summary, and whose body is the per-tool sections joined with `<br>`. A rule in
+ * the line list becomes `<hr>` (matching the plain `GROUP_DIVIDER` line), so the
+ * params/output divider and the inter-tool separation read the same here as in
+ * the plain body. Element Web/Desktop renders it collapsed; Element X ignores
+ * `<details>` and shows the body expanded. Every interpolated value is
+ * HTML-escaped.
  */
 export function turnGroupHtml(
   agentId: string,
@@ -467,7 +525,7 @@ export function turnGroupHtml(
   planDetail?: string,
 ): string {
   const summary = escapeHtml(turnGroupSummary(agentId, entries, planDetail))
-  const body = turnGroupBodyLines(entries, planDetail).map(escapeHtml).join('<br>')
+  const body = turnGroupBodyLines(entries, planDetail).map(renderGroupLineHtml).join('<br>')
   return `<details><summary>${summary}</summary>${body}</details>`
 }
 

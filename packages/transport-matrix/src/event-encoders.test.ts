@@ -535,10 +535,50 @@ describe('turnGroupBody', () => {
         '🔧 dev: 2 tools — edit src/x.ts — done',
         '⏳ bash',
         '⚙ command=git status',
+        '────────────────',
         '↳ clean',
+        '',
+        '────────────────',
         '✓ edit src/x.ts — done',
         '⚙ filepath=src/x.ts',
       ].join('\n'),
+    )
+  })
+
+  it('draws a rule between a tool’s params and its output (Option 3)', () => {
+    const body = turnGroupBody('dev', [
+      entry({ title: 'bash', params: 'command=npm test, cwd=/workspace', output: '12 passed' }),
+    ])
+    expect(body.split('\n')).toEqual([
+      '🔧 dev: 1 tool — bash',
+      '• bash',
+      '⚙ command=npm test, cwd=/workspace',
+      '────────────────',
+      '↳ 12 passed',
+    ])
+  })
+
+  it('separates consecutive tool sections with a blank line and a rule', () => {
+    const body = turnGroupBody('dev', [
+      entry({ toolCallId: 'tc-1', title: 'bash', status: 'completed', output: 'clean' }),
+      entry({ toolCallId: 'tc-2', title: 'Read file', status: 'completed' }),
+    ])
+    expect(body.split('\n')).toEqual([
+      '🔧 dev: 2 tools — Read file — done',
+      '✓ bash — done',
+      '↳ clean',
+      '',
+      '────────────────',
+      '✓ Read file — done',
+    ])
+  })
+
+  it('adds no rule when a tool has params or output alone', () => {
+    expect(turnGroupBody('dev', [entry({ title: 'bash', params: 'command=ls' })])).toBe(
+      '🔧 dev: 1 tool — bash\n• bash\n⚙ command=ls',
+    )
+    expect(turnGroupBody('dev', [entry({ title: 'bash', output: 'clean' })])).toBe(
+      '🔧 dev: 1 tool — bash\n• bash\n↳ clean',
     )
   })
 
@@ -607,7 +647,7 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — edit src/x.ts — done</summary>' +
-        '⏳ bash<br>✓ edit src/x.ts — done</details>',
+        '⏳ bash<br><br><hr><br>✓ edit src/x.ts — done</details>',
     )
     expect(html.startsWith('<details><summary>')).toBe(true)
     expect(html).not.toContain('<details open')
@@ -625,8 +665,38 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 1 tool — bash — done</summary>' +
-        '✓ bash — done<br>⚙ command=git status<br>↳ clean tree</details>',
+        '✓ bash — done<br>⚙ command=git status<br><hr><br>↳ clean tree</details>',
     )
+  })
+
+  it('renders the params/output rule as <hr> and the inter-tool separation as a blank line + <hr>', () => {
+    const html = turnGroupHtml('dev', [
+      entry({
+        toolCallId: 'tc-1',
+        title: 'bash',
+        status: 'completed',
+        params: 'command=ls',
+        output: 'clean',
+      }),
+      entry({ toolCallId: 'tc-2', title: 'Read file', status: 'completed' }),
+    ])
+    expect(html).toBe(
+      '<details><summary>🔧 dev: 2 tools — Read file — done</summary>' +
+        '✓ bash — done<br>⚙ command=ls<br><hr><br>↳ clean<br><br><hr><br>✓ Read file — done</details>',
+    )
+  })
+
+  it('escapes the divider-independent text around every <hr>', () => {
+    const html = turnGroupHtml('dev', [
+      entry({ title: '<b>bash</b>', params: 'cmd=<i>&</i>', output: '<u>x</u>' }),
+    ])
+    expect(html).toContain('&lt;b&gt;bash&lt;/b&gt;')
+    expect(html).toContain('cmd=&lt;i&gt;&amp;&lt;/i&gt;')
+    expect(html).toContain('&lt;u&gt;x&lt;/u&gt;')
+    expect(html).toContain('<hr>')
+    expect(html).not.toContain('<b>')
+    expect(html).not.toContain('<i>')
+    expect(html).not.toContain('<u>')
   })
 
   it('escapes HTML-significant characters in the summary, params and output', () => {
