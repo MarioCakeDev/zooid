@@ -2789,10 +2789,11 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       event_id: id,
     })
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 2 tools — edit src/x.ts — pending\n⏳ bash\n• edit src/x.ts',
+      '🔧 architect: 2 tools — edit src/x.ts — pending\n⏳ bash\n\n────────────────\n• edit src/x.ts',
     )
     expect(contentOf(replaces[0]![0])['m.new_content']).toMatchObject({
-      body: '🔧 architect: 2 tools — edit src/x.ts — pending\n⏳ bash\n• edit src/x.ts',
+      body:
+        '🔧 architect: 2 tools — edit src/x.ts — pending\n⏳ bash\n\n────────────────\n• edit src/x.ts',
       'dev.zooid.mirror': true,
       'm.relates_to': { rel_type: 'm.thread', event_id: '$g1' },
     })
@@ -2801,7 +2802,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       format: 'org.matrix.custom.html',
       formatted_body:
         '<details><summary>🔧 architect: 2 tools — edit src/x.ts — pending</summary>' +
-        '⏳ bash<br>• edit src/x.ts</details>',
+        '⏳ bash<br><br><hr><br>• edit src/x.ts</details>',
     })
     finishPrompt()
     await settleTurn()
@@ -2921,7 +2922,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     finishPrompt()
     await settleTurn()
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 2 tools — Edit file\n• Read file\n• Edit file',
+      '🔧 architect: 2 tools — Edit file\n• Read file\n\n────────────────\n• Edit file',
     )
     expect(lines(client)).toEqual([
       '🔧 architect: 1 tool — Read file\n• Read file',
@@ -3069,7 +3070,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     ])
     expect(edits(client)).toHaveLength(1)
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 1 tool — bash — done\n✓ bash — done\n⚙ command=pnpm test\n↳ ok, 12 passed',
+      '🔧 architect: 1 tool — bash — done\n✓ bash — done\n⚙ command=pnpm test\n────────────────\n↳ ok, 12 passed',
     )
     const newContent = contentOf(edits(client)[0]![0])['m.new_content'] as Record<string, unknown>
     expect(newContent['dev.zooid.mirror']).toBe(true)
@@ -3079,7 +3080,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       format: 'org.matrix.custom.html',
       formatted_body:
         '<details><summary>🔧 architect: 1 tool — bash — done</summary>' +
-        '✓ bash — done<br>⚙ command=pnpm test<br>↳ ok, 12 passed</details>',
+        '✓ bash — done<br>⚙ command=pnpm test<br><hr><br>↳ ok, 12 passed</details>',
     })
     finishPrompt()
     await settleTurn()
