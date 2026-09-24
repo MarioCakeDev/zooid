@@ -1185,6 +1185,56 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     return chained
   }
 
+  // Matrix rejects a thread relation whose parent event itself carries a
+  // relation ("Cannot start threads from an event with a relation"): a
+  // top-level message that is a reply (`m.in_reply_to`) or an edit
+  // (`m.replace`) can therefore never be the thread root the daemon replies
+  // under. Walk the relation chain to the first event that can be one — the
+  // thread root for an `m.thread` relation, or the first relation-free
+  // ancestor otherwise — and fall back to the starting event only when the
+  // chain cannot be resolved (no room, no member to read as, fetch failed).
+  const relationRootCache = new Map<string, string>()
+  const RELATION_ROOT_MAX_HOPS = 8
+
+  async function resolveThreadRoot(evt: MatrixEvent): Promise<string | undefined> {
+    const ownId = evt.event_id
+    if (!ownId) return undefined
+    const thread = inboundThreadRoot(evt)
+    if (thread) return thread
+    const cached = relationRootCache.get(ownId)
+    if (cached) return cached
+    // Impersonate an agent in this room; AS reads require room membership.
+    const asUser = (
+      bindings.find((b) => b.rooms.some((r) => r.alias === evt.room_id)) ?? bindings[0]
+    )?.userId
+    let rootId = ownId
+    let content = evt.content
+    for (let hop = 0; hop < RELATION_ROOT_MAX_HOPS; hop++) {
+      const rel = content?.['m.relates_to']
+      if (!rel?.rel_type) break
+      const parentId = rel.event_id
+      if (!parentId) break
+      if (rel.rel_type === 'm.thread') {
+        rootId = parentId
+        break
+      }
+      // A non-thread relation: the referenced event may be relation-free.
+      if (!evt.room_id || !asUser) break
+      rootId = parentId
+      const parent = await client
+        .fetchEvent(evt.room_id, parentId, asUser)
+        .catch(() => null)
+      if (!parent) break
+      content = parent.content as MatrixEvent['content']
+    }
+    relationRootCache.set(ownId, rootId)
+    if (relationRootCache.size > SEEN_EVENT_CAP) {
+      const first = relationRootCache.keys().next().value
+      if (first !== undefined) relationRootCache.delete(first)
+    }
+    return rootId
+  }
+
   async function handleInboundEvent(evt: MatrixEvent): Promise<void> {
     if (evt.event_id) {
       if (seenEventIds.has(evt.event_id)) {
@@ -1408,8 +1458,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     }
 
     // Agent-promotion: top-level inbound event becomes the thread root.
-    // For in-thread messages the existing root is preserved.
-    const promotedRoot = inboundThreadRoot(evt) ?? evt.event_id
+    // For in-thread messages the existing root is preserved; for a reply or an
+    // edit the chain is walked to a root Matrix will accept (see
+    // `resolveThreadRoot`).
+    const promotedRoot = await resolveThreadRoot(evt)
     // Self-heal: if this is a thread reply but we have no in-memory state
     // for the root (e.g. daemon was just restarted), reconstruct it by
     // fetching the thread root + relations from the server.
