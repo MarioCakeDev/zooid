@@ -59,6 +59,7 @@ function fakeClient() {
     leaveRoom: vi.fn(async () => undefined),
     sendMessage: vi.fn(async () => ({ event_id: `$msg-${++n}` })),
     sendCustomEvent: vi.fn(async () => ({ event_id: `$custom-${++n}` })),
+    fetchEvent: vi.fn(async () => null),
     setTyping: vi.fn(async () => {}),
     setPresence: vi.fn(async () => {}),
   }
@@ -287,6 +288,93 @@ describe('matrix transport /transactions', () => {
     )
     expect(client.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ threadRoot: '$root' }),
+    )
+  })
+
+  it('threads under the replied-to event when a top-level reply cannot be a root', async () => {
+    // A top-level reply carries `m.relates_to: m.in_reply_to`. Synapse rejects
+    // a thread relation whose parent carries a relation, so the daemon must not
+    // reply under the reply event itself — it replies under what it replied to.
+    const { transport, agents, client } = makeTransport()
+    agents.prompt.mockImplementation(async (_name: string, p: { threadId: string }) => {
+      agents.onEvent('architect', {
+        type: 'agent_message_chunk',
+        sessionId: 'sess-' + p.threadId,
+        content: { type: 'text', text: 'reply' },
+      })
+      return { stopReason: 'end_turn' as const }
+    })
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$reply',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'follow up',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+            'm.relates_to': { rel_type: 'm.in_reply_to', event_id: '$parent' },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.ensureSession).toHaveBeenCalledWith(
+      'architect',
+      '$parent',
+      '!r:example.com',
+      '$parent',
+    )
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ threadRoot: '$parent' }),
+    )
+  })
+
+  it('walks a reply-to-a-reply chain to a root the homeserver accepts', async () => {
+    // The parent of the reply is itself a reply, so the daemon must keep
+    // walking: only `$grandparent` is relation-free and thus a valid root.
+    const { transport, agents, client } = makeTransport()
+    ;(client as unknown as Record<string, unknown>).fetchEvent = vi.fn(
+      async (_room: string, eventId: string) =>
+        eventId === '$parent'
+          ? { content: { 'm.relates_to': { rel_type: 'm.in_reply_to', event_id: '$grandparent' } } }
+          : null,
+    )
+    agents.prompt.mockImplementation(async (_name: string, p: { threadId: string }) => {
+      agents.onEvent('architect', {
+        type: 'agent_message_chunk',
+        sessionId: 'sess-' + p.threadId,
+        content: { type: 'text', text: 'reply' },
+      })
+      return { stopReason: 'end_turn' as const }
+    })
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$reply',
+          room_id: '!r:example.com',
+          sender: '@alice:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'follow up',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+            'm.relates_to': { rel_type: 'm.in_reply_to', event_id: '$parent' },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.ensureSession).toHaveBeenCalledWith(
+      'architect',
+      '$grandparent',
+      '!r:example.com',
+      '$grandparent',
+    )
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ threadRoot: '$grandparent' }),
     )
   })
 
