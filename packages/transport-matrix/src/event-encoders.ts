@@ -214,16 +214,21 @@ export interface TurnMirrorCounts {
 
 /**
  * One tool's latest state, keyed by `tool_call_id` and held in first-seen
- * order. A mirror line lists the entries of one prose gap: a new `tool_call_id`
+ * order. A mirror group lists the entries of one prose gap: a new `tool_call_id`
  * appends one, and a later `tool_call_update` for the same id mutates that entry
- * in place (title/status) — never a duplicate. Only the title and status are
- * kept: the line is titles + status, never raw tool output.
+ * in place (title/status/params/output) — never a duplicate. `params` is the
+ * tool's compact ACP `rawInput` (the bash command, the edit filepath, …) and
+ * `output` is the latest truncated text from its `tool_call_update` `content[]`.
  */
 export interface TurnToolEntry {
   toolCallId: string
   title: string
   /** ACP `ToolCallStatus`: pending | in_progress | completed | failed. */
   status?: string
+  /** Compact, single-line rendering of the tool's ACP `rawInput`, if seen. */
+  params?: string
+  /** Latest `tool_call_update` `content[]` text, clamped, `\n`-joined. */
+  output?: string
 }
 
 /**
@@ -261,12 +266,17 @@ function toolStatusIcon(status: string | undefined): string {
 
 /** Cap a single collapsed tool line so a long title stays glanceable. */
 const TOOL_LINE_MAX = 200
+/** Cap a tool's compact parameter rendering so a huge diff / command can't bloat the block. */
+const TOOL_PARAM_MAX = 200
+/** Cap a tool's latest output, both per `content[]` entry and per tool. */
+const TOOL_OUTPUT_MAX = 200
 
 /**
  * Compact one-line rendering of a tool entry: `✓ bash — done`,
- * `⏳ edit src/x.ts`, `✗ edit — failed`. Only the title and status are shown —
- * no raw tool output. The status label appears only for terminal states (the
- * ⏳/• glyphs already convey in-flight/pending), and the whole line is clamped.
+ * `⏳ edit src/x.ts`, `✗ edit — failed`. Only the title and status are shown on
+ * this line — the params and output are separate indented lines. The status
+ * label appears only for terminal states (the ⏳/• glyphs already convey
+ * in-flight/pending), and the whole line is clamped.
  */
 export function toolEntryLine(entry: TurnToolEntry): string {
   const terminal = entry.status === 'completed' || entry.status === 'failed'
@@ -274,57 +284,191 @@ export function toolEntryLine(entry: TurnToolEntry): string {
   return clamp(`${toolStatusIcon(entry.status)} ${entry.title}${label}`, TOOL_LINE_MAX)
 }
 
-/**
- * Cap the number of rendered lines in one group. Each entry is itself clamped
- * (`TOOL_LINE_MAX`), but a run of many tool calls before the next prose message
- * would otherwise grow the notice without bound — and every `m.replace` resends
- * the full roster, so a runaway turn can bloat the notice and, if the homeserver
- * rejects the oversize edit, freeze the line. `turnGroupLines` keeps only the
- * last N lines and summarises the rest as `… K more` so the newest activity is
- * what stays visible.
- */
-const GROUP_LINE_MAX = 20
-
-/** The plain lines of one group: one per tool entry, then the plan detail. */
-function turnGroupLines(entries: TurnToolEntry[], planDetail?: string): string[] {
-  const lines = entries.map(toolEntryLine)
-  if (planDetail) lines.push(`🗒 ${clamp(planDetail)}`)
-  if (lines.length <= GROUP_LINE_MAX) return lines
-  const shown = lines.slice(-GROUP_LINE_MAX)
-  return [`… ${lines.length - shown.length} more`, ...shown]
+/** Collapse a raw scalar/object value to one compact, whitespace-normalised fragment. */
+function compactValue(v: unknown): string {
+  if (typeof v === 'string') return v.replace(/\s+/g, ' ').trim()
+  if (v === null) return 'null'
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
 }
 
 /**
- * The plain fallback for one run of tool/plan activity: the tool calls since the
- * previous prose message (capped to the last `GROUP_LINE_MAX` lines, see
- * `turnGroupLines`), one per line — e.g.
- * `🔧 dev: ⏳ bash\n✓ edit src/x.ts`. The header keeps the `🔧 <agent>:` prefix on
- * the first line; each entry is on its own line so a client that honours `\n`
- * does not show one run-on line. The group is created on the first activity
- * after a prose message and edited in place as more tools run, so the gap
- * between two prose messages is exactly one notice (never one per tool).
+ * Compact, single-line rendering of an ACP `rawInput`: a scalar renders as
+ * itself, an object as `key=value` pairs joined by `, `. Each value is
+ * whitespace-collapsed and the whole string is clamped (`TOOL_PARAM_MAX`), so a
+ * big bash command or an edit diff stays glanceable. `undefined` when there is
+ * nothing to show.
+ */
+export function toolParamsText(rawInput: unknown): string | undefined {
+  if (rawInput === undefined || rawInput === null) return undefined
+  if (typeof rawInput === 'string') {
+    const s = rawInput.trim()
+    return s ? clamp(s, TOOL_PARAM_MAX) : undefined
+  }
+  if (typeof rawInput !== 'object') return String(rawInput)
+  const parts = Array.isArray(rawInput)
+    ? rawInput.map(compactValue)
+    : Object.entries(rawInput as Record<string, unknown>).map(
+        ([k, v]) => `${k}=${compactValue(v)}`,
+      )
+  return parts.length > 0 ? clamp(parts.join(', '), TOOL_PARAM_MAX) : undefined
+}
+
+/** Extract display text from one ACP `ToolCallContent` entry. */
+function outputEntryText(item: unknown): string | undefined {
+  if (!item || typeof item !== 'object') return undefined
+  const rec = item as Record<string, unknown>
+  if (rec.type === 'content') {
+    const block = rec.content as Record<string, unknown> | undefined
+    return block && block.type === 'text' ? nonEmptyString(block.text) : undefined
+  }
+  if (rec.type === 'diff') {
+    const path = nonEmptyString(rec.path)
+    const text = nonEmptyString(rec.newText) ?? nonEmptyString(rec.oldText)
+    return [path, text].filter(Boolean).join(': ') || undefined
+  }
+  if (rec.type === 'terminal') {
+    const id = nonEmptyString(rec.terminalId)
+    return id ? `terminal ${id}` : 'terminal'
+  }
+  return undefined
+}
+
+/**
+ * Flatten a `tool_call_update` `content[]` into one display block: each entry is
+ * collapsed and clamped (`TOOL_OUTPUT_MAX`), the entries are joined with `\n`,
+ * and the joined block is clamped again so one tool can never contribute more
+ * than `TOOL_OUTPUT_MAX` characters. `undefined` when nothing renderable is
+ * present.
+ */
+export function toolOutputText(content: unknown): string | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined
+  const parts: string[] = []
+  for (const item of content) {
+    const text = outputEntryText(item)
+    if (text) parts.push(clamp(text, TOOL_OUTPUT_MAX))
+  }
+  if (parts.length === 0) return undefined
+  const joined = parts.join('\n')
+  return joined.length > TOOL_OUTPUT_MAX
+    ? joined.slice(0, TOOL_OUTPUT_MAX - 1) + '…'
+    : joined
+}
+
+/**
+ * Cap the number of rendered tool entries in one group, and the total rendered
+ * body. Each entry is itself clamped, but a run of many tool calls before the
+ * next prose message would otherwise grow the notice without bound — and every
+ * `m.replace` resends the full body, so a runaway turn can bloat the notice and,
+ * if the homeserver rejects the oversize edit, freeze the line. The newest
+ * activity is kept and the hidden remainder summarised as `… K more`.
+ */
+const GROUP_LINE_MAX = 20
+/** Total rendered body budget, measured on the HTML-escaped lines, so both the plain and formatted bodies stay under it. */
+const GROUP_CHAR_MAX = 8000
+
+/** The plain lines one tool contributes: its line, then its params and output. */
+function toolSectionLines(entry: TurnToolEntry): string[] {
+  const lines = [toolEntryLine(entry)]
+  if (entry.params) lines.push(`⚙ ${entry.params}`)
+  if (entry.output) for (const l of entry.output.split('\n')) lines.push(`↳ ${l}`)
+  return lines
+}
+
+/**
+ * The newest entries that fit the entry-count (`GROUP_LINE_MAX`) and total-size
+ * (`GROUP_CHAR_MAX`) caps, plus how many older entries were dropped. The newest
+ * entry is always kept, even if it alone exceeds the size budget, so the tool
+ * named in the summary can never vanish from the body.
+ */
+function selectGroupEntries(entries: TurnToolEntry[]): {
+  shown: TurnToolEntry[]
+  omitted: number
+} {
+  const shown: TurnToolEntry[] = []
+  let used = 0
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (shown.length >= GROUP_LINE_MAX) break
+    const entry = entries[i]!
+    const size = toolSectionLines(entry).reduce((n, l) => n + escapeHtml(l).length + 1, 0)
+    if (used + size > GROUP_CHAR_MAX && shown.length > 0) break
+    shown.push(entry)
+    used += size
+  }
+  shown.reverse()
+  return { shown, omitted: entries.length - shown.length }
+}
+
+/**
+ * Summary line for one group: `🔧 <agent>: <N tools> — <last tool> — <status>`.
+ * It is the plain body's first line and the HTML `<summary>`. The status label
+ * is omitted when the last tool has no known status; a plan-only group reads
+ * `🔧 <agent>: 0 tools — plan`.
+ */
+export function turnGroupSummary(
+  agentId: string,
+  entries: TurnToolEntry[],
+  planDetail?: string,
+): string {
+  const n = entries.length
+  const tools = `${n} tool${n === 1 ? '' : 's'}`
+  const last = entries.at(-1)
+  let detail: string
+  if (last) {
+    const label = toolStatusLabel(last.status)
+    detail = label ? `${last.title} — ${label}` : last.title
+  } else {
+    detail = planDetail ? 'plan' : 'working'
+  }
+  return clamp(`🔧 ${agentId}: ${tools} — ${detail}`, TOOL_LINE_MAX)
+}
+
+/** The body lines of one group (everything after the summary): sections, then plan. */
+function turnGroupBodyLines(entries: TurnToolEntry[], planDetail?: string): string[] {
+  const { shown, omitted } = selectGroupEntries(entries)
+  const lines: string[] = []
+  if (omitted > 0) lines.push(`… ${omitted} more`)
+  for (const entry of shown) lines.push(...toolSectionLines(entry))
+  if (planDetail) lines.push(`🗒 ${clamp(planDetail)}`)
+  return lines
+}
+
+/**
+ * The plain fallback for one run of tool/plan activity: the group summary
+ * followed by one section per tool (the tool line, its compact params, its
+ * truncated output) and the plan detail — e.g.
+ * `🔧 dev: 2 tools — edit src/x.ts — done\n✓ bash — done\n…`. It carries exactly
+ * the content the HTML block carries, `\n`-joined, because that is what Element X
+ * and non-HTML clients show. The group is created on the first activity after a
+ * prose message and edited in place as more tools run, so the gap between two
+ * prose messages is exactly one notice (never one per tool).
  */
 export function turnGroupBody(
   agentId: string,
   entries: TurnToolEntry[],
   planDetail?: string,
 ): string {
-  return `🔧 ${agentId}: ${turnGroupLines(entries, planDetail).join('\n')}`
+  return [
+    turnGroupSummary(agentId, entries, planDetail),
+    ...turnGroupBodyLines(entries, planDetail),
+  ].join('\n')
 }
 
 /**
- * HTML rendering of the same group for `org.matrix.custom.html`: the header and
- * each entry line are HTML-escaped, and the lines are joined with `<br>`. Element
- * X renders separate lines for this where a bare `\n` in a plain body is shown
- * as one line.
+ * HTML rendering of the same group for `org.matrix.custom.html`: one collapsible
+ * `<details>` block whose `<summary>` (first child, no `open`) is the group
+ * summary, and whose body is the per-tool sections joined with `<br>`. Element
+ * Web/Desktop renders it collapsed; Element X ignores `<details>` and shows the
+ * body expanded. Every interpolated value is HTML-escaped.
  */
 export function turnGroupHtml(
   agentId: string,
   entries: TurnToolEntry[],
   planDetail?: string,
 ): string {
-  const lines = turnGroupLines(entries, planDetail).map(escapeHtml)
-  return `🔧 ${escapeHtml(agentId)}: ${lines.join('<br>')}`
+  const summary = escapeHtml(turnGroupSummary(agentId, entries, planDetail))
+  const body = turnGroupBodyLines(entries, planDetail).map(escapeHtml).join('<br>')
+  return `<details><summary>${summary}</summary>${body}</details>`
 }
 
 /**

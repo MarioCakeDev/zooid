@@ -15,8 +15,11 @@ import {
   activityDetail,
   toolStatusLabel,
   toolEntryLine,
+  toolParamsText,
+  toolOutputText,
   turnGroupBody,
   turnGroupHtml,
+  turnGroupSummary,
   turnFinalBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
@@ -399,6 +402,111 @@ describe('toActivityNoticeBody', () => {
   })
 })
 
+describe('toolParamsText', () => {
+  it('renders an object as compact key=value pairs', () => {
+    expect(toolParamsText({ command: 'git status' })).toBe('command=git status')
+    expect(toolParamsText({ filepath: '/a/b.ts', line: 3 })).toBe('filepath=/a/b.ts, line=3')
+  })
+
+  it('renders a bare string as itself', () => {
+    expect(toolParamsText('git status')).toBe('git status')
+  })
+
+  it('collapses whitespace and clamps a long value', () => {
+    expect(toolParamsText({ command: 'a\n  b' })).toBe('command=a b')
+    const clamped = toolParamsText({ command: 'x'.repeat(300) })!
+    expect(clamped).toHaveLength(200)
+    expect(clamped.startsWith('command=xxx')).toBe(true)
+    expect(clamped.endsWith('…')).toBe(true)
+  })
+
+  it('returns undefined for nullish or empty input', () => {
+    expect(toolParamsText(undefined)).toBeUndefined()
+    expect(toolParamsText(null)).toBeUndefined()
+    expect(toolParamsText({})).toBeUndefined()
+    expect(toolParamsText('')).toBeUndefined()
+  })
+})
+
+describe('toolOutputText', () => {
+  it('extracts text content blocks', () => {
+    expect(
+      toolOutputText([{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }]),
+    ).toBe('ok, 12 passed')
+  })
+
+  it('joins multiple entries with a newline', () => {
+    expect(
+      toolOutputText([
+        { type: 'content', content: { type: 'text', text: 'first' } },
+        { type: 'content', content: { type: 'text', text: 'second' } },
+      ]),
+    ).toBe('first\nsecond')
+  })
+
+  it('renders a diff entry from its path and new text', () => {
+    expect(toolOutputText([{ type: 'diff', path: '/a/b.ts', newText: '+line' }])).toBe(
+      '/a/b.ts: +line',
+    )
+  })
+
+  it('clamps each long entry', () => {
+    const out = toolOutputText([
+      { type: 'content', content: { type: 'text', text: 'x'.repeat(300) } },
+    ])!
+    expect(out).toHaveLength(200)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
+  it('clamps the joined output per tool, not just per entry', () => {
+    const out = toolOutputText([
+      { type: 'content', content: { type: 'text', text: 'a'.repeat(200) } },
+      { type: 'content', content: { type: 'text', text: 'b'.repeat(200) } },
+      { type: 'content', content: { type: 'text', text: 'c'.repeat(200) } },
+    ])!
+    expect(out).toHaveLength(200)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
+  it('renders a terminal entry as its id', () => {
+    expect(toolOutputText([{ type: 'terminal', terminalId: 't-1' }])).toBe('terminal t-1')
+  })
+
+  it('returns undefined when nothing is renderable', () => {
+    expect(toolOutputText(undefined)).toBeUndefined()
+    expect(toolOutputText([])).toBeUndefined()
+    expect(toolOutputText([{ type: 'content', content: { type: 'image' } }])).toBeUndefined()
+  })
+})
+
+describe('turnGroupSummary', () => {
+  const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
+    toolCallId: 'tc-1',
+    title: 'bash',
+    ...over,
+  })
+
+  it('reads `🔧 <agent>: <N tools> — <last tool> — <status>`', () => {
+    expect(turnGroupSummary('dev', [entry({ title: 'bash', status: 'completed' })])).toBe(
+      '🔧 dev: 1 tool — bash — done',
+    )
+    expect(
+      turnGroupSummary('dev', [
+        entry({ title: 'a' }),
+        entry({ toolCallId: 'tc-2', title: 'b', status: 'in_progress' }),
+      ]),
+    ).toBe('🔧 dev: 2 tools — b — running')
+  })
+
+  it('omits the status label when the last tool has none', () => {
+    expect(turnGroupSummary('dev', [entry({ title: 'bash' })])).toBe('🔧 dev: 1 tool — bash')
+  })
+
+  it('reads a plan-only group as 0 tools — plan', () => {
+    expect(turnGroupSummary('dev', [], 'plan (2 steps)')).toBe('🔧 dev: 0 tools — plan')
+  })
+})
+
 describe('turnGroupBody', () => {
   const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
     toolCallId: 'tc-1',
@@ -406,49 +514,82 @@ describe('turnGroupBody', () => {
     ...over,
   })
 
-  it('puts each tool in the group on its own line, in order', () => {
+  it('renders the summary then each tool line, params and output, in order', () => {
     expect(
       turnGroupBody('dev', [
-        entry({ title: 'bash', status: 'in_progress' }),
-        entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
+        entry({
+          title: 'bash',
+          status: 'in_progress',
+          params: 'command=git status',
+          output: 'clean',
+        }),
+        entry({
+          toolCallId: 'tc-2',
+          title: 'edit src/x.ts',
+          status: 'completed',
+          params: 'filepath=src/x.ts',
+        }),
       ]),
-    ).toBe('🔧 dev: ⏳ bash\n✓ edit src/x.ts — done')
+    ).toBe(
+      [
+        '🔧 dev: 2 tools — edit src/x.ts — done',
+        '⏳ bash',
+        '⚙ command=git status',
+        '↳ clean',
+        '✓ edit src/x.ts — done',
+        '⚙ filepath=src/x.ts',
+      ].join('\n'),
+    )
+  })
+
+  it('renders a multi-line output one `↳` line per entry', () => {
+    expect(
+      turnGroupBody('dev', [entry({ title: 'bash', output: 'first\nsecond' })]),
+    ).toBe('🔧 dev: 1 tool — bash\n• bash\n↳ first\n↳ second')
   })
 
   it('appends the plan detail as the last line', () => {
     expect(turnGroupBody('dev', [entry({ title: 'Read file' })], 'plan (2 steps)')).toBe(
-      '🔧 dev: • Read file\n🗒 plan (2 steps)',
+      '🔧 dev: 1 tool — Read file\n• Read file\n🗒 plan (2 steps)',
     )
   })
 
-  it('keeps the agent prefix on the first line only', () => {
-    const body = turnGroupBody('dev', [
-      entry({ title: 'bash' }),
-      entry({ toolCallId: 'tc-2', title: 'edit' }),
-    ])
-    expect(body.startsWith('🔧 dev: • bash\n')).toBe(true)
-    expect(body).not.toContain('🔧 dev: • bash\n🔧')
-  })
-
-  it('does not collapse the lines together', () => {
-    const body = turnGroupBody('dev', [
-      entry({ title: 'y'.repeat(180), status: 'completed' }),
-      entry({ toolCallId: 'tc-2', title: 'z'.repeat(180), status: 'completed' }),
-    ])
-    expect(body).toContain('\n')
-  })
-
-  it('caps a runaway group to its last lines and summarises the hidden remainder', () => {
+  it('caps a runaway group to its newest entries and summarises the hidden remainder', () => {
     const many = Array.from({ length: 25 }, (_, i) =>
       entry({ toolCallId: `tc-${i}`, title: `tool-${i}`, status: 'completed' }),
     )
     const body = turnGroupBody('dev', many)
     const lines = body.split('\n')
-    expect(lines).toHaveLength(21)
-    expect(lines[0]).toBe('🔧 dev: … 5 more')
-    expect(lines[1]).toBe('✓ tool-5 — done')
+    expect(lines[0]).toBe('🔧 dev: 25 tools — tool-24 — done')
+    expect(lines[1]).toBe('… 5 more')
+    expect(lines[2]).toBe('✓ tool-5 — done')
     expect(lines.at(-1)).toBe('✓ tool-24 — done')
-    expect(body).not.toContain('tool-4 — done')
+    expect(body).not.toContain('✓ tool-4 — done')
+  })
+
+  it('stays under the total-size cap even with fat params and output', () => {
+    const fat = Array.from({ length: 20 }, (_, i) =>
+      entry({
+        toolCallId: `tc-${i}`,
+        title: `tool-${i}`,
+        status: 'completed',
+        params: 'p'.repeat(200),
+        output: 'o'.repeat(200),
+      }),
+    )
+    const body = turnGroupBody('dev', fat)
+    expect(body).toMatch(/… \d+ more/)
+    expect(body).not.toContain('✓ tool-0 — done')
+    expect(body.length).toBeLessThan(9000)
+  })
+
+  it('always shows the newest entry, even when it alone exceeds the size budget', () => {
+    const body = turnGroupBody('dev', [
+      entry({ title: 'bash', status: 'completed', output: 'x'.repeat(9000) }),
+    ])
+    expect(body).toContain('✓ bash — done')
+    expect(body).toContain('↳ ')
+    expect(body).not.toContain('more')
   })
 })
 
@@ -459,34 +600,68 @@ describe('turnGroupHtml', () => {
     ...over,
   })
 
-  it('joins the same lines with <br> for org.matrix.custom.html', () => {
-    expect(
-      turnGroupHtml('dev', [
-        entry({ title: 'bash', status: 'in_progress' }),
-        entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
-      ]),
-    ).toBe('🔧 dev: ⏳ bash<br>✓ edit src/x.ts — done')
+  it('wraps the group in one collapsed <details> whose <summary> is first', () => {
+    const html = turnGroupHtml('dev', [
+      entry({ title: 'bash', status: 'in_progress' }),
+      entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
+    ])
+    expect(html).toBe(
+      '<details><summary>🔧 dev: 2 tools — edit src/x.ts — done</summary>' +
+        '⏳ bash<br>✓ edit src/x.ts — done</details>',
+    )
+    expect(html.startsWith('<details><summary>')).toBe(true)
+    expect(html).not.toContain('<details open')
+    expect(html).not.toContain(' open>')
   })
 
-  it('escapes HTML-significant characters in a title', () => {
-    const html = turnGroupHtml('dev', [entry({ title: '<script>&"x"</script>' })])
-    expect(html).toBe('🔧 dev: • &lt;script&gt;&amp;&quot;x&quot;&lt;/script&gt;')
+  it('renders params and output inside the block', () => {
+    const html = turnGroupHtml('dev', [
+      entry({
+        title: 'bash',
+        status: 'completed',
+        params: 'command=git status',
+        output: 'clean tree',
+      }),
+    ])
+    expect(html).toBe(
+      '<details><summary>🔧 dev: 1 tool — bash — done</summary>' +
+        '✓ bash — done<br>⚙ command=git status<br>↳ clean tree</details>',
+    )
+  })
+
+  it('escapes HTML-significant characters in the summary, params and output', () => {
+    const html = turnGroupHtml('dev', [
+      entry({
+        title: '<script>&"x"</script>',
+        params: 'cmd=<b>&</b>',
+        output: '<i>"o"</i>',
+      }),
+    ])
+    expect(html).toContain('&lt;script&gt;&amp;&quot;x&quot;&lt;/script&gt;')
+    expect(html).toContain('cmd=&lt;b&gt;&amp;&lt;/b&gt;')
+    expect(html).toContain('&lt;i&gt;&quot;o&quot;&lt;/i&gt;')
     expect(html).not.toContain('<script>')
+    expect(html).not.toContain('<b>')
+    expect(html).not.toContain('<i>')
   })
 
   it('renders the plan detail as a final <br> segment', () => {
     expect(turnGroupHtml('dev', [entry({ title: 'Read file' })], 'plan (2 steps)')).toBe(
-      '🔧 dev: • Read file<br>🗒 plan (2 steps)',
+      '<details><summary>🔧 dev: 1 tool — Read file</summary>• Read file<br>🗒 plan (2 steps)</details>',
     )
   })
 
-  it('caps a runaway group with a `… K more` line and escapes the summary', () => {
+  it('caps a runaway group with a `… K more` line', () => {
     const many = Array.from({ length: 25 }, (_, i) =>
       entry({ toolCallId: `tc-${i}`, title: `tool-${i}`, status: 'completed' }),
     )
     const html = turnGroupHtml('dev', many)
-    expect(html.startsWith('🔧 dev: … 5 more<br>✓ tool-5 — done<br>')).toBe(true)
-    expect(html.endsWith('✓ tool-24 — done')).toBe(true)
+    expect(
+      html.startsWith(
+        '<details><summary>🔧 dev: 25 tools — tool-24 — done</summary>… 5 more<br>✓ tool-5 — done<br>',
+      ),
+    ).toBe(true)
+    expect(html.endsWith('✓ tool-24 — done</details>')).toBe(true)
     expect(html).not.toContain('tool-4 — done')
   })
 })
