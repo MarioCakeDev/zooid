@@ -274,16 +274,30 @@ export function toolEntryLine(entry: TurnToolEntry): string {
   return clamp(`${toolStatusIcon(entry.status)} ${entry.title}${label}`, TOOL_LINE_MAX)
 }
 
+/**
+ * Cap the number of rendered lines in one group. Each entry is itself clamped
+ * (`TOOL_LINE_MAX`), but a run of many tool calls before the next prose message
+ * would otherwise grow the notice without bound — and every `m.replace` resends
+ * the full roster, so a runaway turn can bloat the notice and, if the homeserver
+ * rejects the oversize edit, freeze the line. `turnGroupLines` keeps only the
+ * last N lines and summarises the rest as `… K more` so the newest activity is
+ * what stays visible.
+ */
+const GROUP_LINE_MAX = 20
+
 /** The plain lines of one group: one per tool entry, then the plan detail. */
 function turnGroupLines(entries: TurnToolEntry[], planDetail?: string): string[] {
   const lines = entries.map(toolEntryLine)
   if (planDetail) lines.push(`🗒 ${clamp(planDetail)}`)
-  return lines
+  if (lines.length <= GROUP_LINE_MAX) return lines
+  const shown = lines.slice(-GROUP_LINE_MAX)
+  return [`… ${lines.length - shown.length} more`, ...shown]
 }
 
 /**
- * The plain fallback for one run of tool/plan activity: **every tool call since
- * the previous prose message**, one per line — e.g.
+ * The plain fallback for one run of tool/plan activity: the tool calls since the
+ * previous prose message (capped to the last `GROUP_LINE_MAX` lines, see
+ * `turnGroupLines`), one per line — e.g.
  * `🔧 dev: ⏳ bash\n✓ edit src/x.ts`. The header keeps the `🔧 <agent>:` prefix on
  * the first line; each entry is on its own line so a client that honours `\n`
  * does not show one run-on line. The group is created on the first activity

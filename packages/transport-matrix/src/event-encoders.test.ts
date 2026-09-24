@@ -437,6 +437,19 @@ describe('turnGroupBody', () => {
     ])
     expect(body).toContain('\n')
   })
+
+  it('caps a runaway group to its last lines and summarises the hidden remainder', () => {
+    const many = Array.from({ length: 25 }, (_, i) =>
+      entry({ toolCallId: `tc-${i}`, title: `tool-${i}`, status: 'completed' }),
+    )
+    const body = turnGroupBody('dev', many)
+    const lines = body.split('\n')
+    expect(lines).toHaveLength(21)
+    expect(lines[0]).toBe('🔧 dev: … 5 more')
+    expect(lines[1]).toBe('✓ tool-5 — done')
+    expect(lines.at(-1)).toBe('✓ tool-24 — done')
+    expect(body).not.toContain('tool-4 — done')
+  })
 })
 
 describe('turnGroupHtml', () => {
@@ -465,6 +478,16 @@ describe('turnGroupHtml', () => {
     expect(turnGroupHtml('dev', [entry({ title: 'Read file' })], 'plan (2 steps)')).toBe(
       '🔧 dev: • Read file<br>🗒 plan (2 steps)',
     )
+  })
+
+  it('caps a runaway group with a `… K more` line and escapes the summary', () => {
+    const many = Array.from({ length: 25 }, (_, i) =>
+      entry({ toolCallId: `tc-${i}`, title: `tool-${i}`, status: 'completed' }),
+    )
+    const html = turnGroupHtml('dev', many)
+    expect(html.startsWith('🔧 dev: … 5 more<br>✓ tool-5 — done<br>')).toBe(true)
+    expect(html.endsWith('✓ tool-24 — done')).toBe(true)
+    expect(html).not.toContain('tool-4 — done')
   })
 })
 

@@ -13,9 +13,12 @@ no way to get separate lines.
   on the first line) and the new `turnGroupHtml` renders the same lines joined
   with `<br>`. `turnMirrorNoticeContent` / `turnMirrorEditContent` carry that as
   `format: 'org.matrix.custom.html'` + `formatted_body` on the create and in
-  `m.new_content`, HTML-escaping each title/status. The plain `body` fallback,
-  the `dev.zooid.mirror` marker, the thread relation and the edit shape are
-  unchanged.
+`m.new_content`, HTML-escaping each title/status. The plain `body` stays the
+plaintext fallback (now `\n`-joined, where it used to be one ` · `-joined
+line); the `dev.zooid.mirror` marker, the thread relation and the edit shape
+are unchanged. One group is bounded to its last 20 lines, with the hidden
+remainder summarised as `… K more`, so a long turn cannot grow the notice (and
+every edit that resends it) without limit.
 
 - The approval notice no longer advertises `reply "approve <id>" or "deny <id>"`
   (the message path still works, just unadvertised) and now names the actor and
