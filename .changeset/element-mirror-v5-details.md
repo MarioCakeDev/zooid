@@ -19,9 +19,11 @@ expanded.
   first line of the plain body and the `<summary>`); the body is one section per
   tool in first-seen order — the tool line (`✓ bash — done`), its params on a `⚙`
   line, its output on `↳` lines — then the plan detail.
-- Caps: params and output are each clamped (200 chars), the group keeps its last
-  20 entries (`… K more` for the hidden remainder) and is bounded by an 8 KB body
-  budget, so nothing unbounded is resent on every `m.replace`. Every interpolated
-  value is HTML-escaped.
+- Caps: params and output are each clamped (200 chars — output per `content[]`
+  entry and in total), the group keeps its last 20 entries (`… K more` for the
+  hidden remainder) and is bounded by an 8 KB escaped-body budget, so nothing
+  unbounded is resent on every `m.replace`. The newest entry is always kept, even
+  if it alone exceeds the budget, so the tool named in the summary never vanishes
+  from the body. Every interpolated value is HTML-escaped.
 - The `dev.zooid.mirror` marker, the thread relation and the edit shape are
   unchanged in both the fallback and `m.new_content`.
