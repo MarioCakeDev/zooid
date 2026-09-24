@@ -52,13 +52,16 @@ describe('isApprovalId', () => {
 })
 
 describe('reactionCommand', () => {
-  it('maps the canonical emoji', () => {
+  it('maps the canonical thumbs reactions to a decision', () => {
     expect(reactionCommand(APPROVE_REACTION)).toBe('approve')
     expect(reactionCommand(DENY_REACTION)).toBe('deny')
+    expect(reactionCommand('👍')).toBe('approve')
+    expect(reactionCommand('👎')).toBe('deny')
   })
 
-  it('ignores any other reaction key', () => {
-    expect(reactionCommand('👍')).toBeUndefined()
+  it('ignores any other reaction key, including the retired ✅/❌', () => {
+    expect(reactionCommand('✅')).toBeUndefined()
+    expect(reactionCommand('❌')).toBeUndefined()
     expect(reactionCommand('yes')).toBeUndefined()
     expect(reactionCommand(undefined)).toBeUndefined()
   })

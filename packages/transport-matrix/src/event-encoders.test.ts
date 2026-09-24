@@ -319,7 +319,7 @@ describe('toActivityNoticeBody', () => {
     expect(body).toContain('🔐 Approval needed: git push (id a1b2)')
     expect(body).toContain('approve a1b2')
     expect(body).toContain('deny a1b2')
-    expect(body).toContain('✅')
+    expect(body).toContain('react 👍/👎')
   })
 
   it('mirrors an error, reusing its body (a stock client cannot render the custom event)', () => {
