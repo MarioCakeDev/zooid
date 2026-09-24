@@ -461,17 +461,19 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   }
 
   // ── Interleaved mirror lines ─────────────────────────────────────────────
-  // Each tool call and each plan update is posted as its OWN threaded notice at
-  // the moment it happens, so the timeline reads prose → tool → prose → tool and
-  // the order of execution is clear. A line is edited in place (`m.replace`) as
-  // the tool's status changes — updates never add a line. A `tool_call_id` maps
-  // to one line, first-seen order. On turn end a final summary line
-  // (`✅ dev: done · N tools · M files`, `⚠️ … failed`) closes the turn.
-  // `available_commands_update` is session metadata and is not mirrored. The raw
-  // custom events still go out (visible via Element's "show hidden events").
-  // `approval_request` and `error` stay standalone because they must be
-  // actionable. Each line is marked (see `TURN_MIRROR_MARKER`) so the router
-  // guard drops it as a mention and the Zooid web client can hide it.
+  // Every tool/plan activity since the previous prose message is grouped onto
+  // ONE threaded notice: the line is created on the first activity after a prose
+  // flush and edited in place (`m.replace`) as more tools run, so the timeline
+  // reads prose → tool line → prose → tool line and the order of execution is
+  // clear. A prose flush closes the group (`closeMirrorGroup`), so the next
+  // activity starts a new line; a `tool_call_id` always edits its own line. On
+  // turn end a final summary line (`✅ dev: done · N tools · M files`,
+  // `⚠️ … failed`) closes the turn. `available_commands_update` is session
+  // metadata and is not mirrored. The raw custom events still go out (visible
+  // via Element's "show hidden events"). `approval_request` and `error` stay
+  // standalone because they must be actionable. Each line is marked (see
+  // `TURN_MIRROR_MARKER`) so the router guard drops it as a mention and the
+  // Zooid web client can hide it.
   /** One editable line: its event id and the body currently applied to it. */
   interface MirrorLine {
     eventId: string

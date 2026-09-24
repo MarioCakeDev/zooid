@@ -293,10 +293,12 @@ export function activityDetail(
 }
 
 /**
- * Content of an interleaved mirror line: one threaded, marked `m.notice`. Each
- * tool/task entry is posted as its own line at the moment it happens, so the
- * timeline reads prose → tool → prose → tool and the order of execution is
- * clear. The line carries no HTML — it is a single compact line of text.
+ * Content of an interleaved mirror line: one threaded, marked `m.notice` for
+ * every tool/plan activity since the previous prose message. It is created on
+ * the first activity after a prose flush and edited in place as more tools run,
+ * so the timeline reads prose → tool line → prose → tool line and the order of
+ * execution is clear. The line carries no HTML — it is a single compact line of
+ * text (see `turnGroupBody`).
  */
 export function turnMirrorNoticeContent(
   body: string,
