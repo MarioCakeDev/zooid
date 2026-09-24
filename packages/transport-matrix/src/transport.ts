@@ -17,6 +17,8 @@ import { MatrixClient } from './matrix-client.js'
 import { BotPool } from './bot-pool.js'
 import {
   route,
+  resolveThreadRoot,
+  hasTypedRelation,
   isMediaMsgtype,
   isReturnRoute,
   wouldCycleCallers,
@@ -55,6 +57,7 @@ import { writeAttachment } from './attachments.js'
 import { SyncLoop } from './sync-loop.js'
 import { NO_PENDING_INPUT } from '@zooid/core'
 import { TaskRegistry, MAX_OPEN_TASKS_PER_ROOM, type TaskJournal, type TaskRecord } from './task-registry.js'
+import { TriggerGuard, type TriggerJournal } from './trigger-guard.js'
 import { InvocationRegistry } from './invocation-registry.js'
 import { evaluateCompletion, type StopReason } from './task-completion.js'
 import {
@@ -114,6 +117,11 @@ export interface CreateMatrixTransportOptions {
   saveSince?: (agentUserId: string, since: string) => void
   /** Durable lifecycle state; supplied by the daemon when it has a data directory. */
   taskJournal?: TaskJournal
+  /**
+   * Durable mention-trigger dedupe/rate-limit state; supplied by the daemon so
+   * a restart cannot replay an already-dispatched event into a fresh turn.
+   */
+  triggerJournal?: TriggerJournal
   taskRunId?: string
   pendingInput?: PendingInputRegistry
   /** Deferred-return fallback window. Defaults to `RETURN_GRACE_MS`. */
@@ -353,11 +361,6 @@ const DRAIN_MAX_MS = 30_000
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-function inboundThreadRoot(evt: MatrixEvent): string | undefined {
-  const r = evt.content?.['m.relates_to']
-  return r?.rel_type === 'm.thread' && r.event_id ? r.event_id : undefined
-}
-
 export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   const {
     agents,
@@ -395,6 +398,9 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   // Thread participation index: keyed by thread root event_id.
   const threadStates = new Map<string, ThreadState>()
   const taskRegistry = new TaskRegistry({ journal: opts.taskJournal, runId: opts.taskRunId })
+  // Mention-trigger dedupe/rate-limit: stops a mirrored or echoed mention from
+  // re-waking an agent, and survives a restart via the journal.
+  const triggerGuard = new TriggerGuard({ journal: opts.triggerJournal })
   const interruptedTasks = taskRegistry.restore()
   const invocations = new InvocationRegistry()
   const pendingInput = opts.pendingInput ?? NO_PENDING_INPUT
@@ -478,6 +484,12 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     toolCallIds: Set<string>
     /** Distinct file paths touched this turn (from tool locations). */
     files: Set<string>
+    /**
+     * The session's thread root refused the thread relation (it is itself a
+     * related event), so the line was posted top-level. Later edits must stay
+     * top-level too instead of re-asserting a thread.
+     */
+    unthreaded: boolean
     finalized: boolean
   }
   const turnMirrors = new Map<string, TurnMirrorState>()
@@ -492,16 +504,51 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     return /M_NOT_FOUND|unknown event|event not found/i.test(msg)
   }
 
-  async function createTurnMirror(ctx: SessionContext, body: string): Promise<string | undefined> {
-    try {
-      const { event_id } = await client.sendMessage({
+  /**
+   * Synapse refuses `m.relates_to: {rel_type: m.thread, event_id: X}` when X
+   * itself carries a relation ("Cannot start threads from an event with a
+   * relation"). A session whose thread root is such an event (an existing
+   * thread already rooted at a relation, or a related event that slipped
+   * through before this guard) cannot be threaded to — the mirror falls back
+   * to a top-level line instead of failing every turn.
+   */
+  function isThreadRootRelatedError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err)
+    return /Cannot start threads from an event with a relation/i.test(msg)
+  }
+
+  async function createTurnMirror(
+    ctx: SessionContext,
+    body: string,
+    state?: TurnMirrorState,
+  ): Promise<string | undefined> {
+    const threadRoot = state?.unthreaded ? undefined : ctx.threadRoot
+    const send = (root: string | undefined) =>
+      client.sendMessage({
         roomId: ctx.roomId,
         asUserId: ctx.agent.userId,
-        threadRoot: ctx.threadRoot,
-        content: turnMirrorNoticeContent(body, ctx.threadRoot),
+        ...(root ? { threadRoot: root } : {}),
+        content: turnMirrorNoticeContent(body, root),
       })
+    try {
+      const { event_id } = await send(threadRoot)
       return event_id
     } catch (err) {
+      if (threadRoot && isThreadRootRelatedError(err)) {
+        // Retry once without the thread relation: never start a thread from a
+        // related event. The line stands top-level so the summary is not lost.
+        console.warn(
+          `[matrix] turn mirror: thread root ${ctx.threadRoot} refuses relations; posting top-level`,
+        )
+        try {
+          const { event_id } = await send(undefined)
+          if (state) state.unthreaded = true
+          return event_id
+        } catch (fallbackErr) {
+          console.warn('[matrix] turn mirror create failed:', fallbackErr)
+          return undefined
+        }
+      }
       console.warn('[matrix] turn mirror create failed:', err)
       return undefined
     }
@@ -516,14 +563,14 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       await client.sendMessage({
         roomId: ctx.roomId,
         asUserId: ctx.agent.userId,
-        content: turnMirrorEditContent(state.eventId, body, ctx.threadRoot),
+        content: turnMirrorEditContent(state.eventId, body, state.unthreaded ? undefined : ctx.threadRoot),
       })
       state.lastBody = body
     } catch (err) {
       if (isMissingEventError(err)) {
         // The original was redacted or otherwise gone — recreate so the summary
         // is not silently lost, and retarget later edits at the new event.
-        const eventId = await createTurnMirror(ctx, body)
+        const eventId = await createTurnMirror(ctx, body, state)
         if (eventId) {
           state.eventId = eventId
           state.lastBody = body
@@ -552,6 +599,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         detail: 'working…',
         toolCallIds: new Set(),
         files: new Set(),
+        unthreaded: false,
         finalized: false,
       }
       turnMirrors.set(sessionId, state)
@@ -575,7 +623,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       // filtered again so a line whose creation failed is not retried from an
       // informational event.
       if (!createsTurnLine(input.eventType)) return
-      const eventId = await createTurnMirror(ctx, body)
+      const eventId = await createTurnMirror(ctx, body, state)
       if (eventId) {
         state.eventId = eventId
         state.lastBody = body
@@ -704,7 +752,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const parsed = parseApprovalCommand(body)
     if (!parsed) return false
     if (evt.sender && ourBotUserIds.has(evt.sender)) return false
-    const threadRoot = inboundThreadRoot(evt)
+    const threadRoot = resolveThreadRoot(evt)
 
     if (parsed.approvalId) {
       // Only an id-shaped token is treated as a command. Prose that merely
@@ -1374,7 +1422,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     // arrived above. Release the return it was holding.
     if (evt.type === 'dev.zooid.turn.end') {
       const agentId = evt.content?.agent_id as string | undefined
-      const endedRoot = inboundThreadRoot(evt)
+      const endedRoot = resolveThreadRoot(evt)
       const senderAgent = bindings.find((binding) => binding.userId === evt.sender)
       // Bind the claimed agent_id to the Matrix sender. Besides rejecting a
       // malformed boundary, this prevents another room member from releasing
@@ -1395,7 +1443,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       evt.content?.url &&
       !bindings.some((b) => b.userId === evt.sender)
     ) {
-      pendingMedia.add(evt.room_id, inboundThreadRoot(evt), {
+      pendingMedia.add(evt.room_id, resolveThreadRoot(evt), {
         eventId: evt.event_id,
         sender: evt.sender,
         msgtype: evt.content.msgtype as string,
@@ -1407,13 +1455,17 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       return
     }
 
-    // Agent-promotion: top-level inbound event becomes the thread root.
-    // For in-thread messages the existing root is preserved.
-    const promotedRoot = inboundThreadRoot(evt) ?? evt.event_id
+    // Agent-promotion: a genuinely top-level inbound event becomes the thread
+    // root. A message already in a thread joins its existing root, and a
+    // related event that does not resolve to one (an edit whose replacement
+    // content carries no thread) is never promoted — Synapse refuses to root a
+    // thread at an event that has a relation ("Cannot start threads from an
+    // event with a relation"), which is what broke the v2 mirror in threads.
+    const promotedRoot = resolveThreadRoot(evt) ?? (hasTypedRelation(evt) ? undefined : evt.event_id)
     // Self-heal: if this is a thread reply but we have no in-memory state
     // for the root (e.g. daemon was just restarted), reconstruct it by
     // fetching the thread root + relations from the server.
-    const inboundRel = inboundThreadRoot(evt)
+    const inboundRel = resolveThreadRoot(evt)
     if (
       evt.type === 'm.room.message' &&
       inboundRel &&
@@ -1511,8 +1563,21 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       }
     }
     for (const a of matches) {
-      console.log(`[matrix] → ${a.name} (${a.userId})`)
       if (!promotedRoot || !evt.room_id) continue
+      // A mention-triggered dispatch is content-driven, so the same event (or a
+      // mirrored echo of it) must not wake the same agent twice within a
+      // window. Dedupe + a hard per-target cap make an echo loop impossible.
+      if (a.trigger === 'mention') {
+        const decision = triggerGuard.allow(evt.event_id, a.name)
+        if (!decision.allowed) {
+          console.warn(
+            `[matrix] mention dispatch to ${a.name} suppressed (${decision.reason}) ` +
+              `for event ${evt.event_id} in ${evt.room_id}`,
+          )
+          continue
+        }
+      }
+      console.log(`[matrix] → ${a.name} (${a.userId})`)
       const sessionKey = sessionKeyFor(a.name, promotedRoot, threadStates.get(promotedRoot))
       const taskEnvelope =
         taskCtx?.isRoot && a.name === taskRec!.assignee
@@ -1632,7 +1697,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       // Drain pending media for this sender+thread and prepend as ACP content blocks.
       const pendingItems = pendingMedia.drain(
         roomId,
-        input.event ? inboundThreadRoot(input.event) : undefined,
+        input.event ? resolveThreadRoot(input.event) : undefined,
         input.event?.sender ?? '',
       )
       const { blocks, pathLines } = await buildMediaBlocks(pendingItems, {

@@ -34,6 +34,7 @@ import { prepullImages } from '../prepull-images.js'
 import { mountPushGateway } from '../push-gateway/index.js'
 import { makeSyncCursorStore } from './sync-cursors.js'
 import { makeTaskJournal } from './task-journal.js'
+import { makeTriggerJournal } from './trigger-journal.js'
 import { shouldBindHttpListener } from './pull-wiring.js'
 import { startTriggerScheduler, validateCron } from './trigger-scheduler.js'
 import { mountWebhookRoutes, WEBHOOK_ROUTE_PREFIX } from './webhook-routes.js'
@@ -258,6 +259,7 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
       botUserId: asUserId,
       media: mediaClient,
       taskJournal: dataDir ? makeTaskJournal(dataDir) : undefined,
+      triggerJournal: dataDir ? makeTriggerJournal(dataDir) : undefined,
       mode,
       loadSince: (uid) => {
         const name = nameByUserId.get(uid)

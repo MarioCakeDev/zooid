@@ -100,6 +100,58 @@ describe('route', () => {
   })
 })
 
+describe('mirror content never triggers an agent', () => {
+  const mirrorAgents: AgentBinding[] = [
+    {
+      name: 'architect',
+      userId: '@architect:example.com',
+      rooms: [{ alias: '!room1:example.com' }],
+      trigger: 'mention',
+    },
+  ]
+
+  function message(content: Record<string, unknown>) {
+    return {
+      type: 'm.room.message',
+      room_id: '!room1:example.com',
+      sender: '@dev:example.com',
+      event_id: '$mirror',
+      content,
+    }
+  }
+
+  it('ignores a per-turn mirror line even when its body names an agent', () => {
+    const evt = message({
+      msgtype: 'm.notice',
+      body: '🔧 dev: zooid_get_history — @architect:example.com',
+      'dev.zooid.mirror': true,
+    })
+    expect(route(evt as never, mirrorAgents)).toEqual([])
+  })
+
+  it('ignores a mirror edit (marker in m.new_content)', () => {
+    const evt = message({
+      msgtype: 'm.notice',
+      body: '* 🔧 dev: @architect:example.com',
+      'm.new_content': {
+        msgtype: 'm.notice',
+        body: '🔧 dev: @architect:example.com',
+        'dev.zooid.mirror': true,
+      },
+      'm.relates_to': { rel_type: 'm.replace', event_id: '$line' },
+    })
+    expect(route(evt as never, mirrorAgents)).toEqual([])
+  })
+
+  it('still routes an ordinary message with the same mention', () => {
+    const evt = message({
+      msgtype: 'm.text',
+      body: '@architect:example.com please look',
+    })
+    expect(route(evt as never, mirrorAgents).map((m) => m.name)).toEqual(['architect'])
+  })
+})
+
 describe('directed task routing', () => {
   const agents: AgentBinding[] = [
     {

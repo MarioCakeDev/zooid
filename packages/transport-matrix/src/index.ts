@@ -21,8 +21,8 @@ export { extractMentions, stripMention } from './mentions.js'
 export type { MaybeMessage } from './mentions.js'
 export { buildMentionContent } from './mention-content.js'
 export { isExpiredTrigger } from './trigger-freshness.js'
-export { route, isMediaMsgtype, MEDIA_MSGTYPES } from './router.js'
-export type { AgentBinding, RouteMatch } from './router.js'
+export { route, resolveThreadRoot, hasTypedRelation, isMediaMsgtype, MEDIA_MSGTYPES } from './router.js'
+export type { AgentBinding, RouteMatch, ThreadRelatable } from './router.js'
 export { BotPool } from './bot-pool.js'
 export { createMatrixTransport } from './transport.js'
 export type { CreateMatrixTransportOptions, MediaClientLike } from './transport.js'
@@ -59,6 +59,19 @@ export { writeAttachment } from './attachments.js'
 export type { WriteAttachmentInput } from './attachments.js'
 export { TaskRegistry, MAX_OPEN_TASKS_PER_ROOM } from './task-registry.js'
 export type { TaskRecord, TaskPhase, PersistedTask, TaskJournal } from './task-registry.js'
+export {
+  TriggerGuard,
+  DEFAULT_TRIGGER_DEDUPE_MS,
+  DEFAULT_TRIGGER_RATE_WINDOW_MS,
+  DEFAULT_TRIGGER_MAX_PER_WINDOW,
+} from './trigger-guard.js'
+export type {
+  TriggerDecision,
+  TriggerGuardOptions,
+  TriggerJournal,
+  PersistedTriggerEntry,
+  PersistedTriggerGuard,
+} from './trigger-guard.js'
 export { InvocationRegistry } from './invocation-registry.js'
 export { evaluateCompletion } from './task-completion.js'
 export type { CompletionInputs, CompletionDecision, StopReason } from './task-completion.js'

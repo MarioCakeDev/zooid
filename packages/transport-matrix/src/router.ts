@@ -1,4 +1,5 @@
 import type { RoomBinding } from '@zooid/core'
+import { isMirrorNotice } from './event-encoders.js'
 import { extractMentions } from './mentions.js'
 import { isExpiredTrigger } from './trigger-freshness.js'
 
@@ -56,7 +57,12 @@ export interface TaskThreadContext {
   isRoot: boolean
 }
 
-interface MaybeEvent {
+/** Anything with Matrix event content — the shape the thread helpers read. */
+export interface ThreadRelatable {
+  content?: Record<string, unknown>
+}
+
+interface MaybeEvent extends ThreadRelatable {
   type?: string
   room_id?: string
   sender?: string
@@ -69,9 +75,49 @@ interface MaybeEvent {
 
 export type RouteMatch = AgentBinding
 
-function inboundThreadRoot(event: MaybeEvent): string | undefined {
-  const r = event.content?.['m.relates_to']
-  return r?.rel_type === 'm.thread' && r.event_id ? r.event_id : undefined
+interface Relation {
+  rel_type?: unknown
+  event_id?: unknown
+}
+
+function relationOf(content: Record<string, unknown> | undefined, key: string): Relation | undefined {
+  const value = content?.[key]
+  return typeof value === 'object' && value !== null ? (value as Relation) : undefined
+}
+
+/**
+ * The thread root an inbound event belongs to, if any. A plain thread reply
+ * relates directly to the root. An edit (`m.replace`) instead keeps its thread
+ * relation inside `m.new_content` (MSC2676 + MSC3440) — the top-level
+ * `m.relates_to` is the replacement target, not the thread — so an edit of a
+ * threaded event still resolves to the thread it lives in. Returns `undefined`
+ * for a top-level event.
+ */
+export function resolveThreadRoot(event: ThreadRelatable): string | undefined {
+  const direct = relationOf(event.content, 'm.relates_to')
+  if (direct?.rel_type === 'm.thread' && typeof direct.event_id === 'string') {
+    return direct.event_id
+  }
+  const replacement = event.content?.['m.new_content']
+  const nested =
+    typeof replacement === 'object' && replacement !== null
+      ? relationOf(replacement as Record<string, unknown>, 'm.relates_to')
+      : undefined
+  if (nested?.rel_type === 'm.thread' && typeof nested.event_id === 'string') {
+    return nested.event_id
+  }
+  return undefined
+}
+
+/**
+ * Whether the event carries a *typed* relation (thread, replace, annotation).
+ * Synapse refuses to root a thread at such an event ("Cannot start threads from
+ * an event with a relation"), so it may never be promoted to a thread root. A
+ * bare rich reply (`m.relates_to.m.in_reply_to`, no `rel_type`) is not one.
+ */
+export function hasTypedRelation(event: ThreadRelatable): boolean {
+  const relType = relationOf(event.content, 'm.relates_to')?.rel_type
+  return typeof relType === 'string' && relType.length > 0
 }
 
 export function route(
@@ -83,6 +129,10 @@ export function route(
   if (event.type !== 'm.room.message') return []
   if (!event.content?.msgtype) return []
   if (isMediaMsgtype(event.content.msgtype)) return []
+  // The transport's own display mirror is not content: it echoes tool activity
+  // verbatim, which can quote old messages and their mentions. It must never
+  // trigger an agent (see `isMirrorNotice`).
+  if (isMirrorNotice(event.content as Record<string, unknown>)) return []
   if (isExpiredTrigger(event, Date.now())) {
     const stamp = event.content['dev.zooid.trigger']
     const ageMs = stamp?.fired_at !== undefined ? Date.now() - stamp.fired_at : undefined
@@ -94,7 +144,7 @@ export function route(
   }
   const mentions = new Set(extractMentions(event as never))
   const matches: RouteMatch[] = []
-  const threadRoot = inboundThreadRoot(event)
+  const threadRoot = resolveThreadRoot(event)
   const threadState = threadRoot ? threadStates?.get(threadRoot) : undefined
 
   for (const a of agents) {

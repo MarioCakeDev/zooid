@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { createMatrixTransport, rebuildThreadState } from './transport.js'
+import type { TriggerJournal } from './trigger-guard.js'
 
 function fakeRegistry() {
   let resolvePrompt: (() => void) | undefined
@@ -73,10 +74,14 @@ const baseAgents = [
   },
 ]
 
-function makeTransport(drain?: { drainQuietMs?: number; drainMaxMs?: number }) {
+function makeTransport(
+  drain?: { drainQuietMs?: number; drainMaxMs?: number },
+  clientOverride?: ReturnType<typeof fakeClient>,
+  triggerJournal?: TriggerJournal,
+) {
   const { reg, finishPrompt } = fakeRegistry()
   const approvals = fakeApprovals()
-  const client = fakeClient()
+  const client = clientOverride ?? fakeClient()
   const transport = createMatrixTransport({
     agents: reg as never,
     approvals: approvals as never,
@@ -84,6 +89,7 @@ function makeTransport(drain?: { drainQuietMs?: number; drainMaxMs?: number }) {
     bindings: baseAgents,
     hsToken: 'hs-secret',
     botUserId: '@zooid:example.com',
+    ...(triggerJournal ? { triggerJournal } : {}),
     // Disable post-turn drain by default so settleTurn (microtasks) suffices.
     // Tests covering trailing-chunk behavior pass an explicit window.
     drainQuietMs: drain?.drainQuietMs ?? 0,
@@ -2911,6 +2917,345 @@ describe('per-turn editable mirror line (dev.zooid.* folded)', () => {
       ),
     ).toBe(true)
     expect(client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('finished'))).toBe(false)
+  })
+})
+
+describe('mirror threading when the trigger already has a relation', () => {
+  // Synapse refuses `m.relates_to: {rel_type: m.thread, event_id: X}` when X
+  // itself carries a relation — "Cannot start threads from an event with a
+  // relation". `related` holds the event ids that have a relation, so a send
+  // that tries to root a thread at one of them fails exactly like the live
+  // homeserver.
+  function synapseClient(related: Set<string>) {
+    const client = fakeClient()
+    let n = 0
+    const refuse = (target: string | undefined) => {
+      if (target && related.has(target)) {
+        throw Object.assign(
+          new Error(
+            'sendEvent(m.room.message) failed: 400 {"errcode":"M_UNKNOWN","error":"Cannot start threads from an event with a relation"}',
+          ),
+          { status: 400 },
+        )
+      }
+    }
+    client.sendMessage.mockImplementation(
+      async (arg: { threadRoot?: string; content?: Record<string, unknown> }) => {
+        const r = arg.content?.['m.relates_to'] as
+          | { rel_type?: string; event_id?: string }
+          | undefined
+        refuse(r?.rel_type === 'm.thread' && r.event_id ? r.event_id : arg.threadRoot)
+        return { event_id: `$msg-${++n}` }
+      },
+    )
+    client.sendCustomEvent.mockImplementation(
+      async (arg: { content?: Record<string, unknown> }) => {
+        const r = arg.content?.['m.relates_to'] as
+          | { rel_type?: string; event_id?: string }
+          | undefined
+        refuse(r?.rel_type === 'm.thread' ? r.event_id : undefined)
+        return { event_id: `$custom-${++n}` }
+      },
+    )
+    return client
+  }
+
+  const mention = (threadRoot?: string) =>
+    threadRoot ? { 'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot } } : {}
+
+  async function startThreadedTurn(
+    transport: ReturnType<typeof makeTransport>['transport'],
+    trigger: Record<string, unknown>,
+    sessionRoot: string,
+  ) {
+    await postTxn(transport.app, { events: [trigger] })
+    await settleTurn()
+    return `sess-${sessionRoot}`
+  }
+
+  it('(a) roots a brand-new thread at a genuinely top-level trigger', async () => {
+    const client = synapseClient(new Set())
+    const { transport, agents } = makeTransport(undefined, client)
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$root-a',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'tool_call',
+      sessionId: 'sess-$root-a',
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    })
+    await settleTurn()
+    const create = client.sendMessage.mock.calls.find(([a]) =>
+      String((a as { content: { body?: string } }).content.body ?? '').startsWith('🔧'),
+    )
+    expect(create).toBeDefined()
+    expect(create![0]).toMatchObject({
+      threadRoot: '$root-a',
+      content: { 'm.relates_to': { rel_type: 'm.thread', event_id: '$root-a' } },
+    })
+  })
+
+  it('(b) posts into the existing thread for a plain in-thread trigger', async () => {
+    const client = synapseClient(new Set(['$reply-b']))
+    const { transport, agents } = makeTransport(undefined, client)
+    const sessionId = await startThreadedTurn(
+      transport,
+      {
+        type: 'm.room.message',
+        event_id: '$reply-b',
+        origin_server_ts: Date.now(),
+        room_id: '!r:example.com',
+        sender: '@user:example.com',
+        content: {
+          msgtype: 'm.text',
+          body: 'hi',
+          'm.mentions': { user_ids: ['@architect:example.com'] },
+          ...mention('$root-b'),
+        },
+      },
+      '$root-b',
+    )
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    })
+    await settleTurn()
+    const create = client.sendMessage.mock.calls.find(([a]) =>
+      String((a as { content: { body?: string } }).content.body ?? '').startsWith('🔧'),
+    )
+    expect(create).toBeDefined()
+    expect(create![0]).toMatchObject({
+      threadRoot: '$root-b',
+      content: { 'm.relates_to': { rel_type: 'm.thread', event_id: '$root-b' } },
+    })
+    // The reply that triggered the turn must never be used as a thread root.
+    expect(
+      client.sendMessage.mock.calls.some(
+        ([a]) => (a as { threadRoot?: string }).threadRoot === '$reply-b',
+      ),
+    ).toBe(false)
+  })
+
+  it('(c) resolves an edit trigger to its real thread root, then edits follow it', async () => {
+    // The live regression: a turn triggered by an event that already carries a
+    // relation (here `m.replace`) rooted the mirror at that related event and
+    // Synapse refused every send with 400. The edit's thread lives in
+    // `m.new_content.m.relates_to`; that is the root to use.
+    const client = synapseClient(new Set(['$edit-c']))
+    const { transport, agents } = makeTransport(undefined, client)
+    const sessionId = await startThreadedTurn(
+      transport,
+      {
+        type: 'm.room.message',
+        event_id: '$edit-c',
+        origin_server_ts: Date.now(),
+        room_id: '!r:example.com',
+        sender: '@user:example.com',
+        content: {
+          msgtype: 'm.text',
+          body: '* hi',
+          'm.mentions': { user_ids: ['@architect:example.com'] },
+          'm.relates_to': { rel_type: 'm.replace', event_id: '$orig-c' },
+          'm.new_content': {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+            ...mention('$root-c'),
+          },
+        },
+      },
+      '$root-c',
+    )
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    })
+    await settleTurn()
+    const create = client.sendMessage.mock.calls.find(([a]) =>
+      String((a as { content: { body?: string } }).content.body ?? '').startsWith('🔧'),
+    )
+    expect(create).toBeDefined()
+    expect(create![0]).toMatchObject({
+      threadRoot: '$root-c',
+      content: { 'm.relates_to': { rel_type: 'm.thread', event_id: '$root-c' } },
+    })
+    // No send targeted the related edit event as a root.
+    expect(
+      client.sendMessage.mock.calls.some(
+        ([a]) => (a as { threadRoot?: string }).threadRoot === '$edit-c',
+      ),
+    ).toBe(false)
+    expect(
+      client.sendCustomEvent.mock.calls.some(([a]) => {
+        const r = (a as { content?: Record<string, unknown> }).content?.['m.relates_to'] as
+          | { rel_type?: string; event_id?: string }
+          | undefined
+        return r?.rel_type === 'm.thread' && r.event_id === '$edit-c'
+      }),
+    ).toBe(false)
+
+    // The follow-up update is an edit of the same notice, in the same thread.
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'tool_call_update',
+      sessionId,
+      toolCallId: 'tc-1',
+      status: 'completed',
+    })
+    await settleTurn()
+    const replace = client.sendMessage.mock.calls.find(
+      ([a]) =>
+        ((a as { content: Record<string, unknown> }).content['m.relates_to'] as { rel_type?: string })
+          ?.rel_type === 'm.replace',
+    )
+    expect(replace).toBeDefined()
+    expect((replace![0] as { content: Record<string, unknown> }).content['m.new_content']).toMatchObject(
+      { 'm.relates_to': { rel_type: 'm.thread', event_id: '$root-c' } },
+    )
+  })
+
+  it('falls back to a top-level notice when the thread root refuses the relation', async () => {
+    // A thread already rooted at a related event cannot be replied to (the
+    // live corruption). The mirror must not spam a 400 every turn: it retries
+    // once without the thread relation so the summary still lands.
+    const client = synapseClient(new Set(['$corrupt-root']))
+    const { transport, agents } = makeTransport(undefined, client)
+    const sessionId = await startThreadedTurn(
+      transport,
+      {
+        type: 'm.room.message',
+        event_id: '$reply-d',
+        origin_server_ts: Date.now(),
+        room_id: '!r:example.com',
+        sender: '@user:example.com',
+        content: {
+          msgtype: 'm.text',
+          body: 'hi',
+          'm.mentions': { user_ids: ['@architect:example.com'] },
+          ...mention('$corrupt-root'),
+        },
+      },
+      '$corrupt-root',
+    )
+    await (agents.onEvent as (n: string, e: unknown) => unknown)('architect', {
+      type: 'tool_call',
+      sessionId,
+      toolCallId: 'tc-1',
+      title: 'Run tests',
+    })
+    await settleTurn()
+    const create = client.sendMessage.mock.calls.find(([a]) => {
+      const arg = a as { threadRoot?: string; content: Record<string, unknown> & { body?: string } }
+      return (
+        String(arg.content.body ?? '').startsWith('🔧') &&
+        arg.threadRoot === undefined &&
+        arg.content['m.relates_to'] === undefined
+      )
+    })
+    expect(create).toBeDefined()
+  })
+})
+
+describe('mention trigger echo guard', () => {
+  const mentionEvent = (eventId: string, body: string, extra: Record<string, unknown> = {}) => ({
+    type: 'm.room.message',
+    event_id: eventId,
+    origin_server_ts: Date.now(),
+    room_id: '!r:example.com',
+    sender: '@agent.dev:example.com',
+    content: {
+      msgtype: 'm.notice',
+      body,
+      'm.mentions': { user_ids: ['@architect:example.com'] },
+      ...extra,
+    },
+  })
+
+  it('does not dispatch an agent named inside a mirrored echo', async () => {
+    const { transport, agents } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        mentionEvent('$echo1', '🔧 dev: zooid_get_history — @architect:example.com', {
+          'dev.zooid.mirror': true,
+        }),
+      ],
+    })
+    await settleTurn()
+    expect(agents.prompt).not.toHaveBeenCalled()
+  })
+
+  it('does not re-dispatch an event recorded in the trigger journal (restart)', async () => {
+    const store = {
+      state: {
+        version: 1 as const,
+        entries: [{ key: '$seen::architect', target: 'architect', at: Date.now() }],
+      },
+    }
+    const journal: TriggerJournal = {
+      load: () => store.state,
+      save: (state) => {
+        store.state = state
+      },
+    }
+    const { transport, agents } = makeTransport(undefined, undefined, journal)
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$seen',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.prompt).not.toHaveBeenCalled()
+  })
+
+  it('still dispatches a fresh mention', async () => {
+    const { transport, agents } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$fresh',
+          origin_server_ts: Date.now(),
+          room_id: '!r:example.com',
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.prompt).toHaveBeenCalledTimes(1)
   })
 })
 

@@ -144,6 +144,28 @@ function summarizeToolContent(content: unknown): string | undefined {
 export const TURN_MIRROR_MARKER = 'dev.zooid.mirror'
 
 /**
+ * True when a Matrix message is the transport's own display mirror rather than
+ * real content. The marker rides on the per-turn line and on every `m.replace`
+ * edit (repeated in `m.new_content`, which is the content a client applies), so
+ * both the create and each edit are recognised.
+ *
+ * The mirror echoes tool activity verbatim, and a context-MCP result such as
+ * `zooid_get_history` quotes old messages — including their `@agent` mentions.
+ * Routing must never treat that as a fresh mention, or an agent wakes itself or
+ * a peer in a loop with no actual question.
+ */
+export function isMirrorNotice(content: Record<string, unknown> | undefined): boolean {
+  if (!content) return false
+  if (content[TURN_MIRROR_MARKER] === true) return true
+  const replacement = content['m.new_content']
+  return (
+    typeof replacement === 'object' &&
+    replacement !== null &&
+    (replacement as Record<string, unknown>)[TURN_MIRROR_MARKER] === true
+  )
+}
+
+/**
  * Compact, human-readable mirror body for an outbound `dev.zooid.*` activity
  * event that must stand alone in the timeline. Since the per-turn mirror line
  * folds tool/plan/command activity into one editable notice, the only events
@@ -249,17 +271,23 @@ export function activityDetail(
   }
 }
 
-/** Content of the initial per-turn mirror notice: threaded and marked. */
+/**
+ * Content of the initial per-turn mirror notice: marked, and threaded at
+ * `threadRoot` when one is given. `threadRoot` is omitted only for the
+ * fallback when the session's root cannot accept a thread relation (an event
+ * that already has one) — the line then stands top-level rather than failing.
+ */
 export function turnMirrorNoticeContent(
   body: string,
-  threadRoot: string,
+  threadRoot?: string,
 ): { msgtype: string; body: string; [k: string]: unknown } {
-  return {
+  const content: { msgtype: string; body: string; [k: string]: unknown } = {
     msgtype: 'm.notice',
     body,
     [TURN_MIRROR_MARKER]: true,
-    'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
   }
+  if (threadRoot) content['m.relates_to'] = { rel_type: 'm.thread', event_id: threadRoot }
+  return content
 }
 
 /**
@@ -272,18 +300,23 @@ export function turnMirrorNoticeContent(
 export function turnMirrorEditContent(
   eventId: string,
   body: string,
-  threadRoot: string,
+  threadRoot?: string,
 ): { msgtype: string; body: string; [k: string]: unknown } {
+  const replacement: { msgtype: string; body: string; [k: string]: unknown } = {
+    msgtype: 'm.notice',
+    body,
+    [TURN_MIRROR_MARKER]: true,
+  }
+  // Only re-assert the thread when the line actually lives in one; an
+  // unthreaded fallback line must not gain a thread on its first edit.
+  if (threadRoot) {
+    replacement['m.relates_to'] = { rel_type: 'm.thread', event_id: threadRoot }
+  }
   return {
     msgtype: 'm.notice',
     body: `* ${body}`,
     [TURN_MIRROR_MARKER]: true,
-    'm.new_content': {
-      msgtype: 'm.notice',
-      body,
-      [TURN_MIRROR_MARKER]: true,
-      'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
-    },
+    'm.new_content': replacement,
     'm.relates_to': { rel_type: 'm.replace', event_id: eventId },
   }
 }
