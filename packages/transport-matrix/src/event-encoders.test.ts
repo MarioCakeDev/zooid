@@ -16,6 +16,7 @@ import {
   toolStatusLabel,
   toolEntryLine,
   turnGroupBody,
+  turnGroupHtml,
   turnFinalBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
@@ -309,17 +310,58 @@ describe('toTurnEndBody', () => {
 })
 
 describe('toActivityNoticeBody', () => {
-  it('announces an approval request with the id and both interactive replies', () => {
-    const body = toActivityNoticeBody('dev.zooid.approval_request', {
-      approval_id: 'a1b2',
-      tool_call_id: 'tc-1',
-      tool_title: 'git push',
-      options: [],
-    })
-    expect(body).toContain('🔐 Approval needed: git push (id a1b2)')
-    expect(body).toContain('approve a1b2')
-    expect(body).toContain('deny a1b2')
-    expect(body).toContain('react 👍/👎')
+  it('names the agent and the command it wants to run, and drops the reply hint', () => {
+    const body = toActivityNoticeBody(
+      'dev.zooid.approval_request',
+      {
+        approval_id: 'a1b2',
+        tool_call_id: 'tc-1',
+        tool_kind: 'execute',
+        tool_title: 'bash',
+        tool_input: { command: 'git push --force origin main' },
+        options: [],
+      },
+      'infra',
+    )
+    expect(body).toBe('🔐 infra wants to run: git push --force origin main — react 👍/👎')
+    expect(body).not.toContain('reply')
+    expect(body).not.toContain('approve ')
+    expect(body).not.toContain('deny ')
+  })
+
+  it('names the file a write/edit tool wants to touch', () => {
+    expect(
+      toActivityNoticeBody(
+        'dev.zooid.approval_request',
+        {
+          tool_kind: 'edit',
+          tool_title: 'edit',
+          tool_input: { filepath: '/workspace/src/x.ts' },
+        },
+        'dev',
+      ),
+    ).toBe('🔐 dev wants to edit: /workspace/src/x.ts — react 👍/👎')
+  })
+
+  it('falls back to the tool title when the input carries no command or path', () => {
+    expect(
+      toActivityNoticeBody(
+        'dev.zooid.approval_request',
+        { tool_title: 'git push', tool_input: { ref: 'main' } },
+        'architect',
+      ),
+    ).toBe('🔐 architect wants to use: git push — react 👍/👎')
+  })
+
+  it('clamps a long approval command so the notice stays glanceable', () => {
+    const body = toActivityNoticeBody(
+      'dev.zooid.approval_request',
+      { tool_kind: 'execute', tool_input: { command: 'x'.repeat(500) } },
+      'dev',
+    )
+    expect(body).toBeDefined()
+    expect(body!.length).toBeLessThanOrEqual(400)
+    expect(body!.endsWith('… — react 👍/👎')).toBe(true)
   })
 
   it('mirrors an error, reusing its body (a stock client cannot render the custom event)', () => {
@@ -364,29 +406,65 @@ describe('turnGroupBody', () => {
     ...over,
   })
 
-  it('joins every tool in the group onto one line, in order', () => {
+  it('puts each tool in the group on its own line, in order', () => {
     expect(
       turnGroupBody('dev', [
         entry({ title: 'bash', status: 'in_progress' }),
         entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
       ]),
-    ).toBe('🔧 dev: ⏳ bash · ✓ edit src/x.ts — done')
+    ).toBe('🔧 dev: ⏳ bash\n✓ edit src/x.ts — done')
   })
 
-  it('appends the plan detail as the last segment', () => {
+  it('appends the plan detail as the last line', () => {
     expect(turnGroupBody('dev', [entry({ title: 'Read file' })], 'plan (2 steps)')).toBe(
-      '🔧 dev: • Read file · 🗒 plan (2 steps)',
+      '🔧 dev: • Read file\n🗒 plan (2 steps)',
     )
   })
 
-  it('clamps a long group line to one line', () => {
-    const many = Array.from({ length: 5 }, (_, i) =>
-      entry({ toolCallId: `tc-${i}`, title: 'y'.repeat(180), status: 'completed' }),
+  it('keeps the agent prefix on the first line only', () => {
+    const body = turnGroupBody('dev', [
+      entry({ title: 'bash' }),
+      entry({ toolCallId: 'tc-2', title: 'edit' }),
+    ])
+    expect(body.startsWith('🔧 dev: • bash\n')).toBe(true)
+    expect(body).not.toContain('🔧 dev: • bash\n🔧')
+  })
+
+  it('does not collapse the lines together', () => {
+    const body = turnGroupBody('dev', [
+      entry({ title: 'y'.repeat(180), status: 'completed' }),
+      entry({ toolCallId: 'tc-2', title: 'z'.repeat(180), status: 'completed' }),
+    ])
+    expect(body).toContain('\n')
+  })
+})
+
+describe('turnGroupHtml', () => {
+  const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
+    toolCallId: 'tc-1',
+    title: 'bash',
+    ...over,
+  })
+
+  it('joins the same lines with <br> for org.matrix.custom.html', () => {
+    expect(
+      turnGroupHtml('dev', [
+        entry({ title: 'bash', status: 'in_progress' }),
+        entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
+      ]),
+    ).toBe('🔧 dev: ⏳ bash<br>✓ edit src/x.ts — done')
+  })
+
+  it('escapes HTML-significant characters in a title', () => {
+    const html = turnGroupHtml('dev', [entry({ title: '<script>&"x"</script>' })])
+    expect(html).toBe('🔧 dev: • &lt;script&gt;&amp;&quot;x&quot;&lt;/script&gt;')
+    expect(html).not.toContain('<script>')
+  })
+
+  it('renders the plan detail as a final <br> segment', () => {
+    expect(turnGroupHtml('dev', [entry({ title: 'Read file' })], 'plan (2 steps)')).toBe(
+      '🔧 dev: • Read file<br>🗒 plan (2 steps)',
     )
-    const body = turnGroupBody('dev', many)
-    expect(body.length).toBe(400)
-    expect(body.endsWith('…')).toBe(true)
-    expect(body).not.toContain('\n')
   })
 })
 
@@ -501,6 +579,19 @@ describe('turnMirrorNoticeContent', () => {
       'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
     })
   })
+
+  it('adds the HTML format and formatted_body when a formatted body is given', () => {
+    expect(turnMirrorNoticeContent('🔧 dev: ⏳ bash\n✓ edit', '$root', '🔧 dev: ⏳ bash<br>✓ edit')).toEqual(
+      {
+        msgtype: 'm.notice',
+        body: '🔧 dev: ⏳ bash\n✓ edit',
+        format: 'org.matrix.custom.html',
+        formatted_body: '🔧 dev: ⏳ bash<br>✓ edit',
+        'dev.zooid.mirror': true,
+        'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
+      },
+    )
+  })
 })
 
 describe('turnMirrorEditContent', () => {
@@ -512,6 +603,32 @@ describe('turnMirrorEditContent', () => {
       'm.new_content': {
         msgtype: 'm.notice',
         body: '✓ bash — done',
+        'dev.zooid.mirror': true,
+        'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
+      },
+      'm.relates_to': { rel_type: 'm.replace', event_id: '$notice' },
+    })
+  })
+
+  it('preserves the multi-line shape in the HTML edit of m.new_content', () => {
+    expect(
+      turnMirrorEditContent(
+        '$notice',
+        '🔧 dev: ⏳ bash\n✓ edit — done',
+        '$root',
+        '🔧 dev: ⏳ bash<br>✓ edit — done',
+      ),
+    ).toEqual({
+      msgtype: 'm.notice',
+      body: '* 🔧 dev: ⏳ bash\n✓ edit — done',
+      format: 'org.matrix.custom.html',
+      formatted_body: '* 🔧 dev: ⏳ bash<br>✓ edit — done',
+      'dev.zooid.mirror': true,
+      'm.new_content': {
+        msgtype: 'm.notice',
+        body: '🔧 dev: ⏳ bash\n✓ edit — done',
+        format: 'org.matrix.custom.html',
+        formatted_body: '🔧 dev: ⏳ bash<br>✓ edit — done',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
       },
