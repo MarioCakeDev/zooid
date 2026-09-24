@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process'
+import type { EventEmitter } from 'node:events'
 import { resolve as pathResolve } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import {
@@ -37,8 +38,25 @@ export interface SpawnRuntime {
     image?: string
     /** Bind mounts. Honoured by container runtimes; ignored by local spawners. */
     mounts?: Array<{ path: string; target: string; mode: 'ro' | 'rw' }>
+    /** Agent id. Container runtimes use it for deterministic container names. */
+    agentId?: string
   }): ChildProcess
 }
+
+/**
+ * Per-step deadlines for the ACP handshake. A child whose container was
+ * recreated (or whose shim wedged) must fail fast instead of blocking
+ * `ensureSession` forever.
+ */
+export interface AcpClientTimeouts {
+  /** `initialize` during `start()`. Default 120_000ms. 0 disables the timer. */
+  initializeMs?: number
+  /** `loadSession` / `newSession` in `ensureSession()`. Default 60_000ms. */
+  sessionMs?: number
+}
+
+const DEFAULT_INITIALIZE_TIMEOUT_MS = 120_000
+const DEFAULT_SESSION_TIMEOUT_MS = 60_000
 
 export interface AcpClientOptions {
   agent: AgentConfig
@@ -80,6 +98,8 @@ export interface AcpClientOptions {
     args: string[]
     env: Array<{ name: string; value: string }>
   }>
+  /** Handshake deadlines. See {@link AcpClientTimeouts}. */
+  timeouts?: AcpClientTimeouts
 }
 
 export class AcpClient {
@@ -93,11 +113,27 @@ export class AcpClient {
   private warnedNoStore = false
   private initialized = false
   private readonly turns: TurnTracker | null
+  private dead = false
+  private deathReason: Error | null = null
+  private readonly deathWaiters = new Set<(err: Error) => void>()
+  private readonly timeouts: Required<AcpClientTimeouts>
 
   constructor(private readonly options: AcpClientOptions) {
     this.turns = options.onTap
       ? new TurnTracker({ agentId: options.agent.id, onTap: options.onTap })
       : null
+    this.timeouts = {
+      initializeMs: options.timeouts?.initializeMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS,
+      sessionMs: options.timeouts?.sessionMs ?? DEFAULT_SESSION_TIMEOUT_MS,
+    }
+  }
+
+  /**
+   * Whether the client is still usable. False once the child exits/errors or
+   * `stop()` runs. The registry drops and replaces clients that report false.
+   */
+  isAlive(): boolean {
+    return this.initialized && !this.dead && this.connection !== null
   }
 
   async start(): Promise<void> {
@@ -113,11 +149,13 @@ export class AcpClient {
         cwd: this.options.agent.cwd,
         image: this.options.agent.image,
         mounts: this.options.agent.mounts,
+        agentId: this.options.agent.id,
       })
       this.runtimeChild = child
       if (!child.stdout || !child.stdin) {
         throw new Error('AcpClient: runtime returned a child without piped stdio')
       }
+      this.watchChild(child, 'child')
       stdout = child.stdout
       stdin = child.stdin
       stderr = child.stderr
@@ -128,6 +166,7 @@ export class AcpClient {
         env: this.options.agent.env,
         cwd: this.options.agent.cwd,
       })
+      this.watchChild(this.process, 'child')
       this.process.start()
       stdout = this.process.stdout
       stdin = this.process.stdin
@@ -142,19 +181,24 @@ export class AcpClient {
 
     this.connection = new ClientSideConnection(() => this.buildClient(), stream)
 
-    const init = await this.connection.initialize({
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
-      clientInfo: { name: 'zooid', title: 'Zooid', version: '0.0.1' },
-    })
+    const init = await this.withDeadline(
+      'initialize',
+      this.connection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+        clientInfo: { name: 'zooid', title: 'Zooid', version: '0.0.1' },
+      }),
+      this.timeouts.initializeMs,
+    )
     this.agentCapabilities = init.agentCapabilities ?? {}
     this.initialized = true
   }
 
   async stop(): Promise<void> {
+    this.markDead(new Error(`AcpClient(${this.options.agent.id}): stopped`))
     this.process?.kill()
     this.runtimeChild?.kill('SIGTERM')
     this.process = null
@@ -168,6 +212,9 @@ export class AcpClient {
     channelId?: string,
     contextThreadId?: string,
   ): Promise<string> {
+    if (this.dead) {
+      throw this.deathReason ?? new Error(`AcpClient(${this.options.agent.id}): client is dead`)
+    }
     if (!this.connection || !this.initialized) {
       throw new Error('AcpClient.start() must be called before ensureSession()')
     }
@@ -197,14 +244,19 @@ export class AcpClient {
     const persisted = this.store?.get(threadId)
     if (persisted && this.agentCapabilities.loadSession) {
       try {
-        await this.connection.loadSession({
-          sessionId: persisted,
-          cwd: pathResolve(this.options.agent.cwd ?? process.cwd()),
-          mcpServers,
-        })
+        await this.withDeadline(
+          `loadSession(${persisted})`,
+          this.connection.loadSession({
+            sessionId: persisted,
+            cwd: pathResolve(this.options.agent.cwd ?? process.cwd()),
+            mcpServers,
+          }),
+          this.timeouts.sessionMs,
+        )
         this.sessions.set(key, { sessionId: persisted, startedAt: Date.now() })
         return persisted
       } catch (err) {
+        if (this.dead) throw err
         console.warn(
           `[acp-client:${this.options.agent.id}] loadSession(${persisted}) failed; ` +
             `falling back to newSession:`,
@@ -214,13 +266,82 @@ export class AcpClient {
       }
     }
 
-    const { sessionId } = await this.connection.newSession({
-      cwd: pathResolve(this.options.agent.cwd ?? process.cwd()),
-      mcpServers,
-    })
+    const { sessionId } = await this.withDeadline(
+      'newSession',
+      this.connection.newSession({
+        cwd: pathResolve(this.options.agent.cwd ?? process.cwd()),
+        mcpServers,
+      }),
+      this.timeouts.sessionMs,
+    )
     this.sessions.set(key, { sessionId, startedAt: Date.now() })
     await this.store?.set(threadId, sessionId)
     return sessionId
+  }
+
+  /**
+   * Reject when the child dies, or after `timeoutMs` (0 = no timer). Racing
+   * both the handshake and the death signal is what turns a wedged/dead
+   * container into a real error instead of an indefinite `ensureSession` hang.
+   */
+  private async withDeadline<T>(label: string, work: Promise<T>, timeoutMs: number): Promise<T> {
+    if (this.dead) {
+      throw this.deathReason ?? new Error(`AcpClient(${this.options.agent.id}): client is dead`)
+    }
+    let timer: NodeJS.Timeout | undefined
+    let onDeath: ((err: Error) => void) | undefined
+    const death = new Promise<never>((_, reject) => {
+      onDeath = reject
+      this.deathWaiters.add(reject)
+    })
+    const guards: Promise<never>[] = [death]
+    if (timeoutMs > 0) {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          // A handshake that never completes means the connection is wedged,
+          // not merely slow. Mark the client dead so `isAlive()` goes false and
+          // the registry drops + reconnects instead of reusing it (and so a
+          // `loadSession` timeout does not fall back to `newSession` on the
+          // same unhealthy connection).
+          const err = new Error(
+            `AcpClient(${this.options.agent.id}): ${label} timed out after ${timeoutMs}ms`,
+          )
+          this.markDead(err)
+          reject(err)
+        }, timeoutMs)
+      })
+      guards.push(timeout)
+      void timeout.catch(() => {})
+    }
+    void death.catch(() => {})
+    void work.catch(() => {})
+    try {
+      return await Promise.race([work, ...guards])
+    } finally {
+      if (timer) clearTimeout(timer)
+      if (onDeath) this.deathWaiters.delete(onDeath)
+    }
+  }
+
+  private watchChild(child: EventEmitter, source: string): void {
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+      this.markDead(
+        new Error(
+          `AcpClient(${this.options.agent.id}): ${source} exited (code=${code}, signal=${signal})`,
+        ),
+      )
+    })
+    child.on('error', (err: Error) => {
+      this.markDead(new Error(`AcpClient(${this.options.agent.id}): ${source} error: ${err.message}`))
+    })
+  }
+
+  private markDead(reason: Error): void {
+    if (this.dead) return
+    this.dead = true
+    this.deathReason = reason
+    for (const reject of this.deathWaiters) reject(reason)
+    this.deathWaiters.clear()
   }
 
   private async ensureStoreLoaded(): Promise<void> {

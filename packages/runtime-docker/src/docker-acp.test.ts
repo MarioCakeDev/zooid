@@ -3,9 +3,11 @@ import { EventEmitter } from 'node:events'
 import { Readable, Writable } from 'node:stream'
 
 const spawnMock = vi.fn()
+const spawnSyncMock = vi.fn()
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
+  spawnSync: spawnSyncMock,
 }))
 
 const { DockerAcpRuntime } = await import('./docker-acp.js')
@@ -25,7 +27,9 @@ function argvOf(call: number = 0): string[] {
 describe('DockerAcpRuntime', () => {
   beforeEach(() => {
     spawnMock.mockReset()
+    spawnSyncMock.mockReset()
     spawnMock.mockReturnValue(new FakeChild())
+    spawnSyncMock.mockReturnValue({ status: 0 })
   })
   afterEach(() => {
     vi.restoreAllMocks()
@@ -119,5 +123,63 @@ describe('DockerAcpRuntime', () => {
     const rt = new DockerAcpRuntime({ defaultImage: 'img' })
     const result = rt.spawn({ command: 'cmd', args: [] })
     expect(result).toBe(child)
+  })
+
+  describe('per-agent container lifecycle', () => {
+    it('names and labels the container when the spec carries an agentId', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev' })
+      const argv = argvOf()
+      const nameIdx = argv.indexOf('--name')
+      expect(nameIdx).toBeGreaterThan(-1)
+      expect(argv[nameIdx + 1]).toBe('zooid-agent-dev')
+      expect(argv).toContain('--label')
+      expect(argv).toContain('zooid.agent=dev')
+    })
+
+    it('reaps a stale same-named container before spawning', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev' })
+      expect(spawnSyncMock).toHaveBeenCalledWith('docker', ['rm', '-f', 'zooid-agent-dev'], {
+        stdio: 'ignore',
+        timeout: 5_000,
+      })
+    })
+
+    it('does not break spawn when reaping a stale container fails', () => {
+      spawnSyncMock.mockImplementation(() => {
+        throw new Error('docker CLI wedged')
+      })
+      const child = new FakeChild()
+      spawnMock.mockReturnValue(child)
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      expect(() => rt.spawn({ command: 'cmd', args: [], agentId: 'dev' })).not.toThrow()
+      expect(spawnMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('sanitises the agentId into a docker-legal container name', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'Dev Agent!' })
+      const argv = argvOf()
+      const nameIdx = argv.indexOf('--name')
+      expect(argv[nameIdx + 1]).toBe('zooid-agent-dev-agent-')
+    })
+
+    it('omits --name/--label and does not reap when there is no agentId', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      rt.spawn({ command: 'cmd', args: [] })
+      const argv = argvOf()
+      expect(argv).not.toContain('--name')
+      expect(argv).not.toContain('--label')
+      expect(spawnSyncMock).not.toHaveBeenCalled()
+    })
+
+    it('honours a custom container name prefix', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img', containerNamePrefix: 'zooid' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev' })
+      const argv = argvOf()
+      const nameIdx = argv.indexOf('--name')
+      expect(argv[nameIdx + 1]).toBe('zooid-dev')
+    })
   })
 })
