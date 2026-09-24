@@ -2770,43 +2770,47 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     return ((await client.sendMessage.mock.results[idx]!.value) as { event_id: string }).event_id
   }
 
-  it('groups consecutive tool calls into one line (one create, edited in place)', async () => {
+  it('groups consecutive tool calls into one <details> block (one create, edited in place)', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g1')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'bash', status: 'in_progress' })
-    const id = await createdId(client, '🔧 architect: ⏳ bash')
+    const id = await createdId(client, '🔧 architect: 1 tool — bash — running\n⏳ bash')
     await emitTool(agents, sessionId, {
       toolCallId: 'tc-2',
       title: 'edit src/x.ts',
       status: 'pending',
     })
     await settleTurn()
-    // One line, not two.
-    expect(lines(client)).toEqual(['🔧 architect: ⏳ bash'])
+    // One block, not two.
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — bash — running\n⏳ bash'])
     const replaces = edits(client)
     expect(replaces).toHaveLength(1)
     expect(contentOf(replaces[0]![0])['m.relates_to']).toEqual({
       rel_type: 'm.replace',
       event_id: id,
     })
-    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ bash\n• edit src/x.ts')
+    expect(appliedEditBody(client, id)).toBe(
+      '🔧 architect: 2 tools — edit src/x.ts — pending\n⏳ bash\n• edit src/x.ts',
+    )
     expect(contentOf(replaces[0]![0])['m.new_content']).toMatchObject({
-      body: '🔧 architect: ⏳ bash\n• edit src/x.ts',
+      body: '🔧 architect: 2 tools — edit src/x.ts — pending\n⏳ bash\n• edit src/x.ts',
       'dev.zooid.mirror': true,
       'm.relates_to': { rel_type: 'm.thread', event_id: '$g1' },
     })
-    // The HTML body puts the same entries on separate lines.
+    // The HTML body is one collapsed <details> block with the summary first.
     expect(contentOf(replaces[0]![0])['m.new_content']).toMatchObject({
       format: 'org.matrix.custom.html',
-      formatted_body: '🔧 architect: ⏳ bash<br>• edit src/x.ts',
+      formatted_body:
+        '<details><summary>🔧 architect: 2 tools — edit src/x.ts — pending</summary>' +
+        '⏳ bash<br>• edit src/x.ts</details>',
     })
     finishPrompt()
     await settleTurn()
   })
 
-  it('edits the line in place as a tool updates — never a new line', async () => {
+  it('edits the block in place as a tool updates — never a new block', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g2')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'bash', status: 'pending' })
-    const id = await createdId(client, '🔧 architect: • bash')
+    const id = await createdId(client, '🔧 architect: 1 tool — bash — pending\n• bash')
     await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'in_progress' })
     await updateTool(agents, sessionId, {
       toolCallId: 'tc-1',
@@ -2814,16 +2818,16 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
     })
     await settleTurn()
-    expect(lines(client)).toEqual(['🔧 architect: • bash'])
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — bash — pending\n• bash'])
     expect(edits(client)).toHaveLength(2)
-    expect(appliedEditBody(client, id)).toBe('🔧 architect: ✓ bash — done')
-    // Titles + status only: the update's content[] text is never rendered.
-    expect(appliedEditBody(client, id)).not.toContain('ok, 12 passed')
+    expect(appliedEditBody(client, id)).toBe(
+      '🔧 architect: 1 tool — bash — done\n✓ bash — done\n↳ ok, 12 passed',
+    )
     finishPrompt()
     await settleTurn()
   })
 
-  it('starts a new line after each prose message (all tools since last prose)', async () => {
+  it('starts a new block after each prose message (all tools since last prose)', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g3')
     await emitText(agents, sessionId, 'first I read the file.', 'm1')
     await emitTool(agents, sessionId, {
@@ -2840,27 +2844,27 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await emitText(agents, sessionId, 'done.', 'm3')
     finishPrompt()
     await settleTurn()
-    // Wire order across every non-edit sendMessage: prose and one line per gap.
+    // Wire order across every non-edit sendMessage: prose and one block per gap.
     const ordered = client.sendMessage.mock.calls
       .filter(([a]) => !isEdit(a))
       .map(([a]) => noticeBody(a))
       .filter((b) => !b.startsWith('✅') && !b.startsWith('⚠️'))
     expect(ordered).toEqual([
       'first I read the file.',
-      '🔧 architect: ⏳ Read file',
+      '🔧 architect: 1 tool — Read file — running\n⏳ Read file',
       'now I verify it.',
-      '🔧 architect: ⏳ Verify',
+      '🔧 architect: 1 tool — Verify — running\n⏳ Verify',
       'done.',
     ])
-    // Two prose gaps → two lines (+ the turn-end summary).
+    // Two prose gaps → two blocks (+ the turn-end summary).
     expect(lines(client)).toEqual([
-      '🔧 architect: ⏳ Read file',
-      '🔧 architect: ⏳ Verify',
+      '🔧 architect: 1 tool — Read file — running\n⏳ Read file',
+      '🔧 architect: 1 tool — Verify — running\n⏳ Verify',
       '✅ architect: done · 2 tools · 0 files',
     ])
   })
 
-  it('includes a plan in the same line as the tools in its gap', async () => {
+  it('includes a plan in the same block as the tools in its gap', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g4')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'Read file', status: 'in_progress' })
     await onEvent(agents, 'architect', {
@@ -2869,9 +2873,16 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       entries: [{ content: 'a' }, { content: 'b' }],
     })
     await settleTurn()
-    expect(lines(client)).toEqual(['🔧 architect: ⏳ Read file'])
-    const id = await createdId(client, '🔧 architect: ⏳ Read file')
-    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ Read file\n🗒 plan (2 steps)')
+    expect(lines(client)).toEqual([
+      '🔧 architect: 1 tool — Read file — running\n⏳ Read file',
+    ])
+    const id = await createdId(
+      client,
+      '🔧 architect: 1 tool — Read file — running\n⏳ Read file',
+    )
+    expect(appliedEditBody(client, id)).toBe(
+      '🔧 architect: 1 tool — Read file — running\n⏳ Read file\n🗒 plan (2 steps)',
+    )
     finishPrompt()
     await settleTurn()
   })
@@ -2906,12 +2917,14 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       title: 'Edit file',
       locations: [{ path: '/a' }],
     })
-    const id = await createdId(client, '🔧 architect: • Read file')
+    const id = await createdId(client, '🔧 architect: 1 tool — Read file\n• Read file')
     finishPrompt()
     await settleTurn()
-    expect(appliedEditBody(client, id)).toBe('🔧 architect: • Read file\n• Edit file')
+    expect(appliedEditBody(client, id)).toBe(
+      '🔧 architect: 2 tools — Edit file\n• Read file\n• Edit file',
+    )
     expect(lines(client)).toEqual([
-      '🔧 architect: • Read file',
+      '🔧 architect: 1 tool — Read file\n• Read file',
       '✅ architect: done · 2 tools · 2 files',
     ])
   })
@@ -2990,13 +3003,13 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await emitTool(agents, sessionId, evt)
     await emitTool(agents, sessionId, evt)
     await settleTurn()
-    expect(lines(client)).toEqual(['🔧 architect: • Run tests'])
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — Run tests\n• Run tests'])
     expect(edits(client)).toHaveLength(0)
     finishPrompt()
     await settleTurn()
   })
 
-  it('recreates the line when the edit target is gone', async () => {
+  it('recreates the block when the edit target is gone', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g10')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'Run tests' })
     await settleTurn()
@@ -3006,8 +3019,8 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
     await settleTurn()
     expect(lines(client)).toEqual([
-      '🔧 architect: • Run tests',
-      '🔧 architect: ✓ Run tests — done',
+      '🔧 architect: 1 tool — Run tests\n• Run tests',
+      '🔧 architect: 1 tool — Run tests — done\n✓ Run tests — done',
     ])
     finishPrompt()
     await settleTurn()
@@ -3027,7 +3040,47 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     )
     await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
     await settleTurn()
-    expect(lines(client)).toEqual(['🔧 architect: • Run tests'])
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — Run tests\n• Run tests'])
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('carries params and output, refreshed in place on the same entry', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g13')
+    await emitTool(agents, sessionId, {
+      toolCallId: 'tc-1',
+      title: 'bash',
+      status: 'pending',
+      rawInput: { command: 'pnpm test' },
+    })
+    const id = await createdId(
+      client,
+      '🔧 architect: 1 tool — bash — pending\n• bash\n⚙ command=pnpm test',
+    )
+    await updateTool(agents, sessionId, {
+      toolCallId: 'tc-1',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+    })
+    await settleTurn()
+    // Same block, same entry: the update refreshed status and output in place.
+    expect(lines(client)).toEqual([
+      '🔧 architect: 1 tool — bash — pending\n• bash\n⚙ command=pnpm test',
+    ])
+    expect(edits(client)).toHaveLength(1)
+    expect(appliedEditBody(client, id)).toBe(
+      '🔧 architect: 1 tool — bash — done\n✓ bash — done\n⚙ command=pnpm test\n↳ ok, 12 passed',
+    )
+    const newContent = contentOf(edits(client)[0]![0])['m.new_content'] as Record<string, unknown>
+    expect(newContent['dev.zooid.mirror']).toBe(true)
+    expect(newContent['m.relates_to']).toEqual({ rel_type: 'm.thread', event_id: '$g13' })
+    // The HTML edit carries the collapsible block with the same params/output.
+    expect(newContent).toMatchObject({
+      format: 'org.matrix.custom.html',
+      formatted_body:
+        '<details><summary>🔧 architect: 1 tool — bash — done</summary>' +
+        '✓ bash — done<br>⚙ command=pnpm test<br>↳ ok, 12 passed</details>',
+    })
     finishPrompt()
     await settleTurn()
   })

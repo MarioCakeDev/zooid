@@ -40,6 +40,8 @@ import {
   turnGroupHtml,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
+  toolParamsText,
+  toolOutputText,
   TURN_MIRROR_MARKER,
   type TurnToolEntry,
 } from './event-encoders.js'
@@ -591,7 +593,9 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
 
   /**
    * Add or update a tool entry within `group`. A `tool_call` and a later
-   * `tool_call_update` for the same id share one entry (and one line).
+   * `tool_call_update` for the same id share one entry (and one line): the
+   * update refreshes the title/status in place and merges in the compact
+   * `raw_input` params and the truncated `content[]` output — never a duplicate.
    */
   function upsertGroupEntry(
     group: MirrorGroup,
@@ -599,6 +603,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   ): TurnToolEntry | undefined {
     const toolCallId = nonEmptyString(content.tool_call_id)
     if (!toolCallId) return undefined
+    const params = toolParamsText(content.raw_input)
+    const output = toolOutputText(content.content)
     const existing = group.index.get(toolCallId)
     if (existing === undefined) {
       const entry: TurnToolEntry = {
@@ -606,6 +612,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         title: nonEmptyString(content.title) ?? toolCallId,
         status: nonEmptyString(content.status),
       }
+      if (params) entry.params = params
+      if (output) entry.output = output
       group.index.set(toolCallId, group.entries.length)
       group.entries.push(entry)
       return entry
@@ -615,6 +623,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (title) entry.title = title
     const status = nonEmptyString(content.status)
     if (status) entry.status = status
+    if (params) entry.params = params
+    if (output) entry.output = output
     return entry
   }
 
