@@ -237,40 +237,6 @@ export function toolEntryLine(entry: TurnToolEntry): string {
 }
 
 /**
- * Summary detail for the most recent tool: `<title>` when it has no known
- * status, `<title> — <label>` otherwise (e.g. `bash — running`, `edit src/x.ts`).
- */
-export function toolSummaryDetail(entry: TurnToolEntry): string {
-  const label = toolStatusLabel(entry.status)
-  return label ? `${entry.title} — ${label}` : entry.title
-}
-
-/** Escape the handful of characters that would break the formatted_body HTML. */
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-/**
- * The collapsible `<details>` block for the per-turn mirror line: `<summary>`
- * (the last activity) is the first child, followed by one compact line per tool
- * in first-seen order. There is no `open` attribute, so Element renders it
- * collapsed by default.
- */
-export function renderTurnDetails(summary: string, tools: TurnToolEntry[]): string {
-  const lines = tools.map((t) => escapeHtml(toolEntryLine(t))).join('<br>')
-  return `<details><summary>${escapeHtml(summary)}</summary>${lines}</details>`
-}
-
-/**
- * Summary of the single per-turn mirror line while the turn runs: the most
- * recent activity (a tool title, or a plan/command detail). It is the line's
- * plain-text `body` fallback and the `<summary>` of the `<details>` block.
- */
-export function turnWorkingBody(agentId: string, detail: string): string {
-  return clamp(`🔧 ${agentId}: ${detail}`)
-}
-
-/**
  * Summary of the per-turn mirror line once the turn ends. Finalizing replaces
  * the last-activity summary with the turn outcome (documented choice): a stock
  * client's collapsed line then reads `✅ dev: done · N tools · M files` rather
@@ -281,22 +247,6 @@ export function turnFinalBody(agentId: string, counts: TurnMirrorCounts, failed:
   const files = `${counts.fileCount} file${counts.fileCount === 1 ? '' : 's'}`
   const outcome = failed ? '⚠️' : '✅'
   return `${outcome} ${agentId}: ${failed ? 'failed' : 'done'} · ${tools} · ${files}`
-}
-
-/**
- * Whether a foldable `dev.zooid.*` event may *create* the per-turn mirror line.
- * Tool activity and a plan update do; `available_commands_update` does not.
- * The session advertises its command roster during `ensureSession` (and the
- * shim replays it at turn start), so treating commands as line-creating would
- * put a `✅ 0 tools · 0 files` line on a prose-only turn. Commands still fold
- * into a line that already exists (see `transport.ts` `updateTurnMirror`).
- */
-export function createsTurnLine(eventType: string): boolean {
-  return (
-    eventType === 'dev.zooid.tool_call' ||
-    eventType === 'dev.zooid.tool_call_update' ||
-    eventType === 'dev.zooid.plan'
-  )
 }
 
 /**
@@ -326,62 +276,51 @@ export function activityDetail(
 }
 
 /**
- * Content of the initial per-turn mirror notice: threaded and marked. `body` is
- * the plain-text summary line (the fallback a client without HTML rendering
- * shows); `formatted_body` is the collapsed `<details>` block.
+ * Content of an interleaved mirror line: one threaded, marked `m.notice`. Each
+ * tool/task entry is posted as its own line at the moment it happens, so the
+ * timeline reads prose → tool → prose → tool and the order of execution is
+ * clear. The line carries no HTML — it is a single compact line of text.
  */
 export function turnMirrorNoticeContent(
-  summary: string,
-  formattedBody: string,
+  body: string,
   threadRoot: string,
 ): {
   msgtype: string
   body: string
-  format: string
-  formatted_body: string
   [k: string]: unknown
 } {
   return {
     msgtype: 'm.notice',
-    body: summary,
-    format: 'org.matrix.custom.html',
-    formatted_body: formattedBody,
+    body,
     [TURN_MIRROR_MARKER]: true,
     'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
   }
 }
 
 /**
- * Content of an `m.replace` edit of the per-turn mirror notice. The replacement
- * relation rides in the top-level `m.relates_to`; the thread relation goes in
- * `m.new_content.m.relates_to` (MSC2676 + MSC3440) so Element keeps the edited
- * line inside its thread. The marker is repeated in `m.new_content` because
- * that is the content a client applies. The top-level `body` is the `* `-prefixed
- * fallback; `m.new_content` carries the plain summary and the HTML details.
+ * Content of an `m.replace` edit of an interleaved mirror line, used to mutate
+ * one tool/task line in place as its status changes (never a duplicate). The
+ * replacement relation rides in the top-level `m.relates_to`; the thread
+ * relation goes in `m.new_content.m.relates_to` (MSC2676 + MSC3440) so Element
+ * keeps the edited line inside its thread. The marker is repeated in
+ * `m.new_content` because that is the content a client applies.
  */
 export function turnMirrorEditContent(
   eventId: string,
-  summary: string,
-  formattedBody: string,
+  body: string,
   threadRoot: string,
 ): {
   msgtype: string
   body: string
-  format: string
-  formatted_body: string
   [k: string]: unknown
 } {
   return {
     msgtype: 'm.notice',
-    body: `* ${summary}`,
-    format: 'org.matrix.custom.html',
-    formatted_body: formattedBody,
+    body: `* ${body}`,
     [TURN_MIRROR_MARKER]: true,
     'm.new_content': {
       msgtype: 'm.notice',
-      body: summary,
-      format: 'org.matrix.custom.html',
-      formatted_body: formattedBody,
+      body,
       [TURN_MIRROR_MARKER]: true,
       'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
     },

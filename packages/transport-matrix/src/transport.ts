@@ -35,10 +35,7 @@ import {
   toTurnEndBody,
   toActivityNoticeBody,
   activityDetail,
-  createsTurnLine,
-  toolSummaryDetail,
-  renderTurnDetails,
-  turnWorkingBody,
+  toolEntryLine,
   turnFinalBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
@@ -463,40 +460,34 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     return { event_id, noticeEventId }
   }
 
-  // ── Per-turn editable mirror line (v3: collapsible details) ─────────────
-  // Instead of one `m.notice` per `dev.zooid.*` event (which spammed the
-  // timeline), a turn gets ONE threaded notice, edited in place with `m.replace`
-  // as tools run and finalized on turn end. v3 renders it as a collapsed
-  // `<details>` block: `<summary>` is the last activity (`🔧 dev: bash —
-  // running`), and the body is an append-only list with one compact line per
-  // tool (`✓ bash — done`). A new `tool_call_id` appends an entry; a later
-  // `tool_call_update` for the same id mutates that entry in place, never a
-  // duplicate. On turn end the summary is finalized to
-  // `✅ dev: done · N tools · M files` (`⚠️ … failed`).
-  // `tool_call`, `tool_call_update`, `plan` and `available_commands_update` are
-  // folded into it — but tool activity and a plan update create the line;
-  // `available_commands_update` only updates one that already exists, so a
-  // prose-only turn (whose session replayed its command roster) gets no line.
-  // The raw custom events still go out (visible via Element's "show hidden
-  // events"). `approval_request` and `error` stay standalone because they must
-  // be actionable. The line is marked (see `TURN_MIRROR_MARKER`) so the Zooid
-  // web client can hide it.
-  interface TurnMirrorState {
-    /** Event id of the editable notice; '' until it is created. */
+  // ── Interleaved mirror lines ─────────────────────────────────────────────
+  // Each tool call and each plan update is posted as its OWN threaded notice at
+  // the moment it happens, so the timeline reads prose → tool → prose → tool and
+  // the order of execution is clear. A line is edited in place (`m.replace`) as
+  // the tool's status changes — updates never add a line. A `tool_call_id` maps
+  // to one line, first-seen order. On turn end a final summary line
+  // (`✅ dev: done · N tools · M files`, `⚠️ … failed`) closes the turn.
+  // `available_commands_update` is session metadata and is not mirrored. The raw
+  // custom events still go out (visible via Element's "show hidden events").
+  // `approval_request` and `error` stay standalone because they must be
+  // actionable. Each line is marked (see `TURN_MIRROR_MARKER`) so the router
+  // guard drops it as a mention and the Zooid web client can hide it.
+  /** One editable line: its event id and the body currently applied to it. */
+  interface MirrorLine {
     eventId: string
-    /** Last plain-text summary applied — used to skip no-op (idempotent) edits. */
     lastBody: string
-    /** Last formatted_body applied — the details list changes even when the
-     * summary text does not, so both must match to skip an edit. */
-    lastHtml: string
-    /** Ordered tool entries (append-only, first-seen); keyed by `tool_call_id`. */
-    tools: TurnToolEntry[]
-    /** `tool_call_id` → index in `tools`, for in-place updates. */
-    toolIndex: Map<string, number>
-    /** Summary detail of the most recent activity (tool title / plan / commands). */
-    detail: string
+  }
+  interface TurnMirrorState {
+    /** `tool_call_id` → its line. One line per tool, edited in place. */
+    toolLines: Map<string, MirrorLine>
+    /** The latest known state per `tool_call_id`, for rendering. */
+    toolEntries: Map<string, TurnToolEntry>
+    /** The single plan line for this turn, if a plan was emitted. */
+    planLine?: MirrorLine
     /** Distinct file paths touched this turn (from tool locations). */
     files: Set<string>
+    /** True once any line has been posted; gates the turn-end summary. */
+    createdAny: boolean
     finalized: boolean
   }
   const turnMirrors = new Map<string, TurnMirrorState>()
@@ -515,60 +506,55 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     return /M_NOT_FOUND|unknown event|event not found/i.test(msg)
   }
 
-  async function createTurnMirror(
+  async function createMirrorLine(
     ctx: SessionContext,
-    summary: string,
-    formattedBody: string,
+    body: string,
   ): Promise<string | undefined> {
     try {
       const { event_id } = await client.sendMessage({
         roomId: ctx.roomId,
         asUserId: ctx.agent.userId,
         threadRoot: ctx.threadRoot,
-        content: turnMirrorNoticeContent(summary, formattedBody, ctx.threadRoot),
+        content: turnMirrorNoticeContent(body, ctx.threadRoot),
       })
       return event_id
     } catch (err) {
-      console.warn('[matrix] turn mirror create failed:', err)
+      console.warn('[matrix] mirror line create failed:', err)
       return undefined
     }
   }
 
-  async function editTurnMirror(
+  async function editMirrorLine(
     ctx: SessionContext,
-    state: TurnMirrorState,
-    summary: string,
-    formattedBody: string,
+    line: MirrorLine,
+    body: string,
   ): Promise<void> {
     try {
       await client.sendMessage({
         roomId: ctx.roomId,
         asUserId: ctx.agent.userId,
-        content: turnMirrorEditContent(state.eventId, summary, formattedBody, ctx.threadRoot),
+        content: turnMirrorEditContent(line.eventId, body, ctx.threadRoot),
       })
-      state.lastBody = summary
-      state.lastHtml = formattedBody
+      line.lastBody = body
     } catch (err) {
       if (isMissingEventError(err)) {
-        // The original was redacted or otherwise gone — recreate so the summary
-        // is not silently lost, and retarget later edits at the new event.
-        const eventId = await createTurnMirror(ctx, summary, formattedBody)
+        // The original was redacted or otherwise gone — recreate so the line is
+        // not silently lost, and retarget later edits at the new event.
+        const eventId = await createMirrorLine(ctx, body)
         if (eventId) {
-          state.eventId = eventId
-          state.lastBody = summary
-          state.lastHtml = formattedBody
+          line.eventId = eventId
+          line.lastBody = body
         }
         return
       }
       // Best-effort: a failed edit never breaks the custom-event path.
-      console.warn('[matrix] turn mirror edit failed:', err)
+      console.warn('[matrix] mirror line edit failed:', err)
     }
   }
 
   /**
-   * Append a new tool entry, or update the existing one for this `tool_call_id`
-   * in place. A `tool_call` and a `tool_call_update` for the same id therefore
-   * share one entry (and one line) — updates never append a duplicate.
+   * Merge a `tool_call`/`tool_call_update` into the per-id entry. A `tool_call`
+   * and a later update for the same id share one entry (and one line).
    */
   function upsertToolEntry(
     state: TurnMirrorState,
@@ -576,22 +562,20 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   ): TurnToolEntry | undefined {
     const toolCallId = nonEmptyString(content.tool_call_id)
     if (!toolCallId) return undefined
-    const existing = state.toolIndex.get(toolCallId)
-    let entry: TurnToolEntry
-    if (existing === undefined) {
-      entry = {
+    const existing = state.toolEntries.get(toolCallId)
+    const entry: TurnToolEntry =
+      existing ?? {
         toolCallId,
         title: nonEmptyString(content.title) ?? toolCallId,
         status: nonEmptyString(content.status),
       }
-      state.toolIndex.set(toolCallId, state.tools.length)
-      state.tools.push(entry)
-    } else {
-      entry = state.tools[existing]!
+    if (existing) {
       const title = nonEmptyString(content.title)
       if (title) entry.title = title
       const status = nonEmptyString(content.status)
       if (status) entry.status = status
+    } else {
+      state.toolEntries.set(toolCallId, entry)
     }
     return entry
   }
@@ -601,31 +585,26 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     ctx: SessionContext,
     input: { eventType: string; content: Record<string, unknown> },
   ): Promise<void> {
+    const { eventType, content } = input
+    // `available_commands_update` is session metadata the shim advertises during
+    // `ensureSession`; it is never mirrored (a prose-only turn stays silent).
+    if (eventType === 'dev.zooid.available_commands_update') return
+    const isTool =
+      eventType === 'dev.zooid.tool_call' || eventType === 'dev.zooid.tool_call_update'
+    const isPlan = eventType === 'dev.zooid.plan'
+    if (!isTool && !isPlan) return
+
     let state = turnMirrors.get(sessionId)
     if (state?.finalized) return
-    // Only tool activity and a plan may create the line (see `createsTurnLine`);
-    // `available_commands_update` updates an existing line only.
-    if (!state && !createsTurnLine(input.eventType)) return
     if (!state) {
       state = {
-        eventId: '',
-        lastBody: '',
-        lastHtml: '',
-        tools: [],
-        toolIndex: new Map(),
-        detail: 'working…',
+        toolLines: new Map(),
+        toolEntries: new Map(),
         files: new Set(),
+        createdAny: false,
         finalized: false,
       }
       turnMirrors.set(sessionId, state)
-    }
-    const { eventType, content } = input
-    if (eventType === 'dev.zooid.tool_call' || eventType === 'dev.zooid.tool_call_update') {
-      const entry = upsertToolEntry(state, content)
-      if (entry) state.detail = toolSummaryDetail(entry)
-    } else {
-      const detail = activityDetail(eventType, content)
-      if (detail) state.detail = detail
     }
     const locations = content.locations
     if (Array.isArray(locations)) {
@@ -634,24 +613,38 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         if (typeof path === 'string') state.files.add(path)
       }
     }
-    const summary = turnWorkingBody(ctx.agent.name, state.detail)
-    const html = renderTurnDetails(summary, state.tools)
-    if (!state.eventId) {
-      // Only tool activity / a plan ever reaches here with no line yet (see the
-      // `createsTurnLine` guard above); `available_commands_update` is filtered
-      // again so a line whose creation failed is not retried from an
-      // informational event.
-      if (!createsTurnLine(eventType)) return
-      const eventId = await createTurnMirror(ctx, summary, html)
+
+    if (isTool) {
+      const entry = upsertToolEntry(state, content)
+      if (!entry) return
+      const body = toolEntryLine(entry)
+      const line = state.toolLines.get(entry.toolCallId)
+      if (!line) {
+        const eventId = await createMirrorLine(ctx, body)
+        if (eventId) {
+          state.toolLines.set(entry.toolCallId, { eventId, lastBody: body })
+          state.createdAny = true
+        }
+        return
+      }
+      if (body === line.lastBody) return
+      await editMirrorLine(ctx, line, body)
+      return
+    }
+
+    // plan
+    const detail = activityDetail(eventType, content) ?? 'plan'
+    const body = `🗒 ${detail}`
+    if (!state.planLine) {
+      const eventId = await createMirrorLine(ctx, body)
       if (eventId) {
-        state.eventId = eventId
-        state.lastBody = summary
-        state.lastHtml = html
+        state.planLine = { eventId, lastBody: body }
+        state.createdAny = true
       }
       return
     }
-    if (summary === state.lastBody && html === state.lastHtml) return
-    await editTurnMirror(ctx, state, summary, html)
+    if (body === state.planLine.lastBody) return
+    await editMirrorLine(ctx, state.planLine, body)
   }
 
   async function finalizeTurnMirror(
@@ -662,18 +655,15 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const state = turnMirrors.get(sessionId)
     if (!state || state.finalized) return
     state.finalized = true
-    if (!state.eventId) {
-      turnMirrors.delete(sessionId)
-      return
-    }
-    const summary = turnFinalBody(
-      ctx.agent.name,
-      { toolCount: state.tools.length, fileCount: state.files.size },
-      failed,
-    )
-    const html = renderTurnDetails(summary, state.tools)
-    if (summary !== state.lastBody || html !== state.lastHtml) {
-      await editTurnMirror(ctx, state, summary, html)
+    // A turn with no tool/plan activity gets no mirror line at all — do not add
+    // a summary line for it.
+    if (state.createdAny) {
+      const body = turnFinalBody(
+        ctx.agent.name,
+        { toolCount: state.toolLines.size, fileCount: state.files.size },
+        failed,
+      )
+      await createMirrorLine(ctx, body)
     }
     turnMirrors.delete(sessionId)
   }
