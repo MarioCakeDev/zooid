@@ -35,8 +35,8 @@ import {
   toTurnEndBody,
   toActivityNoticeBody,
   activityDetail,
-  toolEntryLine,
   turnFinalBody,
+  turnGroupBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
   TURN_MIRROR_MARKER,
@@ -477,13 +477,26 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     eventId: string
     lastBody: string
   }
+  /**
+   * One run of tool/plan activity: every tool call since the previous prose
+   * message, rendered as a single line. Created on the first activity after a
+   * prose message and edited in place as more tools run.
+   */
+  interface MirrorGroup extends MirrorLine {
+    /** Tool entries first seen in this group, in order. */
+    entries: TurnToolEntry[]
+    /** `tool_call_id` → index in `entries`. */
+    index: Map<string, number>
+    /** Latest plan detail for this group, if any. */
+    planDetail?: string
+  }
   interface TurnMirrorState {
-    /** `tool_call_id` → its line. One line per tool, edited in place. */
-    toolLines: Map<string, MirrorLine>
-    /** The latest known state per `tool_call_id`, for rendering. */
-    toolEntries: Map<string, TurnToolEntry>
-    /** The single plan line for this turn, if a plan was emitted. */
-    planLine?: MirrorLine
+    /** The open group: tool/plan activity since the last prose message. */
+    current?: MirrorGroup
+    /** `tool_call_id` → the group it first appeared in (for later updates). */
+    toolGroup: Map<string, MirrorGroup>
+    /** Distinct tool_call_ids this turn (for the turn-end counts). */
+    toolIds: Set<string>
     /** Distinct file paths touched this turn (from tool locations). */
     files: Set<string>
     /** True once any line has been posted; gates the turn-end summary. */
@@ -491,6 +504,21 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     finalized: boolean
   }
   const turnMirrors = new Map<string, TurnMirrorState>()
+
+  /**
+   * Close the open tool/plan group. Called whenever a prose message is flushed:
+   * the next tool/plan activity starts a NEW line, so a gap between two prose
+   * messages is exactly one line. The closed group is still tracked per tool so
+   * a late `tool_call_update` edits its own line.
+   */
+  function closeMirrorGroup(sessionId: string): void {
+    const state = turnMirrors.get(sessionId)
+    if (state) state.current = undefined
+  }
+
+  function newMirrorGroup(): MirrorGroup {
+    return { eventId: '', lastBody: '', entries: [], index: new Map() }
+  }
 
   function nonEmptyString(v: unknown): string | undefined {
     return typeof v === 'string' && v.length > 0 ? v : undefined
@@ -553,30 +581,31 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   }
 
   /**
-   * Merge a `tool_call`/`tool_call_update` into the per-id entry. A `tool_call`
-   * and a later update for the same id share one entry (and one line).
+   * Add or update a tool entry within `group`. A `tool_call` and a later
+   * `tool_call_update` for the same id share one entry (and one line).
    */
-  function upsertToolEntry(
-    state: TurnMirrorState,
+  function upsertGroupEntry(
+    group: MirrorGroup,
     content: Record<string, unknown>,
   ): TurnToolEntry | undefined {
     const toolCallId = nonEmptyString(content.tool_call_id)
     if (!toolCallId) return undefined
-    const existing = state.toolEntries.get(toolCallId)
-    const entry: TurnToolEntry =
-      existing ?? {
+    const existing = group.index.get(toolCallId)
+    if (existing === undefined) {
+      const entry: TurnToolEntry = {
         toolCallId,
         title: nonEmptyString(content.title) ?? toolCallId,
         status: nonEmptyString(content.status),
       }
-    if (existing) {
-      const title = nonEmptyString(content.title)
-      if (title) entry.title = title
-      const status = nonEmptyString(content.status)
-      if (status) entry.status = status
-    } else {
-      state.toolEntries.set(toolCallId, entry)
+      group.index.set(toolCallId, group.entries.length)
+      group.entries.push(entry)
+      return entry
     }
+    const entry = group.entries[existing]!
+    const title = nonEmptyString(content.title)
+    if (title) entry.title = title
+    const status = nonEmptyString(content.status)
+    if (status) entry.status = status
     return entry
   }
 
@@ -598,8 +627,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (state?.finalized) return
     if (!state) {
       state = {
-        toolLines: new Map(),
-        toolEntries: new Map(),
+        toolGroup: new Map(),
+        toolIds: new Set(),
         files: new Set(),
         createdAny: false,
         finalized: false,
@@ -614,37 +643,40 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       }
     }
 
+    let group: MirrorGroup
     if (isTool) {
-      const entry = upsertToolEntry(state, content)
-      if (!entry) return
-      const body = toolEntryLine(entry)
-      const line = state.toolLines.get(entry.toolCallId)
-      if (!line) {
-        const eventId = await createMirrorLine(ctx, body)
-        if (eventId) {
-          state.toolLines.set(entry.toolCallId, { eventId, lastBody: body })
-          state.createdAny = true
-        }
-        return
+      const toolCallId = nonEmptyString(content.tool_call_id)
+      if (!toolCallId) return
+      const seen = state.toolGroup.get(toolCallId)
+      if (seen) {
+        // A late update belongs to the line its tool first appeared on, even if
+        // prose has since closed that group.
+        group = seen
+      } else {
+        group = state.current ?? newMirrorGroup()
+        state.current = group
+        state.toolGroup.set(toolCallId, group)
       }
-      if (body === line.lastBody) return
-      await editMirrorLine(ctx, line, body)
-      return
+      state.toolIds.add(toolCallId)
+      upsertGroupEntry(group, content)
+    } else {
+      group = state.current ?? newMirrorGroup()
+      state.current = group
+      group.planDetail = activityDetail(eventType, content) ?? 'plan'
     }
 
-    // plan
-    const detail = activityDetail(eventType, content) ?? 'plan'
-    const body = `🗒 ${detail}`
-    if (!state.planLine) {
+    const body = turnGroupBody(ctx.agent.name, group.entries, group.planDetail)
+    if (!group.eventId) {
       const eventId = await createMirrorLine(ctx, body)
       if (eventId) {
-        state.planLine = { eventId, lastBody: body }
+        group.eventId = eventId
+        group.lastBody = body
         state.createdAny = true
       }
       return
     }
-    if (body === state.planLine.lastBody) return
-    await editMirrorLine(ctx, state.planLine, body)
+    if (body === group.lastBody) return
+    await editMirrorLine(ctx, group, body)
   }
 
   async function finalizeTurnMirror(
@@ -660,7 +692,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (state.createdAny) {
       const body = turnFinalBody(
         ctx.agent.name,
-        { toolCount: state.toolLines.size, fileCount: state.files.size },
+        { toolCount: state.toolIds.size, fileCount: state.files.size },
         failed,
       )
       await createMirrorLine(ctx, body)
@@ -951,6 +983,9 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const text = buffers.get(sessionId) ?? ''
     if (!ctx || text.length === 0) return false
     buffers.set(sessionId, '')
+    // A flushed prose message ends the current tool/plan group: the next tool
+    // starts a fresh line, so each line holds exactly the tools since the prose.
+    closeMirrorGroup(sessionId)
     // Kept for turn.end's push preview: the prose goes out as `m.notice` and
     // is deliberately silenced server-side, so turn.end is the only event that
     // can tell the user what the agent actually said.

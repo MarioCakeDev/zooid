@@ -237,6 +237,23 @@ export function toolEntryLine(entry: TurnToolEntry): string {
 }
 
 /**
+ * The single line for one run of tool/plan activity: **every tool call since the
+ * previous prose message**, joined with ` · ` — e.g.
+ * `🔧 dev: ⏳ bash · ✓ edit src/x.ts`. The line is created on the first activity
+ * after a prose message and edited in place as more tools run, so the gap
+ * between two prose messages is exactly one line (never one line per tool).
+ */
+export function turnGroupBody(
+  agentId: string,
+  entries: TurnToolEntry[],
+  planDetail?: string,
+): string {
+  const parts = entries.map(toolEntryLine)
+  if (planDetail) parts.push(`🗒 ${planDetail}`)
+  return clamp(`🔧 ${agentId}: ${parts.join(' · ')}`)
+}
+
+/**
  * Summary of the per-turn mirror line once the turn ends. Finalizing replaces
  * the last-activity summary with the turn outcome (documented choice): a stock
  * client's collapsed line then reads `✅ dev: done · N tools · M files` rather
@@ -252,7 +269,7 @@ export function turnFinalBody(agentId: string, counts: TurnMirrorCounts, failed:
 /**
  * Latest human-readable summary detail for a foldable non-tool `dev.zooid.*`
  * event. Tool activity is rendered from its `TurnToolEntry` (see
- * `toolSummaryDetail`) so an update mutates one entry rather than replacing the
+ * `toolEntryLine`) so an update mutates one entry rather than replacing the
  * whole line's detail with opaque content text.
  */
 export function activityDetail(

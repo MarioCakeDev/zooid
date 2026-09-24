@@ -15,6 +15,7 @@ import {
   activityDetail,
   toolStatusLabel,
   toolEntryLine,
+  turnGroupBody,
   turnFinalBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
@@ -353,6 +354,39 @@ describe('toActivityNoticeBody', () => {
 
   it('does not mirror a body-carrying event other than error', () => {
     expect(toActivityNoticeBody('dev.zooid.plan', { body: 'custom', entries: [] })).toBeNull()
+  })
+})
+
+describe('turnGroupBody', () => {
+  const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
+    toolCallId: 'tc-1',
+    title: 'bash',
+    ...over,
+  })
+
+  it('joins every tool in the group onto one line, in order', () => {
+    expect(
+      turnGroupBody('dev', [
+        entry({ title: 'bash', status: 'in_progress' }),
+        entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
+      ]),
+    ).toBe('🔧 dev: ⏳ bash · ✓ edit src/x.ts — done')
+  })
+
+  it('appends the plan detail as the last segment', () => {
+    expect(turnGroupBody('dev', [entry({ title: 'Read file' })], 'plan (2 steps)')).toBe(
+      '🔧 dev: • Read file · 🗒 plan (2 steps)',
+    )
+  })
+
+  it('clamps a long group line to one line', () => {
+    const many = Array.from({ length: 5 }, (_, i) =>
+      entry({ toolCallId: `tc-${i}`, title: 'y'.repeat(180), status: 'completed' }),
+    )
+    const body = turnGroupBody('dev', many)
+    expect(body.length).toBe(400)
+    expect(body.endsWith('…')).toBe(true)
+    expect(body).not.toContain('\n')
   })
 })
 

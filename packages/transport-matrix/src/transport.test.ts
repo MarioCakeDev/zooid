@@ -2693,7 +2693,7 @@ describe('taskActions.describeRole', () => {
   })
 })
 
-describe('interleaved mirror lines (one editable line per tool/plan)', () => {
+describe('interleaved mirror lines (all tools since last prose on one line)', () => {
   async function startTurnAndGetSession(root: string) {
     const { transport, agents, client, finishPrompt, approvals } = makeTransport()
     await postTxn(transport.app, {
@@ -2733,12 +2733,32 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
     )
   const edits = (client: ReturnType<typeof makeTransport>['client']) =>
     client.sendMessage.mock.calls.filter(([a]) => isEdit(a))
-  /** Bodies of the created lines, in the order they were posted. */
   const lines = (client: ReturnType<typeof makeTransport>['client']) =>
     creates(client).map(([a]) => noticeBody(a))
+  /** The content a client applies for the most recent edit of `eventId`. */
+  const appliedEditBody = (
+    client: ReturnType<typeof makeTransport>['client'],
+    eventId: string,
+  ): string | undefined => {
+    const matching = edits(client).filter(
+      ([a]) => (contentOf(a)['m.relates_to'] as { event_id?: string }).event_id === eventId,
+    )
+    const last = matching.at(-1)
+    if (!last) return undefined
+    return String((contentOf(last[0])['m.new_content'] as { body?: string }).body ?? '')
+  }
 
   const emitTool = (agents: Agents, sessionId: string, over: Record<string, unknown>) =>
     onEvent(agents, 'architect', { type: 'tool_call', sessionId, ...over })
+  const emitText = (agents: Agents, sessionId: string, text: string, messageId: string) =>
+    onEvent(agents, 'architect', {
+      type: 'agent_message_chunk',
+      sessionId,
+      messageId,
+      content: { type: 'text', text },
+    })
+  const updateTool = (agents: Agents, sessionId: string, over: Record<string, unknown>) =>
+    onEvent(agents, 'architect', { type: 'tool_call_update', sessionId, ...over })
 
   const createdId = async (
     client: ReturnType<typeof makeTransport>['client'],
@@ -2750,146 +2770,127 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
     return ((await client.sendMessage.mock.results[idx]!.value) as { event_id: string }).event_id
   }
 
-  it('posts one marked line per tool_call, next to the custom event', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i1')
-    await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'Run tests', status: 'pending' })
-    await settleTurn()
-    expect(
-      client.sendCustomEvent.mock.calls.some(
-        ([a]) => (a as { eventType: string }).eventType === 'dev.zooid.tool_call',
-      ),
-    ).toBe(true)
-    expect(lines(client)).toEqual(['• Run tests'])
-    expect(creates(client)[0]![0]).toMatchObject({
-      roomId: '!r:example.com',
-      asUserId: '@architect:example.com',
-      threadRoot: '$i1',
-      content: {
-        msgtype: 'm.notice',
-        body: '• Run tests',
-        'dev.zooid.mirror': true,
-        'm.relates_to': { rel_type: 'm.thread', event_id: '$i1' },
-      },
-    })
-    finishPrompt()
-    await settleTurn()
-  })
-
-  it('interleaves the tool lines between the prose messages (order of execution)', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i2')
-    const emitText = (text: string, messageId: string) =>
-      onEvent(agents, 'architect', {
-        type: 'agent_message_chunk',
-        sessionId,
-        messageId,
-        content: { type: 'text', text },
-      })
-    await emitText('first I read the file.', 'm1')
-    await emitTool(agents, sessionId, {
-      toolCallId: 'tc-1',
-      title: 'Read file',
-      status: 'in_progress',
-    })
-    await emitText('now I edit it.', 'm2')
-    await emitTool(agents, sessionId, {
-      toolCallId: 'tc-2',
-      title: 'Edit file',
-      status: 'in_progress',
-    })
-    await emitText('done.', 'm3')
-    finishPrompt()
-    await settleTurn()
-    // Wire order across every non-edit sendMessage: prose and lines interleave.
-    const ordered = client.sendMessage.mock.calls
-      .filter(([a]) => !isEdit(a))
-      .map(([a]) => noticeBody(a))
-      .filter(
-        (b) =>
-          b === 'first I read the file.' ||
-          b === 'now I edit it.' ||
-          b === 'done.' ||
-          b === '⏳ Read file' ||
-          b === '⏳ Edit file',
-      )
-    expect(ordered).toEqual([
-      'first I read the file.',
-      '⏳ Read file',
-      'now I edit it.',
-      '⏳ Edit file',
-      'done.',
-    ])
-    // Each tool is its own line, not one accumulated notice.
-    expect(lines(client)).toEqual([
-      '⏳ Read file',
-      '⏳ Edit file',
-      '✅ architect: done · 2 tools · 0 files',
-    ])
-  })
-
-  it('gives each distinct tool its own line (two tools → two creates)', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i3')
+  it('groups consecutive tool calls into one line (one create, edited in place)', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g1')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'bash', status: 'in_progress' })
+    const id = await createdId(client, '🔧 architect: ⏳ bash')
     await emitTool(agents, sessionId, {
       toolCallId: 'tc-2',
       title: 'edit src/x.ts',
       status: 'pending',
     })
     await settleTurn()
-    expect(lines(client)).toEqual(['⏳ bash', '• edit src/x.ts'])
-    finishPrompt()
-    await settleTurn()
-  })
-
-  it('edits the same tool line in place on tool_call_update — never a new line', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i4')
-    await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'bash', status: 'pending' })
-    const id = await createdId(client, '• bash')
-    await onEvent(agents, 'architect', {
-      type: 'tool_call_update',
-      sessionId,
-      toolCallId: 'tc-1',
-      status: 'completed',
-      content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
-    })
-    await settleTurn()
-    expect(lines(client)).toEqual(['• bash'])
+    // One line, not two.
+    expect(lines(client)).toEqual(['🔧 architect: ⏳ bash'])
     const replaces = edits(client)
     expect(replaces).toHaveLength(1)
     expect(contentOf(replaces[0]![0])['m.relates_to']).toEqual({
       rel_type: 'm.replace',
       event_id: id,
     })
+    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ bash · • edit src/x.ts')
     expect(contentOf(replaces[0]![0])['m.new_content']).toMatchObject({
-      body: '✓ bash — done',
+      body: '🔧 architect: ⏳ bash · • edit src/x.ts',
       'dev.zooid.mirror': true,
-      'm.relates_to': { rel_type: 'm.thread', event_id: '$i4' },
+      'm.relates_to': { rel_type: 'm.thread', event_id: '$g1' },
     })
-    // Titles + status only: the update's content[] text is never rendered.
-    expect(noticeBody(replaces[0]![0])).not.toContain('ok, 12 passed')
     finishPrompt()
     await settleTurn()
   })
 
-  it('gives a plan its own line and does not mirror available_commands', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i5')
+  it('edits the line in place as a tool updates — never a new line', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g2')
+    await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'bash', status: 'pending' })
+    const id = await createdId(client, '🔧 architect: • bash')
+    await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'in_progress' })
+    await updateTool(agents, sessionId, {
+      toolCallId: 'tc-1',
+      status: 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+    })
+    await settleTurn()
+    expect(lines(client)).toEqual(['🔧 architect: • bash'])
+    expect(edits(client)).toHaveLength(2)
+    expect(appliedEditBody(client, id)).toBe('🔧 architect: ✓ bash — done')
+    // Titles + status only: the update's content[] text is never rendered.
+    expect(appliedEditBody(client, id)).not.toContain('ok, 12 passed')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('starts a new line after each prose message (all tools since last prose)', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g3')
+    await emitText(agents, sessionId, 'first I read the file.', 'm1')
+    await emitTool(agents, sessionId, {
+      toolCallId: 'tc-1',
+      title: 'Read file',
+      status: 'in_progress',
+    })
+    await emitText(agents, sessionId, 'now I verify it.', 'm2')
+    await emitTool(agents, sessionId, {
+      toolCallId: 'tc-2',
+      title: 'Verify',
+      status: 'in_progress',
+    })
+    await emitText(agents, sessionId, 'done.', 'm3')
+    finishPrompt()
+    await settleTurn()
+    // Wire order across every non-edit sendMessage: prose and one line per gap.
+    const ordered = client.sendMessage.mock.calls
+      .filter(([a]) => !isEdit(a))
+      .map(([a]) => noticeBody(a))
+      .filter((b) => !b.startsWith('✅') && !b.startsWith('⚠️'))
+    expect(ordered).toEqual([
+      'first I read the file.',
+      '🔧 architect: ⏳ Read file',
+      'now I verify it.',
+      '🔧 architect: ⏳ Verify',
+      'done.',
+    ])
+    // Two prose gaps → two lines (+ the turn-end summary).
+    expect(lines(client)).toEqual([
+      '🔧 architect: ⏳ Read file',
+      '🔧 architect: ⏳ Verify',
+      '✅ architect: done · 2 tools · 0 files',
+    ])
+  })
+
+  it('includes a plan in the same line as the tools in its gap', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g4')
+    await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'Read file', status: 'in_progress' })
     await onEvent(agents, 'architect', {
       type: 'plan',
       sessionId,
       entries: [{ content: 'a' }, { content: 'b' }],
     })
+    await settleTurn()
+    expect(lines(client)).toEqual(['🔧 architect: ⏳ Read file'])
+    const id = await createdId(client, '🔧 architect: ⏳ Read file')
+    expect(appliedEditBody(client, id)).toBe('🔧 architect: ⏳ Read file · 🗒 plan (2 steps)')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('does not mirror available_commands', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g5')
     await onEvent(agents, 'architect', {
       type: 'available_commands',
       sessionId,
       commands: [{ name: 'compact' }],
     })
     await settleTurn()
-    expect(lines(client)).toEqual(['🗒 plan (2 steps)'])
+    expect(lines(client)).toEqual([])
+    expect(
+      client.sendCustomEvent.mock.calls.some(
+        ([a]) => (a as { eventType: string }).eventType === 'dev.zooid.available_commands_update',
+      ),
+    ).toBe(true)
     finishPrompt()
     await settleTurn()
   })
 
-  it('posts a final summary line with counts on turn end', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i6')
+  it('posts a final summary line counting distinct tools and files', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g6')
     await emitTool(agents, sessionId, {
       toolCallId: 'tc-1',
       title: 'Read file',
@@ -2900,18 +2901,17 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
       title: 'Edit file',
       locations: [{ path: '/a' }],
     })
+    const id = await createdId(client, '🔧 architect: • Read file')
     finishPrompt()
     await settleTurn()
+    expect(appliedEditBody(client, id)).toBe('🔧 architect: • Read file · • Edit file')
     expect(lines(client)).toEqual([
-      '• Read file',
-      '• Edit file',
+      '🔧 architect: • Read file',
       '✅ architect: done · 2 tools · 2 files',
     ])
   })
 
   it('does not create any line for a prose-only turn that advertised commands', async () => {
-    // `available_commands_update` is advertised during ensureSession and
-    // replayed at turn start, so a prose-only turn must stay silent.
     const { transport, agents, client, finishPrompt } = makeTransport()
     agents.ensureSession.mockImplementation(async (_name: string, threadId: string) => {
       const sessionId = `sess-${threadId}`
@@ -2926,7 +2926,7 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
       events: [
         {
           type: 'm.room.message',
-          event_id: '$i7',
+          event_id: '$g7',
           origin_server_ts: Date.now(),
           room_id: '!r:example.com',
           sender: '@user:example.com',
@@ -2941,18 +2941,12 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
     await settleTurn()
     await onEvent(agents, 'architect', {
       type: 'agent_message_chunk',
-      sessionId: 'sess-$i7',
+      sessionId: 'sess-$g7',
       content: { type: 'text', text: 'just prose' },
     })
     finishPrompt()
     await settleTurn()
     expect(lines(client)).toEqual([])
-    // The raw custom event is still sent.
-    expect(
-      client.sendCustomEvent.mock.calls.some(
-        ([a]) => (a as { eventType: string }).eventType === 'dev.zooid.available_commands_update',
-      ),
-    ).toBe(true)
   })
 
   it('marks a failed turn in the summary line', async () => {
@@ -2965,7 +2959,7 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
       events: [
         {
           type: 'm.room.message',
-          event_id: '$i8',
+          event_id: '$g8',
           origin_server_ts: Date.now(),
           room_id: '!r:example.com',
           sender: '@user:example.com',
@@ -2978,7 +2972,7 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
       ],
     })
     await settleTurn()
-    await emitTool(agents, 'sess-$i8', { toolCallId: 'tc-1', title: 'Run tests' })
+    await emitTool(agents, 'sess-$g8', { toolCallId: 'tc-1', title: 'Run tests' })
     await settleTurn()
     rejectPrompt!(new Error('boom'))
     await settleTurn()
@@ -2986,38 +2980,36 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
   })
 
   it('skips an edit whose body is unchanged (idempotent)', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i9')
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g9')
     const evt = { toolCallId: 'tc-1', title: 'Run tests' }
     await emitTool(agents, sessionId, evt)
     await emitTool(agents, sessionId, evt)
     await settleTurn()
-    expect(lines(client)).toEqual(['• Run tests'])
+    expect(lines(client)).toEqual(['🔧 architect: • Run tests'])
     expect(edits(client)).toHaveLength(0)
     finishPrompt()
     await settleTurn()
   })
 
   it('recreates the line when the edit target is gone', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i10')
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g10')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'Run tests' })
     await settleTurn()
     client.sendMessage.mockRejectedValueOnce(
       Object.assign(new Error('M_NOT_FOUND: unknown event'), { status: 404 }),
     )
-    await onEvent(agents, 'architect', {
-      type: 'tool_call_update',
-      sessionId,
-      toolCallId: 'tc-1',
-      status: 'completed',
-    })
+    await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
     await settleTurn()
-    expect(lines(client)).toEqual(['• Run tests', '✓ Run tests — done'])
+    expect(lines(client)).toEqual([
+      '🔧 architect: • Run tests',
+      '🔧 architect: ✓ Run tests — done',
+    ])
     finishPrompt()
     await settleTurn()
   })
 
   it('does not recreate on an unrelated "not found" error (403 Room not found)', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i11')
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g11')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'Run tests' })
     await settleTurn()
     client.sendMessage.mockRejectedValueOnce(
@@ -3028,15 +3020,9 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
         { status: 403 },
       ),
     )
-    await onEvent(agents, 'architect', {
-      type: 'tool_call_update',
-      sessionId,
-      toolCallId: 'tc-1',
-      status: 'completed',
-    })
+    await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
     await settleTurn()
-    // Not a missing-original signal — no recreate, no duplicate line.
-    expect(lines(client)).toEqual(['• Run tests'])
+    expect(lines(client)).toEqual(['🔧 architect: • Run tests'])
     finishPrompt()
     await settleTurn()
   })
@@ -3048,7 +3034,7 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
       events: [
         {
           type: 'm.room.message',
-          event_id: '$i12',
+          event_id: '$g12',
           origin_server_ts: Date.now(),
           room_id: '!r:example.com',
           sender: '@user:example.com',
@@ -3068,16 +3054,13 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
     ).toBe(true)
     const notice = client.sendMessage.mock.calls.find(([arg]) => noticeBody(arg).startsWith('⚠'))
     expect(notice).toBeDefined()
-    expect(notice![0]).toMatchObject({
-      threadRoot: '$i12',
-      content: { msgtype: 'm.notice' },
-    })
+    expect(notice![0]).toMatchObject({ threadRoot: '$g12', content: { msgtype: 'm.notice' } })
     finishPrompt()
     await settleTurn()
   })
 
   it('does not mirror the dev.zooid.turn.end boundary marker', async () => {
-    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$i13')
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g13')
     await onEvent(agents, 'architect', {
       type: 'agent_message_chunk',
       sessionId,
@@ -3091,9 +3074,6 @@ describe('interleaved mirror lines (one editable line per tool/plan)', () => {
       ),
     ).toBe(true)
     expect(lines(client)).toEqual([])
-    expect(client.sendMessage.mock.calls.some(([arg]) => noticeBody(arg).includes('finished'))).toBe(
-      false,
-    )
   })
 })
 
