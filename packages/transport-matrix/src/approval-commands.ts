@@ -11,7 +11,8 @@ import type { ApprovalDecision, ApprovalRequest } from '@zooid/acp-client'
  *     (or a bare `approve` / `deny` when exactly one approval is pending in
  *     the thread);
  *   - a 👍 / 👎 reaction on the approval message (the custom event or its
- *     mirrored `m.notice`).
+ *     mirrored `m.notice`). Clients append presentation modifiers to the key;
+ *     see `reactionCommand` for what is stripped before matching.
  *
  * Everything here is pure so the decision mapping is unit-testable in
  * isolation from the transport.
@@ -25,9 +26,33 @@ export type ApprovalCommand = 'approve' | 'deny'
 export const APPROVE_REACTION = '👍'
 export const DENY_REACTION = '👎'
 
+/**
+ * Presentation modifiers real clients append to an emoji reaction key. None of
+ * them change which emoji the user picked, so they are stripped before the key
+ * is matched:
+ *
+ *   - U+FE0E / U+FE0F — variation selectors 15/16 (text / emoji presentation).
+ *     Element almost always appends VS16: it sends `👎️`, the bytes
+ *     `f0 9f 91 8e ef b8 8f`, not the bare `👎`. Comparing the raw key byte
+ *     for byte is what made the reaction a no-op.
+ *   - U+200D — zero-width joiner, added by some iOS / Android keyboards.
+ *   - U+1F3FB–U+1F3FF — skin-tone modifiers.
+ *
+ * Stripping them does not widen the mapping: only the two canonical keys
+ * resolve afterwards, and no standard emoji sequence collapses onto a bare
+ * 👍 / 👎.
+ */
+const PRESENTATION_MODIFIER_RE = /[\uFE0E\uFE0F\u200D\u{1F3FB}-\u{1F3FF}]/gu
+
+/** Drop the presentation modifiers above from a reaction key. Non-strings yield `''`. */
+function normaliseReactionKey(key: unknown): string {
+  return typeof key === 'string' ? key.replace(PRESENTATION_MODIFIER_RE, '') : ''
+}
+
 export function reactionCommand(key: unknown): ApprovalCommand | undefined {
-  if (key === APPROVE_REACTION) return 'approve'
-  if (key === DENY_REACTION) return 'deny'
+  const normalised = normaliseReactionKey(key)
+  if (normalised === APPROVE_REACTION) return 'approve'
+  if (normalised === DENY_REACTION) return 'deny'
   return undefined
 }
 

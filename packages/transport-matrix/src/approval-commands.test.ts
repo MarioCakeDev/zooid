@@ -59,11 +59,35 @@ describe('reactionCommand', () => {
     expect(reactionCommand('👎')).toBe('deny')
   })
 
+  it('resolves the VS16 forms Element and mobile clients send', () => {
+    // Element appends U+FE0F; the observed deny key was f0 9f 91 8e ef b8 8f.
+    expect(reactionCommand('\u{1F44D}\u{FE0F}')).toBe('approve')
+    expect(reactionCommand('\u{1F44E}\u{FE0F}')).toBe('deny')
+    // VS15 (text presentation) and a ZWJ are equally presentation-only.
+    expect(reactionCommand('\u{1F44D}\u{FE0E}')).toBe('approve')
+    expect(reactionCommand('\u{1F44E}\u{200D}')).toBe('deny')
+  })
+
+  it('resolves skin-tone variants', () => {
+    expect(reactionCommand('\u{1F44D}\u{1F3FD}')).toBe('approve')
+    expect(reactionCommand('\u{1F44E}\u{1F3FF}')).toBe('deny')
+    expect(reactionCommand('\u{1F44D}\u{1F3FB}\u{FE0F}')).toBe('approve')
+  })
+
+  it('matches the exact bytes Element sent for the deny reaction', () => {
+    const observed = Buffer.from('f09f918eefb88f', 'hex').toString('utf8')
+    expect(observed).toBe('\u{1F44E}\u{FE0F}')
+    expect(reactionCommand(observed)).toBe('deny')
+  })
+
   it('ignores any other reaction key, including the retired ✅/❌', () => {
     expect(reactionCommand('✅')).toBeUndefined()
     expect(reactionCommand('❌')).toBeUndefined()
+    expect(reactionCommand('✅\u{FE0F}')).toBeUndefined()
     expect(reactionCommand('yes')).toBeUndefined()
     expect(reactionCommand(undefined)).toBeUndefined()
+    expect(reactionCommand(null)).toBeUndefined()
+    expect(reactionCommand(42)).toBeUndefined()
   })
 })
 
