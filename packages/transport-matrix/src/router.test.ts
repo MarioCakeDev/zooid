@@ -206,7 +206,21 @@ describe('media events', () => {
 })
 
 describe('mirrored activity notices (dev.zooid.mirror)', () => {
-  it('never routes a marked mirror notice, even with a mention and trigger=any', () => {
+  // `watcher` is mention-triggered and bound to `!alerts`, so the raw-text
+  // fallback in `extractMentions` would wake it off a quoted `@watcher` — the
+  // exact false trigger this guard removes. `monitor` (trigger=any) shares the
+  // room and would match any unguarded message.
+  const mirrorAgents: AgentBinding[] = [
+    ...agents,
+    {
+      name: 'watcher',
+      userId: '@watcher:example.com',
+      rooms: [{ alias: '!alerts:example.com' }],
+      trigger: 'mention',
+    },
+  ]
+
+  it('never routes a marked mirror notice that quotes a mention-triggered agent', () => {
     const mirror = {
       type: 'm.room.message',
       room_id: '!alerts:example.com',
@@ -214,14 +228,14 @@ describe('mirrored activity notices (dev.zooid.mirror)', () => {
       event_id: '$mirror',
       content: {
         msgtype: 'm.notice',
-        body: '🔧 architect: zooid_get_history — @monitor:example.com @architect:example.com',
+        body: '🔧 architect: zooid_get_history — @watcher:example.com @architect:example.com',
         'dev.zooid.mirror': true,
       },
     }
-    expect(route(mirror, agents)).toEqual([])
+    expect(route(mirror, mirrorAgents)).toEqual([])
   })
 
-  it('never routes an m.replace edit of the mirror line (marker in m.new_content)', () => {
+  it('never routes an m.replace edit whose marker rides only in m.new_content', () => {
     const edit = {
       type: 'm.room.message',
       room_id: '!alerts:example.com',
@@ -229,17 +243,33 @@ describe('mirrored activity notices (dev.zooid.mirror)', () => {
       event_id: '$edit',
       content: {
         msgtype: 'm.notice',
-        body: '* 🔧 architect: @monitor:example.com',
-        'dev.zooid.mirror': true,
+        body: '* 🔧 architect: @watcher:example.com',
+        // Top-level marker deliberately absent: a stock-client `m.replace` only
+        // guarantees it inside `m.new_content`.
         'm.new_content': {
           msgtype: 'm.notice',
-          body: '🔧 architect: @monitor:example.com',
+          body: '🔧 architect: @watcher:example.com',
           'dev.zooid.mirror': true,
         },
         'm.relates_to': { rel_type: 'm.replace', event_id: '$mirror' },
       },
     }
-    expect(route(edit, agents)).toEqual([])
+    expect(route(edit, mirrorAgents)).toEqual([])
+  })
+
+  it('never routes a standalone activity notice once marked (error / approval)', () => {
+    const notice = {
+      type: 'm.room.message',
+      room_id: '!alerts:example.com',
+      sender: '@architect:example.com',
+      event_id: '$err',
+      content: {
+        msgtype: 'm.notice',
+        body: '⚠️ dev.zooid.error: could not reach @watcher:example.com',
+        'dev.zooid.mirror': true,
+      },
+    }
+    expect(route(notice, mirrorAgents)).toEqual([])
   })
 
   it('still routes a real agent prose message that quotes a mention', () => {

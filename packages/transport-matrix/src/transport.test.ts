@@ -2139,6 +2139,47 @@ describe('directional agent-to-agent handoffs', () => {
     expect(state.rootMentions).toEqual(['parent', 'sub'])
     expect(state.participants).toEqual(['parent', 'sub'])
   })
+
+  it('rebuildThreadState ignores a marked mirror notice when seeding mentions and callers', async () => {
+    const client = {
+      // root: human @mentions parent.
+      fetchEvent: vi.fn(async () => ({
+        type: 'm.room.message',
+        sender: '@alice:example.com',
+        content: { 'm.mentions': { user_ids: ['@parent:example.com'] } },
+      })),
+      // thread: a marked mirror notice from parent quotes @sub (must be ignored),
+      // then parent's real prose @mentions sub — the only genuine call.
+      fetchThreadRelations: vi.fn(async () => ({
+        chunk: [
+          {
+            type: 'm.room.message',
+            sender: '@parent:example.com',
+            content: {
+              msgtype: 'm.notice',
+              body: '🔧 parent: zooid_get_history — @sub:example.com',
+              'dev.zooid.mirror': true,
+            },
+          },
+          {
+            type: 'm.room.message',
+            sender: '@parent:example.com',
+            content: {
+              msgtype: 'm.text',
+              body: '@sub:example.com please run the suite',
+              'm.mentions': { user_ids: ['@sub:example.com'] },
+            },
+          },
+        ],
+      })),
+    }
+    const state = await rebuildThreadState(client as never, '!r:example.com', '$root', parentSub)
+    // Only the real @sub call seeded a mention/caller; the mirror quote did not.
+    expect(state.rootMentions).toEqual(['parent', 'sub'])
+    expect(state.callers).toEqual({ sub: 'parent' })
+    // The mirror notice is not parent "participating" in the thread.
+    expect(state.participants).toEqual(['parent'])
+  })
 })
 
 describe('per-handoff session isolation ([[ZOD071]])', () => {

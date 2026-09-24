@@ -18,6 +18,7 @@ import { BotPool } from './bot-pool.js'
 import {
   route,
   isMediaMsgtype,
+  isMirrorNotice,
   isReturnRoute,
   wouldCycleCallers,
   type AgentBinding,
@@ -39,6 +40,7 @@ import {
   turnFinalBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
+  TURN_MIRROR_MARKER,
 } from './event-encoders.js'
 import {
   decisionForCommand,
@@ -289,7 +291,10 @@ async function sendMirrorNotice(
       roomId: input.roomId,
       asUserId: input.asUserId,
       threadRoot: input.threadRoot,
-      content: { msgtype: 'm.notice', body },
+      // Marked as the display mirror even though it is a standalone notice: it
+      // echoes an error body / approval tool title verbatim, which can quote an
+      // `@agent`. `route()` must not treat that as a fresh mention.
+      content: { msgtype: 'm.notice', body, [TURN_MIRROR_MARKER]: true },
     })
     return event_id
   } catch (err) {
@@ -2071,7 +2076,9 @@ export async function rebuildThreadState(
   if (!asUser) return state
 
   const root = await client.fetchEvent(roomId, rootEventId, asUser)
-  if (root) {
+  // A mirror notice quotes old `@agent`s; treat it as non-content here too, or
+  // the false mention is re-seeded on every restart / `/clear` rebuild.
+  if (root && !isMirrorNotice((root as { content?: Record<string, unknown> }).content)) {
     const rootMentions = new Set(extractMentions(root as never))
     const rootSender = (root as { sender?: string }).sender
     const rootSenderAgent = rootSender ? bindings.find((b) => b.userId === rootSender) : undefined
@@ -2097,6 +2104,11 @@ export async function rebuildThreadState(
   })
   // Also seed root-mentions from any subsequent agent @mentions in the thread.
   for (const ev of thread) {
+    // The transport's own display mirror is not content: it echoes tool output
+    // that can quote an `@agent`, so it must not seed a mention / call edge.
+    // Without this, a daemon restart or `/clear` rebuild resurrects the exact
+    // false trigger `route()` now drops on the live path.
+    if (isMirrorNotice((ev as { content?: Record<string, unknown> }).content)) continue
     const mentions = new Set(extractMentions(ev as never))
     const evSender = (ev as { sender?: string }).sender
     const evSenderAgent = evSender ? bindings.find((b) => b.userId === evSender) : undefined
