@@ -1512,7 +1512,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       return
     }
 
-    // Interactive approvals from a stock client: a ✅/❌ reaction on the
+    // Interactive approvals from a stock client: a 👍/👎 reaction on the
     // approval message, or a plain `approve <id>` / `deny <id>` message. These
     // never reach the router — an approval command is not a prompt.
     if (evt.type === 'm.reaction' && (await handleApprovalReaction(evt))) {

@@ -162,7 +162,7 @@ export function toActivityNoticeBody(
     const idPart = id ? ` (id ${id})` : ''
     return clamp(
       `🔐 Approval needed: ${title}${idPart} — reply "approve ${id ?? '<id>'}" or ` +
-        `"deny ${id ?? '<id>'}", or react ✅/❌`,
+        `"deny ${id ?? '<id>'}", or react 👍/👎`,
     )
   }
   return null

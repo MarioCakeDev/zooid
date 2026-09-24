@@ -3152,7 +3152,7 @@ describe('interactive approvals from a stock client', () => {
     await settleTurn()
   })
 
-  it('resolves via a ✅ reaction on the custom approval event', async () => {
+  it('resolves via a 👍 reaction on the custom approval event', async () => {
     const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap1')
     await postTxn(transport.app, {
       events: [
@@ -3163,7 +3163,7 @@ describe('interactive approvals from a stock client', () => {
           sender: '@alice:example.com',
           content: {
             'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-custom' },
-            key: '✅',
+            key: '👍',
           },
         },
       ],
@@ -3176,7 +3176,7 @@ describe('interactive approvals from a stock client', () => {
     await settleTurn()
   })
 
-  it('resolves via a ❌ reaction on the mirrored notice', async () => {
+  it('resolves via a 👎 reaction on the mirrored notice', async () => {
     const { transport, approvals, finishPrompt } = await setupPendingApproval('$ap2')
     await postTxn(transport.app, {
       events: [
@@ -3187,7 +3187,7 @@ describe('interactive approvals from a stock client', () => {
           sender: '@alice:example.com',
           content: {
             'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-notice' },
-            key: '❌',
+            key: '👎',
           },
         },
       ],
@@ -3211,7 +3211,7 @@ describe('interactive approvals from a stock client', () => {
           sender: '@architect:example.com',
           content: {
             'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-custom' },
-            key: '✅',
+            key: '👍',
           },
         },
       ],
@@ -3232,7 +3232,7 @@ describe('interactive approvals from a stock client', () => {
           sender: '@alice:example.com',
           content: {
             'm.relates_to': { rel_type: 'm.annotation', event_id: '$approval-custom' },
-            key: '👍',
+            key: '✅',
           },
         },
       ],
@@ -3419,7 +3419,7 @@ describe('interactive approvals from a stock client', () => {
           sender: '@alice:example.com',
           content: {
             'm.relates_to': { rel_type: 'm.annotation', event_id: '$some-other-message' },
-            key: '✅',
+            key: '👍',
           },
         },
       ],

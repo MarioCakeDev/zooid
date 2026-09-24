@@ -10,7 +10,7 @@ import type { ApprovalDecision, ApprovalRequest } from '@zooid/acp-client'
  *   - a plain `m.room.message` whose body is `approve <id>` / `deny <id>`
  *     (or a bare `approve` / `deny` when exactly one approval is pending in
  *     the thread);
- *   - a ✅ / ❌ reaction on the approval message (the custom event or its
+ *   - a 👍 / 👎 reaction on the approval message (the custom event or its
  *     mirrored `m.notice`).
  *
  * Everything here is pure so the decision mapping is unit-testable in
@@ -21,9 +21,9 @@ export type ApprovalOption = ApprovalRequest['options'][number]
 
 export type ApprovalCommand = 'approve' | 'deny'
 
-/** Canonical reaction keys. Kept deliberately narrow — no aliases. */
-export const APPROVE_REACTION = '✅'
-export const DENY_REACTION = '❌'
+/** Canonical reaction keys: 👍 approves, 👎 denies. Kept deliberately narrow — no aliases. */
+export const APPROVE_REACTION = '👍'
+export const DENY_REACTION = '👎'
 
 export function reactionCommand(key: unknown): ApprovalCommand | undefined {
   if (key === APPROVE_REACTION) return 'approve'
