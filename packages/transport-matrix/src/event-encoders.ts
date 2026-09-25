@@ -264,6 +264,95 @@ function toolStatusIcon(status: string | undefined): string {
   }
 }
 
+/**
+ * Emoji identifying a tool by its ACP title's first word (`bash`,
+ * `edit src/x.ts`, `coolify_get_application`, `ssh_run-command`, …), so a long
+ * list of taglines is scannable by shape rather than by reading every name.
+ * Exact names win; a prefix fallback covers descriptive titles (`Reading
+ * auth.ts`); anything else gets a generic marker. Icons sit between the status
+ * glyph and the tool name (`✓ 📖 read — done`) and never replace either.
+ */
+const TOOL_ICON_BY_NAME: Record<string, string> = {
+  read: '📖',
+  view: '📖',
+  open: '📖',
+  edit: '✏️',
+  write: '✏️',
+  create: '✏️',
+  update: '✏️',
+  patch: '✏️',
+  apply: '✏️',
+  multiedit: '✏️',
+  bash: '🐚',
+  shell: '🐚',
+  ssh: '🐚',
+  exec: '🐚',
+  terminal: '🐚',
+  run: '🐚',
+  grep: '🔍',
+  search: '🔍',
+  find: '🔍',
+  ripgrep: '🔍',
+  glob: '🗂',
+  ls: '🗂',
+  list: '🗂',
+  dir: '🗂',
+  todo: '📝',
+  todowrite: '📝',
+  fetch: '🌐',
+  webfetch: '🌐',
+  websearch: '🌐',
+  download: '🌐',
+  task: '🤖',
+  skill: '🤖',
+  agent: '🤖',
+  subagent: '🤖',
+  zooid: '💬',
+  matrix: '💬',
+  message: '💬',
+  send: '💬',
+  broadcast: '💬',
+  coolify: '☁️',
+  docker: '☁️',
+  deploy: '☁️',
+  github: '🐙',
+  git: '🐙',
+  truenas: '💾',
+  zfs: '💾',
+  storage: '💾',
+  pocketid: '🔑',
+  key: '🔑',
+  secret: '🔑',
+  ha: '🏠',
+  hass: '🏠',
+  homeassistant: '🏠',
+}
+
+/** Prefix fallback for descriptive titles (`Reading auth.ts`, `Editing notes`). */
+const TOOL_ICON_PREFIX: [string, string][] = [
+  ['read', '📖'],
+  ['view', '📖'],
+  ['edit', '✏️'],
+  ['writ', '✏️'],
+  ['creat', '✏️'],
+  ['search', '🔍'],
+  ['fetch', '🌐'],
+  ['list', '🗂'],
+]
+
+const DEFAULT_TOOL_ICON = '🛠'
+
+/** The identifying emoji for a tool title; one code point plus VS16 at most. */
+export function toolIcon(title: string): string {
+  const words = title.trim().toLowerCase().split(/[\s_./:-]+/)
+  const head = words[0]
+  if (head && TOOL_ICON_BY_NAME[head]) return TOOL_ICON_BY_NAME[head]!
+  for (const [prefix, icon] of TOOL_ICON_PREFIX) {
+    if (head && head.startsWith(prefix)) return icon
+  }
+  return DEFAULT_TOOL_ICON
+}
+
 /** Cap a single collapsed tool line so a long title stays glanceable. */
 const TOOL_LINE_MAX = 200
 /** Cap a tool's compact parameter rendering so a huge diff / command can't bloat the block. */
@@ -296,16 +385,18 @@ const TOOL_SEPARATOR: GroupLine[] = [
 ]
 
 /**
- * Compact one-line rendering of a tool entry: `✓ bash — done`,
- * `⏳ edit src/x.ts`, `✗ edit — failed`. Only the title and status are shown on
- * this line — the params and output are separate indented lines. The status
- * label appears only for terminal states (the ⏳/• glyphs already convey
- * in-flight/pending), and the whole line is clamped.
+ * Compact one-line rendering of a tool entry: `✓ 🐚 bash — done`,
+ * `⏳ ✏️ edit src/x.ts`, `✗ 📖 read — failed`. The status glyph comes first,
+ * then the tool's identifying icon, then the title. Only the title and status
+ * are shown on this line — the params and output are separate indented lines.
+ * The status label appears only for terminal states (the ⏳/• glyphs already
+ * convey in-flight/pending), and the whole line is clamped.
  */
 export function toolEntryLine(entry: TurnToolEntry): string {
   const terminal = entry.status === 'completed' || entry.status === 'failed'
   const label = terminal ? ` — ${toolStatusLabel(entry.status)}` : ''
-  return clamp(`${toolStatusIcon(entry.status)} ${entry.title}${label}`, TOOL_LINE_MAX)
+  const text = `${toolIcon(entry.title)} ${entry.title}${label}`
+  return clamp(`${toolStatusIcon(entry.status)} ${text}`, TOOL_LINE_MAX)
 }
 
 /** Collapse a raw scalar/object value to one compact, whitespace-normalised fragment. */
@@ -449,7 +540,7 @@ function selectGroupEntries(entries: TurnToolEntry[]): {
 }
 
 /**
- * Summary line for one group: `🔧 <agent>: <N tools> — <last tool> — <status>`.
+ * Summary line for one group: `🔧 <agent>: <N tools> — <icon> <last tool> — <status>`.
  * It is the plain body's first line and the HTML `<summary>`. The status label
  * is omitted when the last tool has no known status; a plan-only group reads
  * `🔧 <agent>: 0 tools — plan`.
@@ -465,7 +556,8 @@ export function turnGroupSummary(
   let detail: string
   if (last) {
     const label = toolStatusLabel(last.status)
-    detail = label ? `${last.title} — ${label}` : last.title
+    const title = `${toolIcon(last.title)} ${last.title}`
+    detail = label ? `${title} — ${label}` : title
   } else {
     detail = planDetail ? 'plan' : 'working'
   }
@@ -512,7 +604,7 @@ export function turnGroupBody(
 /**
  * HTML for one tool inside a group: a nested collapsed `<details>` whose
  * `<summary>` (first child, no `open`) is the tool's one-line rendering
- * (`✓ bash — done`, see `toolEntryLine`), and whose body is its params and its
+ * (`✓ 🐚 bash — done`, see `toolEntryLine`), and whose body is its params and its
  * output as two separate `<pre><code>` blocks — so the timeline shows a tool's
  * tagline and status and hides its input/output until the reader opens it.
  * Inside a block newlines are literal (`\n`), not `<br>`: the block preserves
