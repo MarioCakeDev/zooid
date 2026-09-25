@@ -510,14 +510,38 @@ export function turnGroupBody(
 }
 
 /**
+ * HTML for one tool inside a group: a nested collapsed `<details>` whose
+ * `<summary>` (first child, no `open`) is the tool's one-line rendering
+ * (`✓ bash — done`, see `toolEntryLine`), and whose body is its compact `⚙`
+ * params and `↳` output — so the timeline shows a tool's tagline and status and
+ * hides its input/output until the reader opens it. A rule separates params from
+ * output (the HTML twin of the plain `GROUP_DIVIDER`). A tool with neither
+ * params nor output has nothing to collapse, so it renders as the bare line to
+ * avoid a dead disclosure triangle. Every interpolated value is HTML-escaped.
+ */
+function toolSectionHtml(entry: TurnToolEntry): string {
+  const summary = escapeHtml(toolEntryLine(entry))
+  const body: string[] = []
+  if (entry.params) body.push(`⚙ ${escapeHtml(entry.params)}`)
+  if (entry.params && entry.output) body.push('<hr>')
+  if (entry.output) {
+    for (const l of entry.output.split('\n')) body.push(`↳ ${escapeHtml(l)}`)
+  }
+  if (body.length === 0) return summary
+  return `<details><summary>${summary}</summary>${body.join('<br>')}</details>`
+}
+
+/**
  * HTML rendering of the same group for `org.matrix.custom.html`: one collapsible
  * `<details>` block whose `<summary>` (first child, no `open`) is the group
- * summary, and whose body is the per-tool sections joined with `<br>`. A rule in
- * the line list becomes `<hr>` (matching the plain `GROUP_DIVIDER` line), so the
- * params/output divider and the inter-tool separation read the same here as in
- * the plain body. Element Web/Desktop renders it collapsed; Element X ignores
- * `<details>` and shows the body expanded. Every interpolated value is
- * HTML-escaped.
+ * summary, and whose body lists one entry per tool — each entry itself a nested
+ * `<details>` (see `toolSectionHtml`) that collapses the tool's input/output
+ * behind its tagline and status. A rule separates consecutive tool sections, and
+ * the params/output divider becomes `<hr>` (matching the plain `GROUP_DIVIDER`
+ * line), so the two renderings read the same. Element Web/Desktop renders
+ * `<details>` collapsed; Element X ignores it and shows the body expanded, which
+ * is why the plain body stays flat (see `turnGroupBody`). Every interpolated
+ * value is HTML-escaped.
  */
 export function turnGroupHtml(
   agentId: string,
@@ -525,8 +549,15 @@ export function turnGroupHtml(
   planDetail?: string,
 ): string {
   const summary = escapeHtml(turnGroupSummary(agentId, entries, planDetail))
-  const body = turnGroupBodyLines(entries, planDetail).map(renderGroupLineHtml).join('<br>')
-  return `<details><summary>${summary}</summary>${body}</details>`
+  const { shown, omitted } = selectGroupEntries(entries)
+  const body: string[] = []
+  if (omitted > 0) body.push(`… ${omitted} more`)
+  shown.forEach((entry, i) => {
+    if (i > 0) body.push('', '<hr>')
+    body.push(toolSectionHtml(entry))
+  })
+  if (planDetail) body.push(`🗒 ${escapeHtml(clamp(planDetail))}`)
+  return `<details><summary>${summary}</summary>${body.join('<br>')}</details>`
 }
 
 /**

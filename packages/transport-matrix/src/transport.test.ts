@@ -3075,12 +3075,14 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     const newContent = contentOf(edits(client)[0]![0])['m.new_content'] as Record<string, unknown>
     expect(newContent['dev.zooid.mirror']).toBe(true)
     expect(newContent['m.relates_to']).toEqual({ rel_type: 'm.thread', event_id: '$g13' })
-    // The HTML edit carries the collapsible block with the same params/output.
+    // The HTML edit carries the collapsible group with the tool's own nested
+    // <details>: the tool line is the inner <summary>, params/output are its body.
     expect(newContent).toMatchObject({
       format: 'org.matrix.custom.html',
       formatted_body:
         '<details><summary>🔧 architect: 1 tool — bash — done</summary>' +
-        '✓ bash — done<br>⚙ command=pnpm test<br><hr><br>↳ ok, 12 passed</details>',
+        '<details><summary>✓ bash — done</summary>⚙ command=pnpm test<br><hr><br>↳ ok, 12 passed</details>' +
+        '</details>',
     })
     finishPrompt()
     await settleTurn()
