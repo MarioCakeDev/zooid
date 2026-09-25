@@ -654,7 +654,7 @@ describe('turnGroupHtml', () => {
     expect(html).not.toContain(' open>')
   })
 
-  it('renders params and output inside the block', () => {
+  it('nests a <details> per tool so input/output collapse behind the tool line', () => {
     const html = turnGroupHtml('dev', [
       entry({
         title: 'bash',
@@ -665,8 +665,19 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 1 tool — bash — done</summary>' +
-        '✓ bash — done<br>⚙ command=git status<br><hr><br>↳ clean tree</details>',
+        '<details><summary>✓ bash — done</summary>⚙ command=git status<br><hr><br>↳ clean tree</details>' +
+        '</details>',
     )
+    // The tool line is the inner <summary>; the input/output are its body.
+    expect(html).toContain('<details><summary>✓ bash — done</summary>⚙ command=git status')
+  })
+
+  it('does not wrap a tool with no input/output in a dead <details>', () => {
+    const html = turnGroupHtml('dev', [entry({ title: 'Read file', status: 'completed' })])
+    expect(html).toBe(
+      '<details><summary>🔧 dev: 1 tool — Read file — done</summary>✓ Read file — done</details>',
+    )
+    expect(html.match(/<details>/g)).toHaveLength(1)
   })
 
   it('renders the params/output rule as <hr> and the inter-tool separation as a blank line + <hr>', () => {
@@ -682,7 +693,8 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — Read file — done</summary>' +
-        '✓ bash — done<br>⚙ command=ls<br><hr><br>↳ clean<br><br><hr><br>✓ Read file — done</details>',
+        '<details><summary>✓ bash — done</summary>⚙ command=ls<br><hr><br>↳ clean</details>' +
+        '<br><br><hr><br>✓ Read file — done</details>',
     )
   })
 
