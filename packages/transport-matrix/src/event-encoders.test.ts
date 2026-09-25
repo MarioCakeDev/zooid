@@ -647,14 +647,14 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — edit src/x.ts — done</summary>' +
-        '⏳ bash<br><br><hr><br>✓ edit src/x.ts — done</details>',
+        '⏳ bash<hr>✓ edit src/x.ts — done</details>',
     )
     expect(html.startsWith('<details><summary>')).toBe(true)
     expect(html).not.toContain('<details open')
     expect(html).not.toContain(' open>')
   })
 
-  it('nests a <details> per tool so input/output collapse behind the tool line', () => {
+  it('nests a <details> per tool with input/output in one <pre><code> block', () => {
     const html = turnGroupHtml('dev', [
       entry({
         title: 'bash',
@@ -665,11 +665,14 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 1 tool — bash — done</summary>' +
-        '<details><summary>✓ bash — done</summary>⚙ command=git status<br><hr><br>↳ clean tree</details>' +
+        '<details><summary>✓ bash — done</summary>' +
+        '<pre><code>⚙ command=git status\n\n↳ clean tree</code></pre></details>' +
         '</details>',
     )
-    // The tool line is the inner <summary>; the input/output are its body.
-    expect(html).toContain('<details><summary>✓ bash — done</summary>⚙ command=git status')
+    // The tool line is the inner <summary>; the input/output are its code block.
+    expect(html).toContain('<details><summary>✓ bash — done</summary><pre><code>⚙ command=git status')
+    // Newlines inside the block are literal, not <br>.
+    expect(html).not.toContain('↳ clean tree<br>')
   })
 
   it('does not wrap a tool with no input/output in a dead <details>', () => {
@@ -680,7 +683,7 @@ describe('turnGroupHtml', () => {
     expect(html.match(/<details>/g)).toHaveLength(1)
   })
 
-  it('renders the params/output rule as <hr> and the inter-tool separation as a blank line + <hr>', () => {
+  it('renders the inter-tool separation as a bare <hr> (no <br> padding)', () => {
     const html = turnGroupHtml('dev', [
       entry({
         toolCallId: 'tc-1',
@@ -693,19 +696,21 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — Read file — done</summary>' +
-        '<details><summary>✓ bash — done</summary>⚙ command=ls<br><hr><br>↳ clean</details>' +
-        '<br><br><hr><br>✓ Read file — done</details>',
+        '<details><summary>✓ bash — done</summary>' +
+        '<pre><code>⚙ command=ls\n\n↳ clean</code></pre></details>' +
+        '<hr>✓ Read file — done</details>',
     )
+    expect(html).not.toContain('<br><hr>')
+    expect(html).not.toContain('<hr><br>')
   })
 
-  it('escapes the divider-independent text around every <hr>', () => {
+  it('escapes HTML-significant text in the tool line, params and output', () => {
     const html = turnGroupHtml('dev', [
       entry({ title: '<b>bash</b>', params: 'cmd=<i>&</i>', output: '<u>x</u>' }),
     ])
     expect(html).toContain('&lt;b&gt;bash&lt;/b&gt;')
     expect(html).toContain('cmd=&lt;i&gt;&amp;&lt;/i&gt;')
     expect(html).toContain('&lt;u&gt;x&lt;/u&gt;')
-    expect(html).toContain('<hr>')
     expect(html).not.toContain('<b>')
     expect(html).not.toContain('<i>')
     expect(html).not.toContain('<u>')
@@ -740,7 +745,7 @@ describe('turnGroupHtml', () => {
     const html = turnGroupHtml('dev', many)
     expect(
       html.startsWith(
-        '<details><summary>🔧 dev: 25 tools — tool-24 — done</summary>… 5 more<br>✓ tool-5 — done<br>',
+        '<details><summary>🔧 dev: 25 tools — tool-24 — done</summary>… 5 more<hr>✓ tool-5 — done<hr>',
       ),
     ).toBe(true)
     expect(html.endsWith('✓ tool-24 — done</details>')).toBe(true)
