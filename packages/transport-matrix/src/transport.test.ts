@@ -2822,7 +2822,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     expect(lines(client)).toEqual(['🔧 architect: 1 tool — bash — pending\n• bash'])
     expect(edits(client)).toHaveLength(2)
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 1 tool — bash — done\n✓ bash — done\n↳ ok, 12 passed',
+      '🔧 architect: 1 tool — bash — done\n✓ bash — done\nok, 12 passed',
     )
     finishPrompt()
     await settleTurn()
@@ -3056,7 +3056,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     const id = await createdId(
       client,
-      '🔧 architect: 1 tool — bash — pending\n• bash\n⚙ command=pnpm test',
+      '🔧 architect: 1 tool — bash — pending\n• bash\ncommand=pnpm test',
     )
     await updateTool(agents, sessionId, {
       toolCallId: 'tc-1',
@@ -3066,24 +3066,24 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
     // Same block, same entry: the update refreshed status and output in place.
     expect(lines(client)).toEqual([
-      '🔧 architect: 1 tool — bash — pending\n• bash\n⚙ command=pnpm test',
+      '🔧 architect: 1 tool — bash — pending\n• bash\ncommand=pnpm test',
     ])
     expect(edits(client)).toHaveLength(1)
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 1 tool — bash — done\n✓ bash — done\n⚙ command=pnpm test\n────────────────\n↳ ok, 12 passed',
+      '🔧 architect: 1 tool — bash — done\n✓ bash — done\ncommand=pnpm test\n────────────────\nok, 12 passed',
     )
     const newContent = contentOf(edits(client)[0]![0])['m.new_content'] as Record<string, unknown>
     expect(newContent['dev.zooid.mirror']).toBe(true)
     expect(newContent['m.relates_to']).toEqual({ rel_type: 'm.thread', event_id: '$g13' })
     // The HTML edit carries the collapsible group with the tool's own nested
-    // <details>; the tool line is the inner <summary> and params/output sit in
-    // one <pre><code> block with literal newlines.
+    // <details>; the tool line is the inner <summary> and params/output are two
+    // separate <pre><code> blocks.
     expect(newContent).toMatchObject({
       format: 'org.matrix.custom.html',
       formatted_body:
         '<details><summary>🔧 architect: 1 tool — bash — done</summary>' +
         '<details><summary>✓ bash — done</summary>' +
-        '<pre><code>⚙ command=pnpm test\n\n↳ ok, 12 passed</code></pre></details>' +
+        '<pre><code>command=pnpm test</code></pre><pre><code>ok, 12 passed</code></pre></details>' +
         '</details>',
     })
     finishPrompt()

@@ -534,13 +534,13 @@ describe('turnGroupBody', () => {
       [
         '🔧 dev: 2 tools — edit src/x.ts — done',
         '⏳ bash',
-        '⚙ command=git status',
+        'command=git status',
         '────────────────',
-        '↳ clean',
+        'clean',
         '',
         '────────────────',
         '✓ edit src/x.ts — done',
-        '⚙ filepath=src/x.ts',
+        'filepath=src/x.ts',
       ].join('\n'),
     )
   })
@@ -552,9 +552,9 @@ describe('turnGroupBody', () => {
     expect(body.split('\n')).toEqual([
       '🔧 dev: 1 tool — bash',
       '• bash',
-      '⚙ command=npm test, cwd=/workspace',
+      'command=npm test, cwd=/workspace',
       '────────────────',
-      '↳ 12 passed',
+      '12 passed',
     ])
   })
 
@@ -566,7 +566,7 @@ describe('turnGroupBody', () => {
     expect(body.split('\n')).toEqual([
       '🔧 dev: 2 tools — Read file — done',
       '✓ bash — done',
-      '↳ clean',
+      'clean',
       '',
       '────────────────',
       '✓ Read file — done',
@@ -575,17 +575,17 @@ describe('turnGroupBody', () => {
 
   it('adds no rule when a tool has params or output alone', () => {
     expect(turnGroupBody('dev', [entry({ title: 'bash', params: 'command=ls' })])).toBe(
-      '🔧 dev: 1 tool — bash\n• bash\n⚙ command=ls',
+      '🔧 dev: 1 tool — bash\n• bash\ncommand=ls',
     )
     expect(turnGroupBody('dev', [entry({ title: 'bash', output: 'clean' })])).toBe(
-      '🔧 dev: 1 tool — bash\n• bash\n↳ clean',
+      '🔧 dev: 1 tool — bash\n• bash\nclean',
     )
   })
 
-  it('renders a multi-line output one `↳` line per entry', () => {
+  it('renders a multi-line output one line per entry', () => {
     expect(
       turnGroupBody('dev', [entry({ title: 'bash', output: 'first\nsecond' })]),
-    ).toBe('🔧 dev: 1 tool — bash\n• bash\n↳ first\n↳ second')
+    ).toBe('🔧 dev: 1 tool — bash\n• bash\nfirst\nsecond')
   })
 
   it('appends the plan detail as the last line', () => {
@@ -628,7 +628,7 @@ describe('turnGroupBody', () => {
       entry({ title: 'bash', status: 'completed', output: 'x'.repeat(9000) }),
     ])
     expect(body).toContain('✓ bash — done')
-    expect(body).toContain('↳ ')
+    expect(body).toContain('x'.repeat(20))
     expect(body).not.toContain('more')
   })
 })
@@ -654,7 +654,7 @@ describe('turnGroupHtml', () => {
     expect(html).not.toContain(' open>')
   })
 
-  it('nests a <details> per tool with input/output in one <pre><code> block', () => {
+  it('nests a <details> per tool with input and output in separate <pre><code> blocks', () => {
     const html = turnGroupHtml('dev', [
       entry({
         title: 'bash',
@@ -666,13 +666,15 @@ describe('turnGroupHtml', () => {
     expect(html).toBe(
       '<details><summary>🔧 dev: 1 tool — bash — done</summary>' +
         '<details><summary>✓ bash — done</summary>' +
-        '<pre><code>⚙ command=git status\n\n↳ clean tree</code></pre></details>' +
+        '<pre><code>command=git status</code></pre><pre><code>clean tree</code></pre></details>' +
         '</details>',
     )
-    // The tool line is the inner <summary>; the input/output are its code block.
-    expect(html).toContain('<details><summary>✓ bash — done</summary><pre><code>⚙ command=git status')
-    // Newlines inside the block are literal, not <br>.
-    expect(html).not.toContain('↳ clean tree<br>')
+    // The tool line is the inner <summary>; input and output are separate blocks.
+    expect(html).toContain('<details><summary>✓ bash — done</summary><pre><code>command=git status')
+    expect(html).toContain('</code></pre><pre><code>clean tree</code></pre>')
+    // No icon prefixes on the input/output text.
+    expect(html).not.toContain('⚙')
+    expect(html).not.toContain('↳')
   })
 
   it('does not wrap a tool with no input/output in a dead <details>', () => {
@@ -697,7 +699,7 @@ describe('turnGroupHtml', () => {
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — Read file — done</summary>' +
         '<details><summary>✓ bash — done</summary>' +
-        '<pre><code>⚙ command=ls\n\n↳ clean</code></pre></details>' +
+        '<pre><code>command=ls</code></pre><pre><code>clean</code></pre></details>' +
         '<br>✓ Read file — done</details>',
     )
     expect(html).not.toContain('<hr>')

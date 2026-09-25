@@ -272,10 +272,12 @@ const TOOL_PARAM_MAX = 200
 const TOOL_OUTPUT_MAX = 200
 
 /**
- * Horizontal rule used both between a tool's `⚙` params and its `↳` output, and
- * between consecutive tool sections. It is one literal line in the plain body
- * and `<hr>` in the HTML, so the two renderings read the same on Element X
- * (which ignores `<details>` and shows the plain body) and Element Web.
+ * Horizontal rule between sections in the plain body: between a tool's params
+ * and its output, and between consecutive tool sections. It is one literal line,
+ * so Element X (which ignores `<details>` and shows the plain body) keeps a
+ * visible separator; the HTML body instead uses separate `<pre><code>` blocks
+ * and a bare `<br>`, and no longer emits this rule. The string still backs the
+ * shared plain/HTML size accounting.
  */
 const GROUP_DIVIDER = '────────────────'
 
@@ -391,17 +393,15 @@ const GROUP_CHAR_MAX = 8000
 
 /**
  * The lines one tool contributes: its line, then its params and output. A rule
- * separates the `⚙` input from the `↳` output (Option 3) when both are present,
- * so the two are never mistaken for one another.
+ * separates the input from the output when both are present, so the two are
+ * never mistaken for one another.
  */
 function toolSectionLines(entry: TurnToolEntry): GroupLine[] {
   const lines: GroupLine[] = [{ kind: 'text', text: toolEntryLine(entry) }]
-  const hasParams = Boolean(entry.params)
-  const hasOutput = Boolean(entry.output)
-  if (hasParams) lines.push({ kind: 'text', text: `⚙ ${entry.params}` })
-  if (hasParams && hasOutput) lines.push({ kind: 'divider' })
+  if (entry.params) lines.push({ kind: 'text', text: entry.params })
+  if (entry.params && entry.output) lines.push({ kind: 'divider' })
   if (entry.output) {
-    for (const l of entry.output.split('\n')) lines.push({ kind: 'text', text: `↳ ${l}` })
+    for (const l of entry.output.split('\n')) lines.push({ kind: 'text', text: l })
   }
   return lines
 }
@@ -490,7 +490,7 @@ function turnGroupBodyLines(entries: TurnToolEntry[], planDetail?: string): Grou
  * followed by one section per tool (the tool line, its compact params, a rule,
  * its truncated output) and the plan detail. Consecutive tool sections are
  * separated by a blank line and a rule, so each tool's block is visually
- * distinct; a rule also sits between a tool's `⚙` params and its `↳` output. It
+ * distinct; a rule also sits between a tool's params and its output. It
  * carries exactly the content the HTML block carries, `\n`-joined, because that
  * is what Element X and non-HTML clients show. The group is created on the first
  * activity after a prose message and edited in place as more tools run, so the
@@ -512,27 +512,22 @@ export function turnGroupBody(
 /**
  * HTML for one tool inside a group: a nested collapsed `<details>` whose
  * `<summary>` (first child, no `open`) is the tool's one-line rendering
- * (`✓ bash — done`, see `toolEntryLine`), and whose body is its compact `⚙`
- * params and `↳` output in one `<pre><code>` block — so the timeline shows a
- * tool's tagline and status and hides its input/output until the reader opens
- * it. Inside the code block newlines are literal (`\n`), not `<br>`: the block
- * preserves them and, crucially, keeps Element Web/Desktop spacing tight
- * instead of stacking a `<br>` (and its margin) per line. A blank line
- * separates params from output, the code-block twin of the plain
- * `GROUP_DIVIDER`. A tool with neither params nor output has nothing to
- * collapse, so it renders as the bare line to avoid a dead disclosure triangle.
- * Every interpolated value is HTML-escaped.
+ * (`✓ bash — done`, see `toolEntryLine`), and whose body is its params and its
+ * output as two separate `<pre><code>` blocks — so the timeline shows a tool's
+ * tagline and status and hides its input/output until the reader opens it.
+ * Inside a block newlines are literal (`\n`), not `<br>`: the block preserves
+ * them and keeps Element Web/Desktop spacing tight. A tool with only params or
+ * only output gets a single block; a tool with neither has nothing to collapse
+ * and renders as the bare line to avoid a dead disclosure triangle. Every
+ * interpolated value is HTML-escaped.
  */
 function toolSectionHtml(entry: TurnToolEntry): string {
   const summary = escapeHtml(toolEntryLine(entry))
-  const lines: string[] = []
-  if (entry.params) lines.push(`⚙ ${escapeHtml(entry.params)}`)
-  if (entry.params && entry.output) lines.push('')
-  if (entry.output) {
-    for (const l of entry.output.split('\n')) lines.push(`↳ ${escapeHtml(l)}`)
-  }
-  if (lines.length === 0) return summary
-  return `<details><summary>${summary}</summary><pre><code>${lines.join('\n')}</code></pre></details>`
+  const blocks: string[] = []
+  if (entry.params) blocks.push(`<pre><code>${escapeHtml(entry.params)}</code></pre>`)
+  if (entry.output) blocks.push(`<pre><code>${escapeHtml(entry.output)}</code></pre>`)
+  if (blocks.length === 0) return summary
+  return `<details><summary>${summary}</summary>${blocks.join('')}</details>`
 }
 
 /**
