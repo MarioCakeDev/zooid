@@ -647,7 +647,7 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — edit src/x.ts — done</summary>' +
-        '⏳ bash<hr>✓ edit src/x.ts — done</details>',
+        '⏳ bash<br>✓ edit src/x.ts — done</details>',
     )
     expect(html.startsWith('<details><summary>')).toBe(true)
     expect(html).not.toContain('<details open')
@@ -683,7 +683,7 @@ describe('turnGroupHtml', () => {
     expect(html.match(/<details>/g)).toHaveLength(1)
   })
 
-  it('renders the inter-tool separation as a bare <hr> (no <br> padding)', () => {
+  it('separates collapsible tools with a single <br> and no rule', () => {
     const html = turnGroupHtml('dev', [
       entry({
         toolCallId: 'tc-1',
@@ -698,10 +698,9 @@ describe('turnGroupHtml', () => {
       '<details><summary>🔧 dev: 2 tools — Read file — done</summary>' +
         '<details><summary>✓ bash — done</summary>' +
         '<pre><code>⚙ command=ls\n\n↳ clean</code></pre></details>' +
-        '<hr>✓ Read file — done</details>',
+        '<br>✓ Read file — done</details>',
     )
-    expect(html).not.toContain('<br><hr>')
-    expect(html).not.toContain('<hr><br>')
+    expect(html).not.toContain('<hr>')
   })
 
   it('escapes HTML-significant text in the tool line, params and output', () => {
@@ -745,7 +744,7 @@ describe('turnGroupHtml', () => {
     const html = turnGroupHtml('dev', many)
     expect(
       html.startsWith(
-        '<details><summary>🔧 dev: 25 tools — tool-24 — done</summary>… 5 more<hr>✓ tool-5 — done<hr>',
+        '<details><summary>🔧 dev: 25 tools — tool-24 — done</summary>… 5 more<br>✓ tool-5 — done<br>',
       ),
     ).toBe(true)
     expect(html.endsWith('✓ tool-24 — done</details>')).toBe(true)

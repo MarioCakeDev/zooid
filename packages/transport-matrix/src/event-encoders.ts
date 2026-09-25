@@ -540,11 +540,11 @@ function toolSectionHtml(entry: TurnToolEntry): string {
  * `<details>` block whose `<summary>` (first child, no `open`) is the group
  * summary, and whose body lists one entry per tool — each entry itself a nested
  * `<details>` (see `toolSectionHtml`) that collapses the tool's input/output
- * behind its tagline and status. Consecutive tools are separated by a bare
- * `<hr>` with no surrounding `<br>` padding: the rules are a block element and
- * every added `<br>` doubles the gap, which is what made Element Web/Desktop far
- * airier than Element X's tight plain body. The plain body is unchanged (see
- * `turnGroupBody`), so clients that ignore `<details>` keep their current
+ * behind its tagline and status. Entries are joined by a single `<br>`: with
+ * every tool collapsible and its own block, a rule between them is redundant,
+ * and the old blank-line + `<hr>` + blank-line was what made Element Web/Desktop
+ * far airier than Element X's tight plain body. The plain body is unchanged (see
+ * `turnGroupBody`), so clients that ignore `<details>` keep their dividers and
  * spacing. Every interpolated value is HTML-escaped.
  */
 export function turnGroupHtml(
@@ -557,7 +557,7 @@ export function turnGroupHtml(
   const parts: string[] = []
   if (omitted > 0) parts.push(`… ${omitted} more`)
   parts.push(...shown.map(toolSectionHtml))
-  let body = parts.join('<hr>')
+  let body = parts.join('<br>')
   if (planDetail) {
     const plan = `🗒 ${escapeHtml(clamp(planDetail))}`
     body = body.length > 0 ? `${body}<br>${plan}` : plan

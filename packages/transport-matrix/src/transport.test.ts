@@ -2802,7 +2802,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       format: 'org.matrix.custom.html',
       formatted_body:
         '<details><summary>🔧 architect: 2 tools — edit src/x.ts — pending</summary>' +
-        '⏳ bash<hr>• edit src/x.ts</details>',
+        '⏳ bash<br>• edit src/x.ts</details>',
     })
     finishPrompt()
     await settleTurn()
