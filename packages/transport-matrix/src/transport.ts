@@ -42,6 +42,8 @@ import {
   turnMirrorEditContent,
   toolParamsText,
   toolOutputText,
+  toolEntryPath,
+  toolEntryMachine,
   TURN_MIRROR_MARKER,
   type TurnToolEntry,
 } from './event-encoders.js'
@@ -595,7 +597,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
    * Add or update a tool entry within `group`. A `tool_call` and a later
    * `tool_call_update` for the same id share one entry (and one line): the
    * update refreshes the title/status in place and merges in the compact
-   * `raw_input` params and the truncated `content[]` output — never a duplicate.
+   * `raw_input` params, the truncated `content[]` output, and the tagline's
+   * path/machine (both read from the ACP event) — never a duplicate.
    */
   function upsertGroupEntry(
     group: MirrorGroup,
@@ -605,6 +608,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (!toolCallId) return undefined
     const params = toolParamsText(content.raw_input)
     const output = toolOutputText(content.content)
+    const path = toolEntryPath(content)
+    const machine = toolEntryMachine(content)
     const existing = group.index.get(toolCallId)
     if (existing === undefined) {
       const entry: TurnToolEntry = {
@@ -614,6 +619,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       }
       if (params) entry.params = params
       if (output) entry.output = output
+      if (path) entry.path = path
+      if (machine) entry.machine = machine
       group.index.set(toolCallId, group.entries.length)
       group.entries.push(entry)
       return entry
@@ -625,6 +632,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (status) entry.status = status
     if (params) entry.params = params
     if (output) entry.output = output
+    // Some agents send rawInput/locations only on a later update — fill them
+    // in when they arrive, but never blank a value this entry already has.
+    if (path) entry.path = path
+    if (machine) entry.machine = machine
     return entry
   }
 
