@@ -13,9 +13,10 @@ import {
   toTurnEndBody,
   toActivityNoticeBody,
   activityDetail,
-  toolStatusLabel,
   toolIcon,
   toolEntryLine,
+  toolEntryPath,
+  toolEntryMachine,
   toolParamsText,
   toolOutputText,
   turnGroupBody,
@@ -487,20 +488,39 @@ describe('turnGroupSummary', () => {
     ...over,
   })
 
-  it('reads `🔧 <agent>: <N tools> — <last tool> — <status>`', () => {
+  it('reads `🔧 <agent>: <N tools> — <last tool>` with no status word', () => {
     expect(turnGroupSummary('dev', [entry({ title: 'bash', status: 'completed' })])).toBe(
-      '🔧 dev: 1 tool — 🐚 bash — done',
+      '🔧 dev: 1 tool — 🐚 bash @local',
     )
     expect(
       turnGroupSummary('dev', [
         entry({ title: 'a' }),
         entry({ toolCallId: 'tc-2', title: 'b', status: 'in_progress' }),
       ]),
-    ).toBe('🔧 dev: 2 tools — 🛠 b — running')
+    ).toBe('🔧 dev: 2 tools — 🛠 b')
   })
 
-  it('omits the status label when the last tool has none', () => {
-    expect(turnGroupSummary('dev', [entry({ title: 'bash' })])).toBe('🔧 dev: 1 tool — 🐚 bash')
+  it('names the last tool’s file instead of a read/write tool word', () => {
+    expect(
+      turnGroupSummary('dev', [
+        entry({ title: 'read /workspace/src/x.ts', path: '/workspace/src/x.ts' }),
+      ]),
+    ).toBe('🔧 dev: 1 tool — 📖 /workspace/src/x.ts')
+  })
+
+  it('appends the machine the last shell call ran on', () => {
+    expect(
+      turnGroupSummary('dev', [entry({ title: 'ssh_run-command', machine: 'coolify' })]),
+    ).toBe('🔧 dev: 1 tool — 🐚 ssh_run-command @coolify')
+    expect(turnGroupSummary('dev', [entry({ title: 'bash' })])).toBe(
+      '🔧 dev: 1 tool — 🐚 bash @local',
+    )
+  })
+
+  it('keeps the machine on the summary line even when the last tool is clamped', () => {
+    const summary = turnGroupSummary('dev', [entry({ title: `bash ${'x'.repeat(400)}` })])
+    expect(summary.endsWith('… @local')).toBe(true)
+    expect(summary.length).toBeLessThanOrEqual(200)
   })
 
   it('reads a plan-only group as 0 tools — plan', () => {
@@ -533,14 +553,14 @@ describe('turnGroupBody', () => {
       ]),
     ).toBe(
       [
-        '🔧 dev: 2 tools — ✏️ edit src/x.ts — done',
-        '⏳ 🐚 bash',
+        '🔧 dev: 2 tools — ✏️ edit src/x.ts',
+        '⏳ 🐚 bash @local',
         'command=git status',
         '────────────────',
         'clean',
         '',
         '────────────────',
-        '✓ ✏️ edit src/x.ts — done',
+        '✓ ✏️ edit src/x.ts',
         'filepath=src/x.ts',
       ].join('\n'),
     )
@@ -551,8 +571,8 @@ describe('turnGroupBody', () => {
       entry({ title: 'bash', params: 'command=npm test, cwd=/workspace', output: '12 passed' }),
     ])
     expect(body.split('\n')).toEqual([
-      '🔧 dev: 1 tool — 🐚 bash',
-      '• 🐚 bash',
+      '🔧 dev: 1 tool — 🐚 bash @local',
+      '• 🐚 bash @local',
       'command=npm test, cwd=/workspace',
       '────────────────',
       '12 passed',
@@ -565,28 +585,28 @@ describe('turnGroupBody', () => {
       entry({ toolCallId: 'tc-2', title: 'Read file', status: 'completed' }),
     ])
     expect(body.split('\n')).toEqual([
-      '🔧 dev: 2 tools — 📖 Read file — done',
-      '✓ 🐚 bash — done',
+      '🔧 dev: 2 tools — 📖 Read file',
+      '✓ 🐚 bash @local',
       'clean',
       '',
       '────────────────',
-      '✓ 📖 Read file — done',
+      '✓ 📖 Read file',
     ])
   })
 
   it('adds no rule when a tool has params or output alone', () => {
     expect(turnGroupBody('dev', [entry({ title: 'bash', params: 'command=ls' })])).toBe(
-      '🔧 dev: 1 tool — 🐚 bash\n• 🐚 bash\ncommand=ls',
+      '🔧 dev: 1 tool — 🐚 bash @local\n• 🐚 bash @local\ncommand=ls',
     )
     expect(turnGroupBody('dev', [entry({ title: 'bash', output: 'clean' })])).toBe(
-      '🔧 dev: 1 tool — 🐚 bash\n• 🐚 bash\nclean',
+      '🔧 dev: 1 tool — 🐚 bash @local\n• 🐚 bash @local\nclean',
     )
   })
 
   it('renders a multi-line output one line per entry', () => {
     expect(
       turnGroupBody('dev', [entry({ title: 'bash', output: 'first\nsecond' })]),
-    ).toBe('🔧 dev: 1 tool — 🐚 bash\n• 🐚 bash\nfirst\nsecond')
+    ).toBe('🔧 dev: 1 tool — 🐚 bash @local\n• 🐚 bash @local\nfirst\nsecond')
   })
 
   it('appends the plan detail as the last line', () => {
@@ -601,11 +621,11 @@ describe('turnGroupBody', () => {
     )
     const body = turnGroupBody('dev', many)
     const lines = body.split('\n')
-    expect(lines[0]).toBe('🔧 dev: 25 tools — 🛠 tool-24 — done')
+    expect(lines[0]).toBe('🔧 dev: 25 tools — 🛠 tool-24')
     expect(lines[1]).toBe('… 5 more')
-    expect(lines[2]).toBe('✓ 🛠 tool-5 — done')
-    expect(lines.at(-1)).toBe('✓ 🛠 tool-24 — done')
-    expect(body).not.toContain('✓ 🛠 tool-4 — done')
+    expect(lines[2]).toBe('✓ 🛠 tool-5')
+    expect(lines.at(-1)).toBe('✓ 🛠 tool-24')
+    expect(body).not.toContain('✓ 🛠 tool-4')
   })
 
   it('stays under the total-size cap even with fat params and output', () => {
@@ -620,7 +640,7 @@ describe('turnGroupBody', () => {
     )
     const body = turnGroupBody('dev', fat)
     expect(body).toMatch(/… \d+ more/)
-    expect(body).not.toContain('✓ 🛠 tool-0 — done')
+    expect(body).not.toContain('✓ 🛠 tool-0')
     expect(body.length).toBeLessThan(9000)
   })
 
@@ -628,7 +648,7 @@ describe('turnGroupBody', () => {
     const body = turnGroupBody('dev', [
       entry({ title: 'bash', status: 'completed', output: 'x'.repeat(9000) }),
     ])
-    expect(body).toContain('✓ 🐚 bash — done')
+    expect(body).toContain('✓ 🐚 bash @local')
     expect(body).toContain('x'.repeat(20))
     expect(body).not.toContain('more')
   })
@@ -647,8 +667,8 @@ describe('turnGroupHtml', () => {
       entry({ toolCallId: 'tc-2', title: 'edit src/x.ts', status: 'completed' }),
     ])
     expect(html).toBe(
-      '<details><summary>🔧 dev: 2 tools — ✏️ edit src/x.ts — done</summary>' +
-        '⏳ 🐚 bash<br>✓ ✏️ edit src/x.ts — done</details>',
+      '<details><summary>🔧 dev: 2 tools — ✏️ edit src/x.ts</summary>' +
+        '⏳ 🐚 bash @local<br>✓ ✏️ edit src/x.ts</details>',
     )
     expect(html.startsWith('<details><summary>')).toBe(true)
     expect(html).not.toContain('<details open')
@@ -665,13 +685,13 @@ describe('turnGroupHtml', () => {
       }),
     ])
     expect(html).toBe(
-      '<details><summary>🔧 dev: 1 tool — 🐚 bash — done</summary>' +
-        '<details><summary>✓ 🐚 bash — done</summary>' +
+      '<details><summary>🔧 dev: 1 tool — 🐚 bash @local</summary>' +
+        '<details><summary>✓ 🐚 bash @local</summary>' +
         '<pre><code>command=git status</code></pre><pre><code>clean tree</code></pre></details>' +
         '</details>',
     )
     // The tool line is the inner <summary>; input and output are separate blocks.
-    expect(html).toContain('<details><summary>✓ 🐚 bash — done</summary><pre><code>command=git status')
+    expect(html).toContain('<details><summary>✓ 🐚 bash @local</summary><pre><code>command=git status')
     expect(html).toContain('</code></pre><pre><code>clean tree</code></pre>')
     // No icon prefixes on the input/output text.
     expect(html).not.toContain('⚙')
@@ -681,7 +701,7 @@ describe('turnGroupHtml', () => {
   it('does not wrap a tool with no input/output in a dead <details>', () => {
     const html = turnGroupHtml('dev', [entry({ title: 'Read file', status: 'completed' })])
     expect(html).toBe(
-      '<details><summary>🔧 dev: 1 tool — 📖 Read file — done</summary>✓ 📖 Read file — done</details>',
+      '<details><summary>🔧 dev: 1 tool — 📖 Read file</summary>✓ 📖 Read file</details>',
     )
     expect(html.match(/<details>/g)).toHaveLength(1)
   })
@@ -698,10 +718,10 @@ describe('turnGroupHtml', () => {
       entry({ toolCallId: 'tc-2', title: 'Read file', status: 'completed' }),
     ])
     expect(html).toBe(
-      '<details><summary>🔧 dev: 2 tools — 📖 Read file — done</summary>' +
-        '<details><summary>✓ 🐚 bash — done</summary>' +
+      '<details><summary>🔧 dev: 2 tools — 📖 Read file</summary>' +
+        '<details><summary>✓ 🐚 bash @local</summary>' +
         '<pre><code>command=ls</code></pre><pre><code>clean</code></pre></details>' +
-        '<br>✓ 📖 Read file — done</details>',
+        '<br>✓ 📖 Read file</details>',
     )
     expect(html).not.toContain('<hr>')
   })
@@ -747,11 +767,11 @@ describe('turnGroupHtml', () => {
     const html = turnGroupHtml('dev', many)
     expect(
       html.startsWith(
-        '<details><summary>🔧 dev: 25 tools — 🛠 tool-24 — done</summary>… 5 more<br>✓ 🛠 tool-5 — done<br>',
+        '<details><summary>🔧 dev: 25 tools — 🛠 tool-24</summary>… 5 more<br>✓ 🛠 tool-5<br>',
       ),
     ).toBe(true)
-    expect(html.endsWith('✓ 🛠 tool-24 — done</details>')).toBe(true)
-    expect(html).not.toContain('tool-4 — done')
+    expect(html.endsWith('✓ 🛠 tool-24</details>')).toBe(true)
+    expect(html).not.toContain('tool-4')
   })
 })
 
@@ -778,17 +798,49 @@ describe('turnFinalBody', () => {
   })
 })
 
-describe('toolStatusLabel', () => {
-  it('maps the ACP statuses to human labels', () => {
-    expect(toolStatusLabel('pending')).toBe('pending')
-    expect(toolStatusLabel('in_progress')).toBe('running')
-    expect(toolStatusLabel('completed')).toBe('done')
-    expect(toolStatusLabel('failed')).toBe('failed')
+describe('toolEntryPath', () => {
+  it('reads the path-ish keys of raw_input, preferring filePath', () => {
+    expect(toolEntryPath({ raw_input: { filePath: '/a/b.ts' } })).toBe('/a/b.ts')
+    expect(toolEntryPath({ raw_input: { filepath: '/a/b.ts' } })).toBe('/a/b.ts')
+    expect(toolEntryPath({ raw_input: { file_path: '/a/b.ts' } })).toBe('/a/b.ts')
+    expect(toolEntryPath({ raw_input: { path: '/a/b.ts' } })).toBe('/a/b.ts')
+    expect(toolEntryPath({ raw_input: { path: '/a', filePath: '/b' } })).toBe('/b')
   })
 
-  it('returns undefined for an absent or unknown status', () => {
-    expect(toolStatusLabel(undefined)).toBeUndefined()
-    expect(toolStatusLabel('weird')).toBeUndefined()
+  it('falls back to the first locations[].path', () => {
+    expect(
+      toolEntryPath({ locations: [{ path: '/a/one.ts' }, { path: '/a/two.ts' }] }),
+    ).toBe('/a/one.ts')
+    expect(toolEntryPath({ raw_input: { command: 'ls' }, locations: [{ path: '/a' }] })).toBe(
+      '/a',
+    )
+  })
+
+  it('returns undefined when the tool names no file', () => {
+    expect(toolEntryPath({})).toBeUndefined()
+    expect(toolEntryPath({ raw_input: { command: 'ls' } })).toBeUndefined()
+    expect(toolEntryPath({ raw_input: 'ls' })).toBeUndefined()
+    expect(toolEntryPath({ locations: [{ nope: 1 }] })).toBeUndefined()
+  })
+})
+
+describe('toolEntryMachine', () => {
+  it('prefers the ssh-mcp profile, then host/hostname', () => {
+    expect(toolEntryMachine({ raw_input: { profile: 'coolify', host: 'x' } })).toBe('coolify')
+    expect(toolEntryMachine({ raw_input: { host: 'router.local' } })).toBe('router.local')
+    expect(toolEntryMachine({ raw_input: { hostname: 'pve' } })).toBe('pve')
+  })
+
+  it('returns undefined when the event names no machine', () => {
+    expect(toolEntryMachine({})).toBeUndefined()
+    expect(toolEntryMachine({ raw_input: { command: 'ls' } })).toBeUndefined()
+    expect(toolEntryMachine({ raw_input: 'ls' })).toBeUndefined()
+    expect(toolEntryMachine({ raw_input: null })).toBeUndefined()
+  })
+
+  it('clamps a long host so it cannot eat the line', () => {
+    const machine = toolEntryMachine({ raw_input: { host: 'h'.repeat(200) } })!
+    expect(machine).toHaveLength(40)
   })
 })
 
@@ -799,8 +851,8 @@ describe('toolEntryLine', () => {
     ...over,
   })
 
-  it('renders a completed tool as ✓ <title> — done', () => {
-    expect(toolEntryLine(entry({ status: 'completed' }))).toBe('✓ 🐚 bash — done')
+  it('renders a completed tool as ✓ <icon> <title> — no status word', () => {
+    expect(toolEntryLine(entry({ status: 'completed' }))).toBe('✓ 🐚 bash @local')
   })
 
   it('renders an in-flight tool with a ⏳ glyph and no label', () => {
@@ -809,18 +861,56 @@ describe('toolEntryLine', () => {
     )
   })
 
-  it('renders a failed tool as ✗ <title> — failed', () => {
-    expect(toolEntryLine(entry({ title: 'edit', status: 'failed' }))).toBe('✗ ✏️ edit — failed')
+  it('renders a failed tool as ✗ <icon> <title> — no status word', () => {
+    expect(toolEntryLine(entry({ title: 'edit', status: 'failed' }))).toBe('✗ ✏️ edit')
   })
 
   it('renders a statusless tool with a neutral glyph', () => {
     expect(toolEntryLine(entry({ title: 'Read file' }))).toBe('• 📖 Read file')
   })
 
-  it('shows only the title and status — never raw tool output', () => {
-    const line = toolEntryLine(entry({ status: 'completed' }))
-    expect(line).toBe('✓ 🐚 bash — done')
+  it('shows the file path instead of the tool word for read/write tools', () => {
+    expect(
+      toolEntryLine(
+        entry({ title: 'read /workspace/AGENTS.md', status: 'completed', path: '/workspace/AGENTS.md' }),
+      ),
+    ).toBe('✓ 📖 /workspace/AGENTS.md')
+    expect(toolEntryLine(entry({ title: 'write', status: 'completed', path: '/workspace/src/x.ts' }))).toBe(
+      '✓ ✏️ /workspace/src/x.ts',
+    )
+  })
+
+  it('keeps the title for a path-bearing tool that named no file', () => {
+    expect(toolEntryLine(entry({ title: 'Read file' }))).toBe('• 📖 Read file')
+  })
+
+  it('never shows a path for a tool that is not a reader or writer', () => {
+    expect(toolEntryLine(entry({ title: 'grep', path: '/a' }))).toBe('• 🔍 grep')
+  })
+
+  it('names the machine of a remote shell call, or local for a container one', () => {
+    expect(toolEntryLine(entry({ title: 'ssh_run-command', machine: 'coolify' }))).toBe(
+      '• 🐚 ssh_run-command @coolify',
+    )
+    expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• 🐚 bash @local')
+    expect(toolEntryLine(entry({ title: 'bash', machine: 'hass' }))).toBe('• 🐚 bash @hass')
+    expect(toolEntryLine(entry({ title: 'Verify' }))).toBe('• 🛠 Verify')
+  })
+
+  it('keeps the machine on the line even when a long title is clamped', () => {
+    const line = toolEntryLine(
+      entry({ title: `bash ${'x'.repeat(400)}`, status: 'completed' }),
+    )
+    expect(line.endsWith('… @local')).toBe(true)
+    expect(line.length).toBeLessThanOrEqual(200)
+  })
+
+  it('shows only the tagline — never raw tool output', () => {
+    const line = toolEntryLine(entry({ status: 'completed', output: 'ok', params: 'command=x' }))
+    expect(line).toBe('✓ 🐚 bash @local')
     expect(line).not.toContain('·')
+    expect(line).not.toContain('ok')
+    expect(line).not.toContain('command=x')
   })
 })
 
@@ -912,13 +1002,13 @@ describe('turnMirrorNoticeContent', () => {
 
 describe('turnMirrorEditContent', () => {
   it('is an m.replace of the original, with the thread relation in m.new_content', () => {
-    expect(turnMirrorEditContent('$notice', '✓ 🐚 bash — done', '$root')).toEqual({
+    expect(turnMirrorEditContent('$notice', '✓ 🐚 bash @local', '$root')).toEqual({
       msgtype: 'm.notice',
-      body: '* ✓ 🐚 bash — done',
+      body: '* ✓ 🐚 bash @local',
       'dev.zooid.mirror': true,
       'm.new_content': {
         msgtype: 'm.notice',
-        body: '✓ 🐚 bash — done',
+        body: '✓ 🐚 bash @local',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
       },
@@ -930,21 +1020,21 @@ describe('turnMirrorEditContent', () => {
     expect(
       turnMirrorEditContent(
         '$notice',
-        '🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit — done',
+        '🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit',
         '$root',
-        '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit — done',
+        '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit',
       ),
     ).toEqual({
       msgtype: 'm.notice',
-      body: '* 🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit — done',
+      body: '* 🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit',
       format: 'org.matrix.custom.html',
-      formatted_body: '* 🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit — done',
+      formatted_body: '* 🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit',
       'dev.zooid.mirror': true,
       'm.new_content': {
         msgtype: 'm.notice',
-        body: '🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit — done',
+        body: '🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit',
         format: 'org.matrix.custom.html',
-        formatted_body: '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit — done',
+        formatted_body: '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
       },

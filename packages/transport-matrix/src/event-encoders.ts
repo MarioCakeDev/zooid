@@ -229,25 +229,18 @@ export interface TurnToolEntry {
   params?: string
   /** Latest `tool_call_update` `content[]` text, clamped, `\n`-joined. */
   output?: string
-}
-
-/**
- * Human label for an ACP `ToolCallStatus`. `in_progress` reads as "running" —
- * the status vocabulary the summary example uses.
- */
-export function toolStatusLabel(status: string | undefined): string | undefined {
-  switch (status) {
-    case 'pending':
-      return 'pending'
-    case 'in_progress':
-      return 'running'
-    case 'completed':
-      return 'done'
-    case 'failed':
-      return 'failed'
-    default:
-      return undefined
-  }
+  /**
+   * File the call reads or writes, from the ACP `rawInput` path keys or the
+   * event's first `locations[].path` (see `toolEntryPath`). Read/write tools
+   * show it instead of their tool name on the tagline.
+   */
+  path?: string
+  /**
+   * Machine the call ran on, from the ACP `rawInput` (`profile`, else `host` /
+   * `hostname` — see `toolEntryMachine`). Never invented; shell tools without
+   * one fall back to `local`.
+   */
+  machine?: string
 }
 
 /** Leading glyph for a tool entry in the collapsed list. */
@@ -270,7 +263,7 @@ function toolStatusIcon(status: string | undefined): string {
  * list of taglines is scannable by shape rather than by reading every name.
  * Exact names win; a prefix fallback covers descriptive titles (`Reading
  * auth.ts`); anything else gets a generic marker. Icons sit between the status
- * glyph and the tool name (`✓ 📖 read — done`) and never replace either.
+ * glyph and the tool name (`✓ 📖 read`) and never replace either.
  */
 const TOOL_ICON_BY_NAME: Record<string, string> = {
   read: '📖',
@@ -353,6 +346,106 @@ export function toolIcon(title: string): string {
   return DEFAULT_TOOL_ICON
 }
 
+/**
+ * Icon families whose tagline names the file (📖 readers, ✏️ writers). Kept in
+ * step with `TOOL_ICON_BY_NAME`'s reader/writer entries — a tool's icon is what
+ * marks it path-bearing.
+ */
+const PATH_TOOL_ICONS: ReadonlySet<string> = new Set(['📖', '✏️'])
+
+/** Icon family whose calls run on a machine the tagline must name (bash/ssh). */
+const SHELL_TOOL_ICON = '🐚'
+
+/**
+ * Machine label for a shell call whose ACP event carries none: bash/ssh tools
+ * run inside the agent container unless their input names a profile or a host,
+ * and inventing a hostname would be a lie. No zooid config names this machine,
+ * so the honest label is `local`.
+ */
+const LOCAL_MACHINE = 'local'
+
+/** Cap a machine label so one long host value can't eat the line. */
+const MACHINE_MAX = 40
+
+/** Path-ish keys an ACP `rawInput` uses to name the file a tool touches. */
+const RAW_INPUT_PATH_KEYS = ['filePath', 'filepath', 'file_path', 'path']
+
+/** Machine-ish keys an ACP `rawInput` uses to name where a call runs. */
+const RAW_INPUT_MACHINE_KEYS = ['profile', 'host', 'hostname']
+
+/** First non-empty string among `keys` of a raw object; `undefined` when absent. */
+function firstString(obj: unknown, keys: readonly string[]): string | undefined {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return undefined
+  const rec = obj as Record<string, unknown>
+  for (const key of keys) {
+    const value = nonEmptyString(rec[key])
+    if (value) return value
+  }
+  return undefined
+}
+
+/**
+ * File for a tagline: the first path-ish string in the event's `raw_input`
+ * (`filePath`/`filepath`/`file_path`/`path`), else the first `locations[].path`
+ * (some agents only report the file there). `undefined` when the tool names no
+ * file — the tagline then falls back to the tool's title.
+ */
+export function toolEntryPath(content: Record<string, unknown>): string | undefined {
+  const fromInput = firstString(content.raw_input, RAW_INPUT_PATH_KEYS)
+  if (fromInput) return fromInput
+  const locations = content.locations
+  if (Array.isArray(locations)) {
+    for (const loc of locations) {
+      const path = nonEmptyString((loc as { path?: unknown } | null | undefined)?.path)
+      if (path) return path
+    }
+  }
+  return undefined
+}
+
+/**
+ * Machine a call ran on, from the event's `raw_input`: the ssh-mcp `profile`
+ * first (coolify, router, hass, …), then `host` / `hostname`. `undefined` when
+ * the event names none — only shell tools then fall back to `local`
+ * (see `toolSubject`); nothing is ever guessed.
+ */
+export function toolEntryMachine(content: Record<string, unknown>): string | undefined {
+  const machine = firstString(content.raw_input, RAW_INPUT_MACHINE_KEYS)
+  return machine ? clamp(machine, MACHINE_MAX) : undefined
+}
+
+/**
+ * Overhead of a rendered line around its subject: the status glyph (≤ 2 UTF-16
+ * units) plus the two spaces around the icon (≤ 2 units), padded so the subject
+ * budget can never overshoot `TOOL_LINE_MAX`.
+ */
+const SUBJECT_OVERHEAD = 6
+
+/**
+ * What a tagline talks about — `icon + named + @machine`:
+ * `🐚 bash @local`, `📖 /workspace/AGENTS.md`, `✏️ /workspace/src/x.ts`. The
+ * *named* part is the file path for a read/write tool that named one (the path
+ * says more than the word "read"), the title otherwise. A machine suffix
+ * ` @<profile|host>` rides along whenever the call names one, and shell tools
+ * that name none get ` @local`, so every bash/ssh line says where it ran;
+ * read/write tools normally carry no suffix — they run in the agent container,
+ * so the path is the useful half of the line.
+ *
+ * `lineMax` is what the whole line may use; the head is clamped to what is left
+ * after the icon and the suffix, so a long path or command can never push the
+ * machine off the end of a clamped line.
+ */
+function toolSubject(entry: TurnToolEntry, lineMax = TOOL_LINE_MAX): string {
+  const icon = toolIcon(entry.title)
+  const machine = entry.machine ?? (icon === SHELL_TOOL_ICON ? LOCAL_MACHINE : undefined)
+  const suffix = machine ? ` @${machine}` : ''
+  const named = PATH_TOOL_ICONS.has(icon) && entry.path ? entry.path : entry.title
+  const budget = lineMax - icon.length - suffix.length - SUBJECT_OVERHEAD
+  const head =
+    named.length > budget ? named.slice(0, Math.max(1, budget - 1)) + '…' : named
+  return `${icon} ${head}${suffix}`
+}
+
 /** Cap a single collapsed tool line so a long title stays glanceable. */
 const TOOL_LINE_MAX = 200
 /** Cap a tool's compact parameter rendering so a huge diff / command can't bloat the block. */
@@ -385,18 +478,17 @@ const TOOL_SEPARATOR: GroupLine[] = [
 ]
 
 /**
- * Compact one-line rendering of a tool entry: `✓ 🐚 bash — done`,
- * `⏳ ✏️ edit src/x.ts`, `✗ 📖 read — failed`. The status glyph comes first,
- * then the tool's identifying icon, then the title. Only the title and status
- * are shown on this line — the params and output are separate indented lines.
- * The status label appears only for terminal states (the ⏳/• glyphs already
- * convey in-flight/pending), and the whole line is clamped.
+ * Compact one-line rendering of a tool entry: `✓ 🐚 bash @local`,
+ * `⏳ ✏️ /workspace/src/x.ts`, `✗ 📖 /workspace/AGENTS.md`. The status glyph
+ * comes first and carries the status on its own — ✓ done, ✗ failed, ⏳ running,
+ * • pending — so no status word is repeated in the line. Then the tool's
+ * identifying icon and its subject: the file path for a read/write tool that
+ * named one, the title otherwise, plus the machine for shell calls
+ * (see `toolSubject`). Params and output are separate indented lines; the whole
+ * line is clamped.
  */
 export function toolEntryLine(entry: TurnToolEntry): string {
-  const terminal = entry.status === 'completed' || entry.status === 'failed'
-  const label = terminal ? ` — ${toolStatusLabel(entry.status)}` : ''
-  const text = `${toolIcon(entry.title)} ${entry.title}${label}`
-  return clamp(`${toolStatusIcon(entry.status)} ${text}`, TOOL_LINE_MAX)
+  return clamp(`${toolStatusIcon(entry.status)} ${toolSubject(entry)}`, TOOL_LINE_MAX)
 }
 
 /** Collapse a raw scalar/object value to one compact, whitespace-normalised fragment. */
@@ -540,10 +632,11 @@ function selectGroupEntries(entries: TurnToolEntry[]): {
 }
 
 /**
- * Summary line for one group: `🔧 <agent>: <N tools> — <icon> <last tool> — <status>`.
- * It is the plain body's first line and the HTML `<summary>`. The status label
- * is omitted when the last tool has no known status; a plan-only group reads
- * `🔧 <agent>: 0 tools — plan`.
+ * Summary line for one group: `🔧 <agent>: <N tools> — <icon> <last tool>`.
+ * It is the plain body's first line and the HTML `<summary>`. The last tool is
+ * named exactly as its tagline names it (path for a read/write tool, machine
+ * for a shell call) minus the status glyph — the status word is gone from the
+ * mirror entirely, and a plan-only group reads `🔧 <agent>: 0 tools — plan`.
  */
 export function turnGroupSummary(
   agentId: string,
@@ -553,15 +646,15 @@ export function turnGroupSummary(
   const n = entries.length
   const tools = `${n} tool${n === 1 ? '' : 's'}`
   const last = entries.at(-1)
-  let detail: string
-  if (last) {
-    const label = toolStatusLabel(last.status)
-    const title = `${toolIcon(last.title)} ${last.title}`
-    detail = label ? `${title} — ${label}` : title
-  } else {
-    detail = planDetail ? 'plan' : 'working'
-  }
-  return clamp(`🔧 ${agentId}: ${tools} — ${detail}`, TOOL_LINE_MAX)
+  const prefix = `🔧 ${agentId}: ${tools} — `
+  // The last tool gets only what the line has left after the prefix, so its
+  // machine suffix survives the clamp too.
+  const detail = last
+    ? toolSubject(last, TOOL_LINE_MAX - prefix.length)
+    : planDetail
+      ? 'plan'
+      : 'working'
+  return clamp(`${prefix}${detail}`, TOOL_LINE_MAX)
 }
 
 /** The body lines of one group (everything after the summary): sections, then plan. */
@@ -604,9 +697,10 @@ export function turnGroupBody(
 /**
  * HTML for one tool inside a group: a nested collapsed `<details>` whose
  * `<summary>` (first child, no `open`) is the tool's one-line rendering
- * (`✓ 🐚 bash — done`, see `toolEntryLine`), and whose body is its params and its
+ * (`✓ 🐚 bash @local`, see `toolEntryLine`), and whose body is its params and its
  * output as two separate `<pre><code>` blocks — so the timeline shows a tool's
- * tagline and status and hides its input/output until the reader opens it.
+ * tagline (its status glyph first) and hides its input/output until the reader
+ * opens it.
  * Inside a block newlines are literal (`\n`), not `<br>`: the block preserves
  * them and keeps Element Web/Desktop spacing tight. A tool with only params or
  * only output gets a single block; a tool with neither has nothing to collapse
@@ -627,7 +721,7 @@ function toolSectionHtml(entry: TurnToolEntry): string {
  * `<details>` block whose `<summary>` (first child, no `open`) is the group
  * summary, and whose body lists one entry per tool — each entry itself a nested
  * `<details>` (see `toolSectionHtml`) that collapses the tool's input/output
- * behind its tagline and status. Entries are joined by a single `<br>`: with
+ * behind its tagline. Entries are joined by a single `<br>`: with
  * every tool collapsible and its own block, a rule between them is redundant,
  * and the old blank-line + `<hr>` + blank-line was what made Element Web/Desktop
  * far airier than Element X's tight plain body. The plain body is unchanged (see
