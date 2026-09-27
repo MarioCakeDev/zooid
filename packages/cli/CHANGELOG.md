@@ -1,5 +1,18 @@
 # zooid
 
+## 0.16.1
+
+### Patch Changes
+
+- The web client served by `zooid dev` and `zooid start` is now `@zooid/web` 0.13.0: every thread has a link you can copy and open, you can quote a message into your reply, and a share dialog posts a thread into another room with a room picker and @mentions. A fresh `zooid dev` now opens straight into your workforce space.
+  - @zooid/core@0.16.1
+  - @zooid/acp-client@0.16.1
+  - @zooid/context-mcp@0.16.1
+  - @zooid/runtime-docker@0.16.1
+  - @zooid/runtime-local@0.16.1
+  - @zooid/transport-http@0.16.1
+  - @zooid/transport-matrix@0.16.1
+
 ## 0.16.0
 
 ### Minor Changes
