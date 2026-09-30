@@ -1202,7 +1202,72 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     return opened
   }
 
-  agents.onEvent = async (name, event: AgentEvent) => {
+  /**
+ * Tell the owner, in-thread, that a session wedged and what happened next.
+ *
+ * The failure mode this exists for is silent by construction: the prompt was
+ * delivered, the container accepted it, and nothing came back — so from the
+ * room's point of view nothing happened at all. "Absence" is not an acceptable
+ * signal for a daemon that recovered, so we say what happened and whether
+ * their message was replayed.
+ */
+async function sendSessionWedgeNotice(
+  agentName: string,
+  event: Extract<AgentEvent, { type: 'session_wedge' }>,
+): Promise<void> {
+  // After recovery the ctx has been re-keyed onto the fresh session, so look
+  // the thread up by the replacement id first and fall back to the wedged one.
+  const ctx =
+    sessions.get(event.recoveredSessionId ?? '') ?? sessions.get(event.sessionId ?? '')
+  if (!ctx) {
+    console.warn(
+      `[matrix:${agentName}] session_wedge with no session ctx (session=${event.sessionId}); notice dropped`,
+    )
+    return
+  }
+  const message = event.recovered
+    ? 'Session was wedged — it accepted the message and never answered. ' +
+      'Recovered on a fresh session; replaying your last message.'
+    : `Session was wedged and could not be recovered after ${event.attempt} attempt(s). ` +
+      'Your message was not processed — send it again to retry on a fresh session.'
+  const content = toErrorBody(
+    {
+      kind: 'error' as const,
+      agentId: agentName,
+      sessionId: event.recoveredSessionId ?? event.sessionId,
+      turnId: null,
+      code: 'session_wedge',
+      message,
+      transient: true,
+    },
+    ctx.threadRoot,
+  )
+  await client
+    .sendCustomEvent({
+      roomId: ctx.roomId,
+      asUserId: ctx.agent.userId,
+      eventType: 'dev.zooid.error',
+      content,
+    })
+    .catch((err) => console.warn(`[matrix:${agentName}] dev.zooid.error (wedge) send failed:`, err))
+  void sendMirrorNotice(client, {
+    roomId: ctx.roomId,
+    asUserId: ctx.agent.userId,
+    threadRoot: ctx.threadRoot,
+    eventType: 'dev.zooid.error',
+    content,
+  })
+}
+
+agents.onEvent = async (name, event: AgentEvent) => {
+    // A wedged session is a daemon-level condition, not agent output: it needs
+    // its own handling (a visible in-thread notice) before the ctx lookup,
+    // because by the time it arrives the session may already have been
+    // replaced and re-keyed.
+    if (event.type === 'session_wedge') {
+      await sendSessionWedgeNotice(name, event)
+      return
+    }
     const ctx = sessions.get(event.sessionId)
     if (!ctx) {
       // available_commands_update is advertised during ensureSession (session
@@ -1330,6 +1395,42 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     })
     sendQueue.set(event.sessionId, tail)
     await tail
+  }
+
+  /**
+   * A prompt was moved onto a fresh ACP session because the previous one
+   * wedged. Every per-session map here is keyed by session id, so all of them
+   * have to follow — otherwise the replayed turn's events arrive for a session
+   * this transport knows nothing about and get dropped as orphans, which is
+   * the same silence we are fixing.
+   */
+  agents.onSessionRekey = (name, _threadId, prev, next) => {
+    const ctx = sessions.get(prev)
+    if (!ctx) {
+      console.warn(`[matrix:${name}] rekey ${prev} -> ${next} with no ctx; nothing to move`)
+      return
+    }
+    sessions.delete(prev)
+    sessions.set(next, ctx)
+    // A wedged turn produced no partial output worth keeping, so start the
+    // replayed turn with an empty buffer rather than inheriting a stale one.
+    buffers.delete(prev)
+    buffers.set(next, '')
+    bufferMessageIds.delete(prev)
+    bufferMessageIds.set(next, '')
+    flushedCounts.delete(prev)
+    flushedCounts.set(next, 0)
+    pendingCommands.delete(prev)
+    lastFlushed.delete(prev)
+    // The send queue is a per-session serialization tail; keep ordering by
+    // handing the old tail to the new session so nothing already in flight
+    // interleaves with the replay.
+    const tail = sendQueue.get(prev)
+    if (tail) sendQueue.set(next, tail)
+    sendQueue.delete(prev)
+    turnMirrors.delete(prev)
+    // Pending approvals on the wedged session can never be answered by anyone.
+    approvals.cancelSession(prev)
   }
 
   agents.onApprovalRequest = async (name, req) => {
@@ -1889,7 +1990,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     // has one, else the thread-level key. The raw threadRoot still travels
     // separately: outbound events relate to it, and it is the context ref so
     // zooid_get_history reads the real thread.
-    const sessionId = await agents.ensureSession(agent.name, sessionKey, roomId, threadRoot)
+    // `let`: a wedged session is recovered by the registry on a *fresh* ACP
+    // session (agents.onSessionRekey re-keys the per-session maps), so
+    // everything after the prompt has to read the id the turn really ran on.
+    let sessionId = await agents.ensureSession(agent.name, sessionKey, roomId, threadRoot)
     sessions.set(sessionId, { agent, roomId, threadRoot })
     buffers.set(sessionId, '')
     bufferMessageIds.delete(sessionId)
@@ -1968,6 +2072,12 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         content: [...blocks, { type: 'text', text: fullPromptText }],
       })
       stopReason = promptResult.stopReason as StopReason
+      if (promptResult.sessionId && promptResult.sessionId !== sessionId) {
+        console.warn(
+          `[matrix:${agent.name}] turn ran on recovered session ${promptResult.sessionId} (was ${sessionId})`,
+        )
+        sessionId = promptResult.sessionId
+      }
       // Drain: the prompt promise resolves on the stopReason response, but
       // trailing chunks may still arrive (see DRAIN_* above). Wait until the
       // buffer is quiet for DRAIN_QUIET_MS, re-arming on each new chunk.

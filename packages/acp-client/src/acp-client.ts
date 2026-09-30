@@ -14,7 +14,7 @@ import { JsonFileSessionStore } from './session-store.js'
 import { resolvePreset } from './presets.js'
 import { acpUpdateToAgentEvent, approvalDecisionToPermissionResponse } from './event-mapping.js'
 import { TurnTracker, type TapEvent } from './turn-tracker.js'
-import { classify } from './errors.js'
+import { AcpSessionWedgeError, classify } from './errors.js'
 import type {
   AgentConfig,
   AgentEvent,
@@ -51,12 +51,27 @@ export interface SpawnRuntime {
 export interface AcpClientTimeouts {
   /** `initialize` during `start()`. Default 120_000ms. 0 disables the timer. */
   initializeMs?: number
-  /** `loadSession` / `newSession` in `ensureSession()`. Default 60_000ms. */
+  /** `loadSession` / `newSession` in `ensureSession()`. Default 60_000ms. 0 disables. */
   sessionMs?: number
+  /**
+   * Deadline for the *first* agent output after a prompt is written to the
+   * ACP stream: any `sessionUpdate` (message chunk, tool call, plan) or the
+   * `session/prompt` response counts as "alive". When it elapses the session
+   * is treated as wedged, invalidated and thrown as {@link
+   * AcpSessionWedgeError}. Default 120_000ms. 0 disables the check (never
+   * recommended — a wedge is otherwise completely silent).
+   */
+  firstResponseMs?: number
 }
 
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 120_000
 const DEFAULT_SESSION_TIMEOUT_MS = 60_000
+/**
+ * Generous on purpose. This fires only when the agent has produced *nothing*
+ * at all — a slow-but-alive agent answers eventually and is never flagged.
+ * Open to per-agent override via `agents.<name>.first_response_timeout`.
+ */
+const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 120_000
 
 export interface AcpClientOptions {
   agent: AgentConfig
@@ -116,6 +131,12 @@ export class AcpClient {
   private dead = false
   private deathReason: Error | null = null
   private readonly deathWaiters = new Set<(err: Error) => void>()
+  /**
+   * Resolvers for "this session produced *some* output" — armed by an in-flight
+   * prompt so the first `sessionUpdate` (or the `session/prompt` response) can
+   * disarm the wedge deadline. Keyed by ACP session id.
+   */
+  private readonly activityWatches = new Map<string, Set<() => void>>()
   private readonly timeouts: Required<AcpClientTimeouts>
 
   constructor(private readonly options: AcpClientOptions) {
@@ -125,6 +146,7 @@ export class AcpClient {
     this.timeouts = {
       initializeMs: options.timeouts?.initializeMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS,
       sessionMs: options.timeouts?.sessionMs ?? DEFAULT_SESSION_TIMEOUT_MS,
+      firstResponseMs: options.timeouts?.firstResponseMs ?? DEFAULT_FIRST_RESPONSE_TIMEOUT_MS,
     }
   }
 
@@ -280,6 +302,84 @@ export class AcpClient {
   }
 
   /**
+   * Run a `session/prompt` under a first-response deadline.
+   *
+   * A resumed-but-dead session is the nastiest failure this layer sees: the
+   * shim happily accepts the notification (so `[matrix] -> agent` and
+   * `prompt ->` both look correct), the ACP stream carries the
+   * `user_message_chunk`, and then *nothing* ever comes back — no chunk, no
+   * tool call, no error, container at 0% CPU. From outside, a wedged session
+   * and a slow one look identical.
+   *
+   * So bound the silence. Any `sessionUpdate` for this session (message chunk,
+   * tool call, plan) or a permission request means the session is alive: the
+   * timer is disarmed and a slow-but-alive agent is never flagged. When the
+   * deadline elapses we treat the session as dead — invalidate it (in-memory
+   * *and* the persisted store entry, so the next prompt gets a `session/new`
+   * instead of resuming the same corpse) and mark the client dead, so the
+   * registry reconnects with a fresh container rather than walking back into
+   * the wedge. The resulting rejection is an {@link AcpSessionWedgeError},
+   * which the registry uses to replay the prompt once.
+   */
+  private async withFirstResponse<T>(
+    sessionId: string,
+    threadId: string,
+    work: Promise<T>,
+    timeoutMs: number,
+  ): Promise<T> {
+    let timer: NodeJS.Timeout | undefined
+    if (timeoutMs > 0) {
+      const armed = this.armActivityWatch(sessionId)
+      timer = setTimeout(() => {
+        const err = new AcpSessionWedgeError(
+          `AcpClient(${this.options.agent.id}): session ${sessionId} produced no output ` +
+            `within ${timeoutMs}ms of a prompt; treating it as a wedged session`,
+          { sessionId, timeoutMs },
+        )
+        // Forget the session *before* surfacing the failure, so no retry can
+        // resume it, and drop the client so the next dispatch reconnects.
+        armed.timer = undefined
+        this.endSession(threadId)
+        this.markDead(err)
+      }, timeoutMs)
+      armed.timer = timer
+    }
+    // timeoutMs 0 disables the timer; withDeadline then races only the death
+    // signal (and an already-dead client), which is what we want either way.
+    try {
+      return await this.withDeadline('prompt', work, 0)
+    } finally {
+      if (timer) clearTimeout(timer)
+      this.clearActivityWatch(sessionId)
+    }
+  }
+
+  /**
+   * Register this session's first-response timer with the activity watcher so
+   * the first inbound update can cancel it. Returns a handle that cancels the
+   * timer without marking it as "alive".
+   */
+  private armActivityWatch(sessionId: string): { timer?: NodeJS.Timeout } {
+    const entry: { timer?: NodeJS.Timeout } = {}
+    const watches = this.activityWatches.get(sessionId) ?? new Set()
+    const onActivity = () => {
+      if (entry.timer) {
+        clearTimeout(entry.timer)
+        entry.timer = undefined
+      }
+      this.clearActivityWatch(sessionId)
+    }
+    watches.add(onActivity)
+    this.activityWatches.set(sessionId, watches)
+    return entry
+  }
+
+  private clearActivityWatch(sessionId: string): void {
+    this.activityWatches.get(sessionId)?.clear()
+    this.activityWatches.delete(sessionId)
+  }
+
+  /**
    * Reject when the child dies, or after `timeoutMs` (0 = no timer). Racing
    * both the handshake and the death signal is what turns a wedged/dead
    * container into a real error instead of an indefinite `ensureSession` hang.
@@ -399,16 +499,18 @@ export class AcpClient {
         sessionId,
         content: input.content,
       })
-      const result = await this.connection!.prompt({
+      const result = await this.withFirstResponse(
         sessionId,
-        prompt: input.content,
-      })
+        input.threadId,
+        this.connection!.prompt({ sessionId, prompt: input.content }),
+        this.timeouts.firstResponseMs,
+      )
       this.turns?.endTurn({ sessionId, stopReason: result.stopReason })
       debugLog(this.options.agent.id, 'prompt ←', {
         sessionId,
         stopReason: result.stopReason,
       })
-      return { stopReason: result.stopReason }
+      return { stopReason: result.stopReason, sessionId }
     } catch (err) {
       const c = classify(err)
       this.options.onTap?.({
@@ -427,6 +529,13 @@ export class AcpClient {
     }
   }
 
+  /** An inbound update for `sessionId` arrived: the session answered. */
+  private notifyActivity(sessionId: string): void {
+    const watches = this.activityWatches.get(sessionId)
+    if (!watches) return
+    for (const onActivity of watches) onActivity()
+  }
+
   private resolveSpawn(): { command: string; args: string[] } {
     const { preset, command, args, model } = this.options.agent
     if (command) {
@@ -442,6 +551,9 @@ export class AcpClient {
     const agentId = this.options.agent.id
     return {
       sessionUpdate: async (params) => {
+        // Any inbound update proves the session is alive — disarm the
+        // first-response deadline before doing anything else.
+        this.notifyActivity(params.sessionId)
         this.turns?.observeUpdate(params.sessionId, params.update)
         debugLog(agentId, 'sessionUpdate', params)
         const event = acpUpdateToAgentEvent(params)
@@ -450,6 +562,7 @@ export class AcpClient {
       },
       requestPermission: async (params) => {
         debugLog(agentId, 'requestPermission', params)
+        this.notifyActivity(params.sessionId)
         const tc = params.toolCall as {
           toolCallId: string
           kind?: string

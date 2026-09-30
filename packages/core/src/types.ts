@@ -172,6 +172,14 @@ export interface AgentConfig {
    * @default 0
    */
   approval_timeout_ms: number
+  /**
+   * How long a dispatched prompt may produce *nothing at all* before the
+   * session is declared wedged, discarded, and the prompt replayed on a fresh
+   * session. Duration string like `"2m"`. Undefined = client default (2m).
+   * A slow-but-alive agent still answers, so the default is generous; only
+   * lower it for agents that answer instantly.
+   */
+  first_response_timeout_ms?: number
   /** Container config. Rejected at parse time when runtime: local. */
   container?: ContainerConfig
   /** Exactly one of matrix / http is set per agent. */
