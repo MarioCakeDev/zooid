@@ -208,15 +208,15 @@ describe('matrix transport — wedged session recovery', () => {
     expect(approvals.cancelSession).toHaveBeenCalledWith('sess-$root')
   })
 
-  it('gives the replayed turn a fresh mirror state, not a missing one', async () => {
+  it('posts a summary line for a tool-using turn replayed after the re-key', async () => {
     const { transport, agents, state, client, finishPrompt } = makeTransport()
     await mention(transport.app, '$root')
     await settle()
     state.promptSessionId = 'sess-recovered'
     agents.onSessionRekey!('dev', '$root', 'sess-$root', 'sess-recovered')
-    // A tool call on the recovered session: the turn-end summary line only
-    // exists if the fresh mirror state was seeded (an unseeded one makes
-    // finalizeTurnMirror a silent no-op and the turn posts no summary at all).
+    // A tool-using turn always gets a summary line: the rekey hook seeds the
+    // mirror state, and `createdAny` is what decides whether the line posts.
+    // (Not rekey-specific — a no-tool turn posts no summary either way.)
     agents.onEvent('dev', {
       type: 'tool_call',
       sessionId: 'sess-recovered',
@@ -234,14 +234,15 @@ describe('matrix transport — wedged session recovery', () => {
     const { transport, agents, client } = makeTransport()
     await mention(transport.app, '$root')
     await settle()
-    // The fresh session advertised its roster during ensureSession, before the
-    // rekey hook fired, so it is still stashed under the new id.
-    agents.onSessionRekey!('dev', '$root', 'sess-$root', 'sess-recovered')
+    // The roster is advertised during ensureSession — i.e. BEFORE the rekey
+    // hook fires, while no ctx exists for the fresh id yet. Emitting it after
+    // the rekey would take the direct path and pin nothing about the carry.
     agents.onEvent('dev', {
       type: 'available_commands',
       sessionId: 'sess-recovered',
       commands: [{ name: 'compact', description: 'compact the session' }],
     })
+    agents.onSessionRekey!('dev', '$root', 'sess-$root', 'sess-recovered')
     await settle()
     const roster = customEvents(client, 'dev.zooid.available_commands_update')
     expect(roster).toHaveLength(1)

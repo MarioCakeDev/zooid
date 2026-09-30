@@ -1447,7 +1447,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
     // runTurn does after a normal ensureSession.
     const stashed = pendingCommands.get(next) ?? pendingCommands.get(prev)
     pendingCommands.delete(prev)
-    if (stashed && !pendingCommands.has(next)) {
+    if (stashed) {
       pendingCommands.set(next, stashed)
       void agents.onEvent?.(name, stashed)
     }

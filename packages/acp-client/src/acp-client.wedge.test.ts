@@ -155,16 +155,17 @@ describe('AcpClient first-response deadline', () => {
       newSession: vi.fn(async () => ({ sessionId: 'ses-metadata' })),
       prompt: vi.fn(() => new Promise(() => {})),
     })
-    void promptOnce(client).catch(() => {})
+    const pending = promptOnce(client).catch((e: unknown) => e)
     await new Promise((r) => setTimeout(r, 5))
     await internals.buildClient().sessionUpdate({
       sessionId: 'ses-metadata',
       update: { sessionUpdate: 'available_commands_update', availableCommands: [] },
     })
-    const err = await promptOnce(client).catch((e: unknown) => e).catch(() => null)
-    void err
     await new Promise((r) => setTimeout(r, 120))
     expect(client.isAlive()).toBe(false)
+    // Assert the wedge on the *same* prompt: a second `promptOnce` would arm
+    // its own response timer and then wedge on that one, passing regardless.
+    expect(isSessionWedge(await pending)).toBe(true)
   })
 
   it('invalidates the wedged session in memory AND in the persisted store', async () => {
