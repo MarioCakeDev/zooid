@@ -54,9 +54,8 @@ const OLD_NEW_KEY_PAIRS: [string, string][] = [
 
 /**
  * Key an ACP `rawInput` uses for the whole new content of a written file, when
- * it carries no old side. Only a *creation* looks like this, so the diff says
- * `+N lines` against the file (old range `0`) rather than claiming a
- * `/dev/null` rename — an overwrite would make that a lie.
+ * it carries no old side. Reached only for a `CREATE_TITLES` tool (see there),
+ * so `--- /dev/null` is the honest old side: the file did not exist before.
  */
 const NEW_CONTENT_KEYS = ['content', 'newContent', 'new_content', 'text']
 
@@ -240,7 +239,11 @@ export function unifiedDiff(
  * no longer describes*: a `@@ -1,277 +1,277 @@` header above 37 of its 277 body
  * lines claims a range it does not cover, and every reader — including the
  * diff-aware highlighter in Element — takes the header as the hunk's extent.
- * A body without a header reads as a plain excerpt, which is what it is.
+ *
+ * Dropping the header is not enough on its own: the surviving body would then
+ * sit directly under the *previous* hunk's `@@` header, which would over-claim
+ * just as badly. A headerless excerpt is therefore preceded by an explicit
+ * separator line, so no `@@` header ever sits above lines it does not describe.
  */
 function capDiff(header: string[], hunks: string[][]): string {
   const out: string[] = [...header]
@@ -253,8 +256,20 @@ function capDiff(header: string[], hunks: string[][]): string {
       out.push(...hunk)
       continue
     }
-    // The hunk straddles the budget: keep the body lines that fit, and count
-    // the cut header plus every later line as dropped.
+    // The hunk straddles the budget: mark the excerpt, keep the body lines that
+    // fit, and count the cut header plus every later line as dropped.
+    const marker = '… excerpt of the next hunk'
+    // Only needed when whole hunks were kept above: with nothing above it, the
+    // excerpt already follows the `---`/`+++` headers, which claim no range.
+    const needsMarker = out.length > header.length
+    if (needsMarker && used + marker.length + 1 > DIFF_MAX) {
+      out.push(`… +${hunk.length + hunks.slice(i + 1).reduce((n, h) => n + h.length, 0)} more diff lines`)
+      return out.join('\n')
+    }
+    if (needsMarker) {
+      used += marker.length + 1
+      out.push(marker)
+    }
     let dropped = hunk.length
     for (let j = 1; j < hunk.length; j++) {
       const line = hunk[j]!

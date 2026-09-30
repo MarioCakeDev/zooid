@@ -106,6 +106,26 @@ describe('unifiedDiff', () => {
   })
 
 
+  it('separates a headerless excerpt from the whole hunk kept above it', () => {
+    // Hunk A is small enough to be kept whole; hunk B is large enough to
+    // straddle the budget. Its `@@` header is cut with the lines it no longer
+    // describes, so its body needs an explicit boundary or it reads as more of
+    // hunk A — whose header does not cover it.
+    const old = ['A base', ...Array.from({ length: 20 }, (_, i) => `filler ${i}`)]
+    const next = ['A CHANGED', ...old.slice(1)]
+    for (let i = 0; i < 80; i++) {
+      old.push(`bulk ${i}`)
+      next.push(`bulk ${i} CHANGED ${'z'.repeat(30)}`)
+    }
+    const lines = unifiedDiff('f.txt', old.join('\n'), next.join('\n'))!.split('\n')
+    const at = lines.findIndex((l) => l.includes('excerpt of the next hunk'))
+    expect(at).toBeGreaterThan(0)
+    // The kept hunk's body is intact, and the excerpt sits below the separator.
+    expect(lines[2]).toMatch(/^@@ /)
+    expect(lines.slice(3, at).every((l) => !l.startsWith('@@'))).toBe(true)
+    expect(lines.at(-1)).toMatch(/^… \+\d+ more diff lines$/)
+  })
+
   it('falls back to a coarse whole-block diff instead of hanging on huge input', () => {
     const old = Array.from({ length: 3000 }, (_, i) => `a${i}`).join('\n')
     const next = Array.from({ length: 3000 }, (_, i) => `b${i}`).join('\n')
