@@ -3107,11 +3107,13 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       rawInput: { filePath: "src/x.ts", oldString: "a\nb\n", newString: "a\nc\n" },
     })
     await settleTurn()
-    // One line, carrying the diff instead of the raw old/new params.
+    // One line: the diff, plus the params the diff does not cover (the file
+    // path) — the old/new text itself appears only in the diff.
     expect(lines(client)).toEqual([
       [
         "🔧 architect: 1 tool — ✏️ src/x.ts",
         "⏳ ✏️ src/x.ts",
+        "filePath=src/x.ts",
         "--- a/src/x.ts",
         "+++ b/src/x.ts",
         "@@ -1,2 +1,2 @@",
@@ -3161,7 +3163,10 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     expect(body).toContain("--- a/src/y.ts")
     expect(body).toContain("-one")
     expect(body).toContain("+two")
+    // The old/new keys are filtered out of the params line, so they are
+    // reported once, in the diff's form.
     expect(body).not.toContain("oldString=")
+    expect(body).toContain("filePath=src/y.ts")
     finishPrompt()
     await settleTurn()
   })

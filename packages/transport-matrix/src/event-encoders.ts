@@ -1,5 +1,5 @@
 import { toolCallDiff } from './unified-diff.js'
-export { toolCallDiff } from './unified-diff.js'
+export { toolCallDiff, DIFF_PARAM_KEYS } from './unified-diff.js'
 import type {
   AvailableCommandsEvent,
   PlanEvent,
@@ -254,13 +254,21 @@ export interface TurnToolEntry {
   status?: string
   /** Compact, single-line rendering of the tool's ACP `rawInput`, if seen. */
   params?: string
+  /**
+   * The tool's ACP `rawInput` as the mirror body carries it. `params` is derived
+   * from this rather than accumulated, because a diff can arrive on a later
+   * `tool_call_update` than the input that would have been filtered by it — the
+   * stored input is what lets the params line be re-derived once the diff does.
+   */
+  rawInput?: unknown
   /** Latest `tool_call_update` `content[]` text, clamped, `\n`-joined. */
   output?: string
   /**
    * Unified diff of the file the call changed, when its input (or its update's
    * `content[]`) carries the old and the new text — see `toolCallDiff`. It
-   * replaces the raw `oldString`/`newString` in `params`: those *are* the
-   * change, and the diff is the readable form of them.
+   * renders as its own `language-diff` block, and the keys it covers
+   * (`DIFF_PARAM_KEYS`) are filtered out of `params` so the old and new text
+   * appear once, in their readable form.
    */
   diff?: string
   /**
@@ -539,8 +547,15 @@ function compactValue(v: unknown): string {
  * whitespace-collapsed and the whole string is clamped (`TOOL_PARAM_MAX`), so a
  * big bash command or an edit diff stays glanceable. `undefined` when there is
  * nothing to show.
+ *
+ * `omit` drops named keys — the caller passes `DIFF_PARAM_KEYS` when the call
+ * renders a diff, so the keys the diff already shows are not repeated here
+ * while the rest (`replace_all`, `filePath`, …) still are.
  */
-export function toolParamsText(rawInput: unknown): string | undefined {
+export function toolParamsText(
+  rawInput: unknown,
+  omit?: ReadonlySet<string>,
+): string | undefined {
   if (rawInput === undefined || rawInput === null) return undefined
   if (typeof rawInput === 'string') {
     const s = rawInput.trim()
@@ -549,9 +564,9 @@ export function toolParamsText(rawInput: unknown): string | undefined {
   if (typeof rawInput !== 'object') return String(rawInput)
   const parts = Array.isArray(rawInput)
     ? rawInput.map(compactValue)
-    : Object.entries(rawInput as Record<string, unknown>).map(
-        ([k, v]) => `${k}=${compactValue(v)}`,
-      )
+    : Object.entries(rawInput as Record<string, unknown>)
+        .filter(([k]) => !omit?.has(k))
+        .map(([k, v]) => `${k}=${compactValue(v)}`)
   return parts.length > 0 ? clamp(parts.join(', '), TOOL_PARAM_MAX) : undefined
 }
 
@@ -611,14 +626,15 @@ const GROUP_CHAR_MAX = 8000
 /**
  * The lines one tool contributes: its line, then its params and output. A rule
  * separates the input from the output when both are present, so the two are
- * never mistaken for one another.
+ * never mistaken for one another. `params` and `diff` are both shown when both
+ * are set: the params line has the diff's own keys filtered out (see
+ * `DIFF_PARAM_KEYS`), so it carries only what the diff does not.
  */
 function toolSectionLines(entry: TurnToolEntry): GroupLine[] {
   const lines: GroupLine[] = [{ kind: 'text', text: toolEntryLine(entry) }]
+  if (entry.params) lines.push({ kind: 'text', text: entry.params })
   if (entry.diff) {
     for (const l of entry.diff.split('\n')) lines.push({ kind: 'text', text: l })
-  } else if (entry.params) {
-    lines.push({ kind: 'text', text: entry.params })
   }
   if ((entry.params || entry.diff) && entry.output) lines.push({ kind: 'divider' })
   if (entry.output) {
@@ -750,8 +766,9 @@ function toolSectionHtml(entry: TurnToolEntry): string {
   const blocks: string[] = []
   // A change renders as a language-diff code block: Element Web/Desktop colour
   // the -/+ lines, Element X shows it monospaced. Either way it reads as a diff.
+  // The params line comes first and holds only what the diff omits.
+  if (entry.params) blocks.push(codeBlockHtml(entry.params))
   if (entry.diff) blocks.push(codeBlockHtml(entry.diff, 'language-diff'))
-  else if (entry.params) blocks.push(codeBlockHtml(entry.params))
   if (entry.output) blocks.push(codeBlockHtml(entry.output))
   if (blocks.length === 0) return summary
   return `<details><summary>${summary}</summary>${blocks.join('')}</details>`

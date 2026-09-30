@@ -73,19 +73,51 @@ describe('unifiedDiff', () => {
     const old = Array.from({ length: 4000 }, (_, i) => `line ${i}`).join('\n')
     const next = Array.from({ length: 4000 }, (_, i) => `LINE ${i}`).join('\n')
     const diff = unifiedDiff('big.txt', old, next)!
-    expect(diff.length).toBeLessThanOrEqual(DIFF_MAX + 40)
+    expect(diff.length).toBeLessThan(DIFF_MAX + 40)
     const last = diff.split('\n').at(-1)!
     expect(last).toMatch(/^… \+\d+ more diff lines$/)
   })
+
+  it('never leaves a @@ header above a hunk body it cut short', () => {
+    const old = Array.from({ length: 400 }, (_, i) => `line ${i}`).join('\n')
+    const next = Array.from({ length: 400 }, (_, i) => `LINE ${i}`).join('\n')
+    const lines = unifiedDiff('big.txt', old, next)!.split('\n')
+    expect(lines.at(-1)).toMatch(/^… \+\d+ more diff lines$/)
+    // The single hunk straddles the budget, so its header goes with the lines
+    // it no longer describes.
+    expect(lines.filter((l) => l.startsWith('@@'))).toHaveLength(0)
+    expect(lines.slice(0, 2)).toEqual(['--- a/big.txt', '+++ b/big.txt'])
+  })
+
+  it('keeps whole hunks only, dropping later ones past the budget', () => {
+    // ~40 hunks of ~50-char lines, so the budget lands mid-way through them.
+    const old = Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n')
+    const next = Array.from({ length: 2000 }, (_, i) => `LINE ${i}`).join('\n')
+    const lines = unifiedDiff('big.txt', old, next)!.split('\n')
+    const kept = lines.slice(0, lines.length - 1)
+    // Every kept `@@` header is followed by a full CONTEXT-bounded body, and
+    // the whole render stays near the budget.
+    expect(kept.join('\n').length).toBeLessThanOrEqual(DIFF_MAX + 40)
+    for (const hunk of kept.slice(2).join('\n').split(/(?=^@@ )/m)) {
+      if (!hunk.startsWith('@@')) continue
+      const body = hunk.split('\n').length - 1
+      expect(body).toBeGreaterThan(0)
+    }
+  })
+
 
   it('falls back to a coarse whole-block diff instead of hanging on huge input', () => {
     const old = Array.from({ length: 3000 }, (_, i) => `a${i}`).join('\n')
     const next = Array.from({ length: 3000 }, (_, i) => `b${i}`).join('\n')
     const diff = unifiedDiff('big.txt', old, next)!
-    // Every line is either removed or added, in one hunk.
+    // Every line is either removed or added — no context survives, and the one
+    // hunk is over budget, so it is shown as a headerless excerpt plus a marker.
     const body = diff.split('\n').slice(2)
-    expect(body.filter((l) => l.startsWith('@@'))).toHaveLength(1)
     expect(body.some((l) => l.startsWith(' a0'))).toBe(false)
+    expect(body).toContain('-a0')
+    // Coarse emits every deletion before every addition, so the budget lands
+    // inside the removal block; the marker accounts for the rest.
+    expect(body.at(-1)).toMatch(/^… \+\d{3,} more diff lines$/)
   })
 })
 
@@ -136,6 +168,26 @@ describe('toolCallDiff', () => {
     expect(
       toolCallDiff({ title: 'fetch', raw_input: { path: '/api', content: 'body' } }),
     ).toBeUndefined()
+  })
+
+  it('claims /dev/null only for a tool that creates a file', () => {
+    expect(
+      toolCallDiff({ title: 'create f.ts', raw_input: { path: 'f.ts', content: 'x' } }),
+    ).toContain('--- /dev/null')
+    // An in-place tool with no old text has nothing honest to say about the
+    // file's prior existence, so it gets no diff rather than a false creation.
+    for (const title of ['edit', 'update', 'patch', 'apply', 'multiedit', 'apply_patch']) {
+      expect(toolCallDiff({ title, raw_input: { path: 'f.ts', content: 'x\n' } })).toBeUndefined()
+    }
+  })
+
+  it('still diffs an in-place tool that carries the real old text', () => {
+    const diff = toolCallDiff({
+      title: 'edit f.ts',
+      raw_input: { path: 'f.ts', old_string: 'a\n', new_string: 'b\n' },
+    })!
+    expect(diff).toContain('--- a/f.ts')
+    expect(diff).toContain('-a')
   })
 
   it('returns no diff for a read, a bash call, or an unchanged edit', () => {

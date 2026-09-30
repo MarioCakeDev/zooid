@@ -61,21 +61,16 @@ const OLD_NEW_KEY_PAIRS: [string, string][] = [
 const NEW_CONTENT_KEYS = ['content', 'newContent', 'new_content', 'text']
 
 /**
- * Tool titles whose input may be a whole-file write. The new-content fallback
- * is gated on these because a bare `content` / `text` key is a common shape for
- * *other* tools' payloads, and a diff invented from one of those would be
- * fiction about a file the call never touched.
+ * Tool titles whose input may be a whole-file *creation*. Only a tool that
+ * writes a file outright qualifies, because this fallback has no old side: the
+ * diff it produces reads `--- /dev/null`, which claims the file did not exist
+ * before. An in-place tool (`edit`, `update`, `patch`, `apply`, `multiedit`,
+ * `apply_patch`) is excluded — its `content` key is the new text of a file that
+ * is already there, and rendering it as a creation would be a lie. Those tools
+ * still diff through `OLD_NEW_KEY_PAIRS`, which carries the real old text; when
+ * they carry none, they get no diff rather than a fabricated one.
  */
-const WRITE_TITLES: ReadonlySet<string> = new Set([
-  'write',
-  'edit',
-  'create',
-  'update',
-  'patch',
-  'apply',
-  'multiedit',
-  'apply_patch',
-])
+const CREATE_TITLES: ReadonlySet<string> = new Set(['write', 'create'])
 
 /** First word of a tool title, lower-cased (`write src/x.ts` → `write`). */
 function titleHead(title: unknown): string | undefined {
@@ -215,7 +210,7 @@ export function unifiedDiff(
     else clusters.push([i, i])
   }
 
-  const hunks: string[] = []
+  const hunks: string[][] = []
   for (const [first, last] of clusters) {
     const start = Math.max(0, first - CONTEXT)
     const end = Math.min(script.length, last + CONTEXT + 1)
@@ -224,34 +219,53 @@ export function unifiedDiff(
     const newCount = body.filter((l) => l.kind !== 'del').length
     const oldStart = oldNo[start] ?? 0
     const newStart = newNo[start] ?? 0
-    hunks.push(
-      `@@ -${hunkRange(oldStart, oldCount)} +${hunkRange(newStart, newCount)} @@`,
-    )
+    const hunk = [`@@ -${hunkRange(oldStart, oldCount)} +${hunkRange(newStart, newCount)} @@`]
     for (const line of body) {
       const marker = line.kind === 'del' ? '-' : line.kind === 'add' ? '+' : ' '
-      hunks.push(marker + line.text)
+      hunk.push(marker + line.text)
     }
+    hunks.push(hunk)
   }
 
-  return capDiff([...header, ...hunks])
+  return capDiff(header, hunks)
 }
 
 /**
- * Clamp a rendered diff to `DIFF_MAX`, replacing the tail with a marker that
- * says how many lines were dropped — a silently shortened diff reads as a
- * complete one, which would be a lie about the change.
+ * Clamp a rendered diff to `DIFF_MAX`, closing with a marker that says how many
+ * lines were dropped — a silently shortened diff reads as a complete one, which
+ * would be a lie about the change.
+ *
+ * Whole hunks are kept or dropped whole. The one hunk that straddles the budget
+ * is cut at a line boundary, and *its `@@` header is dropped with the lines it
+ * no longer describes*: a `@@ -1,277 +1,277 @@` header above 37 of its 277 body
+ * lines claims a range it does not cover, and every reader — including the
+ * diff-aware highlighter in Element — takes the header as the hunk's extent.
+ * A body without a header reads as a plain excerpt, which is what it is.
  */
-function capDiff(lines: string[]): string {
-  const out: string[] = []
-  let used = 0
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!
-    if (used + line.length + 1 > DIFF_MAX && i >= 2) {
-      out.push(`… +${lines.length - i} more diff lines`)
-      return out.join('\n')
+function capDiff(header: string[], hunks: string[][]): string {
+  const out: string[] = [...header]
+  let used = header.reduce((n, line) => n + line.length + 1, 0)
+  for (let i = 0; i < hunks.length; i++) {
+    const hunk = hunks[i]!
+    const size = hunk.reduce((n, line) => n + line.length + 1, 0)
+    if (used + size <= DIFF_MAX) {
+      used += size
+      out.push(...hunk)
+      continue
     }
-    used += line.length + 1
-    out.push(line)
+    // The hunk straddles the budget: keep the body lines that fit, and count
+    // the cut header plus every later line as dropped.
+    let dropped = hunk.length
+    for (let j = 1; j < hunk.length; j++) {
+      const line = hunk[j]!
+      if (used + line.length + 1 > DIFF_MAX) break
+      used += line.length + 1
+      dropped--
+      out.push(line)
+    }
+    dropped += hunks.slice(i + 1).reduce((n, h) => n + h.length, 0)
+    out.push(`… +${dropped} more diff lines`)
+    return out.join('\n')
   }
   return out.join('\n')
 }
@@ -320,7 +334,7 @@ export function toolCallDiff(
   }
   const path = firstString(rec, PATH_KEYS)
   const head = titleHead(content.title) ?? titleHead(content.kind)
-  if (!path || !head || !WRITE_TITLES.has(head)) return undefined
+  if (!path || !head || !CREATE_TITLES.has(head)) return undefined
   for (const key of NEW_CONTENT_KEYS) {
     const newText = rec[key]
     if (typeof newText === 'string' && newText.length > 0) {
@@ -329,6 +343,18 @@ export function toolCallDiff(
   }
   return undefined
 }
+
+/**
+ * The `rawInput` keys whose values are the change itself, so a call that renders
+ * a diff drops them from its params line: the diff *is* those strings, and
+ * printing them again as `oldString=…` re-says the change as one clamped
+ * fragment. Only these keys go — a `write`'s `filePath` or an `edit`'s
+ * `replace_all` / `expected_replacements` is not in the diff and stays visible.
+ */
+export const DIFF_PARAM_KEYS: ReadonlySet<string> = new Set([
+  ...OLD_NEW_KEY_PAIRS.flat(),
+  ...NEW_CONTENT_KEYS,
+])
 
 /** Path-ish keys an ACP `rawInput` uses to name the file a tool touches. */
 const PATH_KEYS = ['filePath', 'filepath', 'file_path', 'path']
