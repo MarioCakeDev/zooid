@@ -8,7 +8,7 @@ A session resumed across a daemon restart could accept a prompt (the ACP stream
 carries the `user_message_chunk`) and then never answer — no chunk, no tool
 call, no error, container at 0% CPU — so the agent looked alive to `docker ps`
 but was deaf. Dispatch now has a **first-response deadline**: if a prompt
-produces nothing at all within it (default 2m, per-agent override
+produces nothing at all within it (default 5m, per-agent override
 `agents.<name>.first_response_timeout`), the session is declared wedged,
 invalidated in memory and in `sessions.json`, and the client is marked dead so
 the registry reconnects with a fresh container. The prompt is then **replayed

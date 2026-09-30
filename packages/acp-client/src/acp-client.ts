@@ -58,7 +58,7 @@ export interface AcpClientTimeouts {
    * ACP stream: any `sessionUpdate` (message chunk, tool call, plan) or the
    * `session/prompt` response counts as "alive". When it elapses the session
    * is treated as wedged, invalidated and thrown as {@link
-   * AcpSessionWedgeError}. Default 120_000ms. 0 disables the check (never
+   * AcpSessionWedgeError}. Default 300_000ms. 0 disables the check (never
    * recommended — a wedge is otherwise completely silent).
    */
   firstResponseMs?: number
@@ -67,11 +67,13 @@ export interface AcpClientTimeouts {
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 120_000
 const DEFAULT_SESSION_TIMEOUT_MS = 60_000
 /**
- * Generous on purpose. This fires only when the agent has produced *nothing*
- * at all — a slow-but-alive agent answers eventually and is never flagged.
+ * Generous on purpose, and deliberately biased long. This fires only when the
+ * agent has produced *nothing* at all — a slow-but-alive agent answers
+ * eventually and is never flagged, so the cost of a miss (killing a healthy
+ * agent mid-thought) dwarfs the cost of a late detection. 5m, not 2m.
  * Open to per-agent override via `agents.<name>.first_response_timeout`.
  */
-const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 120_000
+const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 300_000
 
 export interface AcpClientOptions {
   agent: AgentConfig

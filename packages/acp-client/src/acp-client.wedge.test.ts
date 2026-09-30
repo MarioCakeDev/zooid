@@ -218,6 +218,23 @@ describe('AcpClient first-response deadline', () => {
     expect(raced).toBe('still-pending')
   })
 
+  it('defaults the silence deadline to 5m, not 2m', () => {
+    // The deadline only fires on *total* silence, so a miss costs a healthy
+    // agent its turn while a late detection costs only a later wedge notice.
+    // The bias is long on purpose; a regression to a short default is exactly
+    // the failure this pins.
+    const child = new SilentChild()
+    const rt = { spawn: vi.fn().mockReturnValue(child as unknown as ChildProcess) }
+    const client = new AcpClient({
+      agent: { id: 'dev', command: 'opencode', args: ['acp'] },
+      onEvent: () => {},
+      onApprovalRequest: async () => ({ decision: 'cancel' }),
+      runtime: rt,
+    })
+    const { timeouts } = client as unknown as { timeouts: { firstResponseMs: number } }
+    expect(timeouts.firstResponseMs).toBe(300_000)
+  })
+
   it('does not leave the timer armed after a normal turn', async () => {
     const { client, internals } = makeClient({ firstResponseMs: 30 })
     stubConnection(client, {

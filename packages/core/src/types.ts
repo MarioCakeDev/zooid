@@ -175,7 +175,7 @@ export interface AgentConfig {
   /**
    * How long a dispatched prompt may produce *nothing at all* before the
    * session is declared wedged, discarded, and the prompt replayed on a fresh
-   * session. Duration string like `"2m"`. Undefined = client default (2m).
+   * session. Duration string like `"5m"`. Undefined = client default (5m).
    * A slow-but-alive agent still answers, so the default is generous; only
    * lower it for agents that answer instantly.
    */
