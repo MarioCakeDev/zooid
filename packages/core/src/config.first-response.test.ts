@@ -46,4 +46,15 @@ describe('agents.<name>.first_response_timeout', () => {
       /not allowed/,
     )
   })
+
+  it('refuses "0s" too — the guard validates the parsed value, not the spelling', () => {
+    // "0s" parses to 0 just as cleanly as 0; catching only the numeric form
+    // would leave the deadline silently disabled through a typo.
+    expect(() => loadZooidConfig(YAML('    first_response_timeout: "0s"'))).toThrow(
+      /greater than 0/,
+    )
+    expect(() => loadZooidConfig(YAML('    first_response_timeout: "0h"'))).toThrow(
+      /greater than 0/,
+    )
+  })
 })

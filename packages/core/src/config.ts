@@ -127,15 +127,23 @@ function parseApprovalTimeout(name: string, raw: unknown): number {
  */
 function parseFirstResponseTimeout(name: string, raw: unknown): number | undefined {
   if (raw === undefined) return undefined
-  // 0 is accepted here but means "no deadline", which is exactly the silent
-  // failure mode this setting exists to prevent — so refuse it.
   if (raw === 0 || raw === '0') {
     throw new Error(
       `agents.${name}.first_response_timeout: 0 (no deadline) is not allowed — ` +
         `a wedged session is otherwise completely silent. Omit the key to use the default.`,
     )
   }
-  return parseAgentDurationMs(name, 'first_response_timeout', raw, undefined)
+  const ms = parseAgentDurationMs(name, 'first_response_timeout', raw, undefined)
+  // Validate the *parsed* value, not the spelling: "0s"/"0m"/"0h" parse to 0
+  // just as cleanly as 0, and disabling the deadline is the one outcome this
+  // option must never produce.
+  if (ms <= 0) {
+    throw new Error(
+      `agents.${name}.first_response_timeout: must be greater than 0 — a wedged ` +
+        `session produces no output at all, so no deadline means permanent silence.`,
+    )
+  }
+  return ms
 }
 
 function parseAgentDurationMs(

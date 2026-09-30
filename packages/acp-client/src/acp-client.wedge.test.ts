@@ -146,6 +146,27 @@ describe('AcpClient first-response deadline', () => {
     expect(client.isAlive()).toBe(true)
   })
 
+  it('is NOT disarmed by ambient session metadata alone', async () => {
+    // A shim on a wedged session can still emit `available_commands_update`
+    // after the prompt. That is session metadata, not turn output, so it must
+    // not buy a dead session a pass.
+    const { client, internals } = makeClient({ firstResponseMs: 60 })
+    stubConnection(client, {
+      newSession: vi.fn(async () => ({ sessionId: 'ses-metadata' })),
+      prompt: vi.fn(() => new Promise(() => {})),
+    })
+    void promptOnce(client).catch(() => {})
+    await new Promise((r) => setTimeout(r, 5))
+    await internals.buildClient().sessionUpdate({
+      sessionId: 'ses-metadata',
+      update: { sessionUpdate: 'available_commands_update', availableCommands: [] },
+    })
+    const err = await promptOnce(client).catch((e: unknown) => e).catch(() => null)
+    void err
+    await new Promise((r) => setTimeout(r, 120))
+    expect(client.isAlive()).toBe(false)
+  })
+
   it('invalidates the wedged session in memory AND in the persisted store', async () => {
     const { client, store } = makeClient({
       firstResponseMs: 40,

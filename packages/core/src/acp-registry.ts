@@ -287,17 +287,15 @@ export class AcpAgentRegistry implements AcpRegistry {
    */
   async prompt(name: string, input: PromptInput): Promise<PromptResult> {
     if (!this.hasAgent(name)) throw new Error(`unknown agent: ${name}`)
-    const maxAttempts = Math.max(1, this.opts.maxPromptAttempts ?? DEFAULT_MAX_PROMPT_ATTEMPTS)
-    let lastErr: unknown
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const client = await this.ensureClient(name)
+    const maxAttempts = this.resolveMaxPromptAttempts()
+    let client = await this.ensureClient(name)
+    for (let attempt = 1; ; attempt++) {
       try {
         // `prompt()` reports the session it ran on, which after a recovery is
         // the *fresh* one — callers key their per-session state off it.
         return await client.prompt(input)
       } catch (err) {
         if (!isSessionWedge(err)) throw err
-        lastErr = err
         const wedged = err.sessionId
         if (attempt >= maxAttempts) {
           console.warn(
@@ -317,8 +315,8 @@ export class AcpAgentRegistry implements AcpRegistry {
         // Fresh client (the wedged one is dead) and a fresh session: the wedged
         // session id was dropped from the store, so `ensureSession` issues
         // session/new rather than resuming the corpse.
-        const client2 = await this.ensureClient(name)
-        const next = await client2.ensureSession(
+        client = await this.ensureClient(name)
+        const next = await client.ensureSession(
           input.threadId,
           input.channelId,
           input.contextThreadId,
@@ -327,7 +325,8 @@ export class AcpAgentRegistry implements AcpRegistry {
         if (wedged) this.onSessionRekey?.(name, input.threadId, wedged, next)
         console.warn(
           `[acp:${name}] session ${wedged} wedged (no output after prompt); ` +
-            `recovered on fresh session ${next}; replaying prompt (attempt ${attempt + 1}/${maxAttempts})`,
+            `recovered on fresh session ${next}; replaying prompt ` +
+            `(attempt ${attempt + 1}/${maxAttempts})`,
         )
         this.onEvent(name, {
           type: 'session_wedge',
@@ -339,7 +338,22 @@ export class AcpAgentRegistry implements AcpRegistry {
         })
       }
     }
-    throw lastErr
+  }
+
+  /**
+   * Replay budget, validated once. `Math.max(1, NaN)` is `NaN`, which would
+   * make the attempt loop never run and reject with bare `undefined` — the
+   * exact kind of silent-with-no-cause failure this layer exists to prevent.
+   */
+  private resolveMaxPromptAttempts(): number {
+    const raw = this.opts.maxPromptAttempts
+    if (raw === undefined) return DEFAULT_MAX_PROMPT_ATTEMPTS
+    if (!Number.isInteger(raw) || raw < 1) {
+      throw new Error(
+        `maxPromptAttempts: must be an integer >= 1 (got ${JSON.stringify(raw)})`,
+      )
+    }
+    return raw
   }
 
   async stopAll(): Promise<void> {

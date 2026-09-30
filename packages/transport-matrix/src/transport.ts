@@ -1429,6 +1429,28 @@ agents.onEvent = async (name, event: AgentEvent) => {
     if (tail) sendQueue.set(next, tail)
     sendQueue.delete(prev)
     turnMirrors.delete(prev)
+    // A fresh mirror state for the replayed turn: carrying the wedged turn's
+    // group/file set across would attribute its (empty) history to this turn,
+    // and leaving it missing would make finalizeTurnMirror a no-op so a turn
+    // that *does* use tools would post no summary line at all.
+    turnMirrors.set(next, {
+      toolGroup: new Map(),
+      toolIds: new Set(),
+      files: new Set(),
+      createdAny: false,
+      finalized: false,
+      pendingEdits: new Map(),
+    })
+    // The fresh session advertised its command roster during `ensureSession`,
+    // i.e. before this hook fired — so it is still stashed under the new id.
+    // Carry the old roster across as a fallback and replay it, exactly as
+    // runTurn does after a normal ensureSession.
+    const stashed = pendingCommands.get(next) ?? pendingCommands.get(prev)
+    pendingCommands.delete(prev)
+    if (stashed && !pendingCommands.has(next)) {
+      pendingCommands.set(next, stashed)
+      void agents.onEvent?.(name, stashed)
+    }
     // Pending approvals on the wedged session can never be answered by anyone.
     approvals.cancelSession(prev)
   }

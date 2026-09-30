@@ -344,8 +344,12 @@ export class AcpClient {
       }, timeoutMs)
       armed.timer = timer
     }
-    // timeoutMs 0 disables the timer; withDeadline then races only the death
-    // signal (and an already-dead client), which is what we want either way.
+    // timeoutMs 0 disables the timer. Note the wedge is surfaced *through the
+    // death signal* rather than by rejecting this promise directly: that keeps
+    // one failure channel for "this client is finished", which is what the
+    // registry's reconnect logic already keys on. `withDeadline` still races
+    // death unconditionally, so a child that exits mid-turn fails the prompt
+    // promptly whether or not the first-response timer is enabled.
     try {
       return await this.withDeadline('prompt', work, 0)
     } finally {
@@ -358,6 +362,12 @@ export class AcpClient {
    * Register this session's first-response timer with the activity watcher so
    * the first inbound update can cancel it. Returns a handle that cancels the
    * timer without marking it as "alive".
+   *
+   * Invariant: **at most one in-flight prompt per session**, which is what lets
+   * the first update clear the whole watcher set here. That holds because
+   * `transport-matrix` serialises a thread's turns (`enqueueTurn`), but it is
+   * not enforced here — anyone parallelising turns for one session must switch
+   * this to a per-prompt handle rather than a per-session set.
    */
   private armActivityWatch(sessionId: string): { timer?: NodeJS.Timeout } {
     const entry: { timer?: NodeJS.Timeout } = {}
@@ -551,9 +561,15 @@ export class AcpClient {
     const agentId = this.options.agent.id
     return {
       sessionUpdate: async (params) => {
-        // Any inbound update proves the session is alive — disarm the
-        // first-response deadline before doing anything else.
-        this.notifyActivity(params.sessionId)
+        // Any inbound update proves the agent is alive and processing — except
+        // the ones a shim emits as ambient session metadata rather than turn
+        // output. `available_commands_update` can arrive right after a prompt
+        // on a session that is already wedged; letting it disarm the deadline
+        // would let a dead session sail through on metadata alone.
+        const update = params.update as { sessionUpdate?: string }
+        if (update.sessionUpdate !== 'available_commands_update') {
+          this.notifyActivity(params.sessionId)
+        }
         this.turns?.observeUpdate(params.sessionId, params.update)
         debugLog(agentId, 'sessionUpdate', params)
         const event = acpUpdateToAgentEvent(params)

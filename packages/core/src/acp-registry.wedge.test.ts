@@ -210,6 +210,18 @@ describe('AcpAgentRegistry — wedged session recovery', () => {
     expect(events).toHaveLength(0)
   })
 
+  it('rejects a nonsense replay budget instead of failing with bare undefined', async () => {
+    // Math.max(1, NaN) is NaN: the attempt loop would never run and prompt()
+    // would reject with `undefined` — a silent-with-no-cause failure, which is
+    // the exact class this layer exists to prevent.
+    AcpClientMock.mockImplementation(() => newClient())
+    const registry = build({ maxPromptAttempts: Number.NaN })
+    await expect(registry.prompt('dev', { threadId: 't', content: [] })).rejects.toThrow(
+      /maxPromptAttempts: must be an integer >= 1/,
+    )
+    expect(AcpClientMock).not.toHaveBeenCalled()
+  })
+
   it('forwards the per-agent first_response_timeout_ms override to the client', async () => {
     AcpClientMock.mockImplementation(() => newClient())
     const registry = new AcpAgentRegistry({

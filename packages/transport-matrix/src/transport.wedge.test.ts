@@ -208,6 +208,45 @@ describe('matrix transport — wedged session recovery', () => {
     expect(approvals.cancelSession).toHaveBeenCalledWith('sess-$root')
   })
 
+  it('gives the replayed turn a fresh mirror state, not a missing one', async () => {
+    const { transport, agents, state, client, finishPrompt } = makeTransport()
+    await mention(transport.app, '$root')
+    await settle()
+    state.promptSessionId = 'sess-recovered'
+    agents.onSessionRekey!('dev', '$root', 'sess-$root', 'sess-recovered')
+    // A tool call on the recovered session: the turn-end summary line only
+    // exists if the fresh mirror state was seeded (an unseeded one makes
+    // finalizeTurnMirror a silent no-op and the turn posts no summary at all).
+    agents.onEvent('dev', {
+      type: 'tool_call',
+      sessionId: 'sess-recovered',
+      toolCallId: 'call-1',
+      title: 'read',
+      kind: 'read',
+    })
+    finishPrompt()
+    await settle()
+    const bodies = mirrorBodies(client).join('\n')
+    expect(bodies).toContain('1 tool')
+  })
+
+  it('carries the command roster across the re-key', async () => {
+    const { transport, agents, client } = makeTransport()
+    await mention(transport.app, '$root')
+    await settle()
+    // The fresh session advertised its roster during ensureSession, before the
+    // rekey hook fired, so it is still stashed under the new id.
+    agents.onSessionRekey!('dev', '$root', 'sess-$root', 'sess-recovered')
+    agents.onEvent('dev', {
+      type: 'available_commands',
+      sessionId: 'sess-recovered',
+      commands: [{ name: 'compact', description: 'compact the session' }],
+    })
+    await settle()
+    const roster = customEvents(client, 'dev.zooid.available_commands_update')
+    expect(roster).toHaveLength(1)
+  })
+
   it('drops a wedge notice when the session is unknown to the transport', async () => {
     const { transport, agents, client } = makeTransport()
     agents.onEvent('dev', {

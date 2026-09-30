@@ -113,9 +113,15 @@ export function createApp({
     streams.set(next, stream)
   }
   agents.onEvent = (_name, event: AgentEvent) => {
-    // A wedge can be reported before any session exists (it failed during
-    // session establishment); there is no stream to write to in that case.
-    const stream = event.sessionId ? streams.get(event.sessionId) : undefined
+    // A wedge is reported *after* the stream was re-keyed onto the replacement
+    // session, so look that up first — reading `sessionId` alone would drop
+    // every recovery notice, i.e. exactly the silence this PR exists to fix.
+    // Either id may be null when the wedge happened before a session existed.
+    const id =
+      event.type === 'session_wedge'
+        ? event.recoveredSessionId ?? event.sessionId
+        : event.sessionId
+    const stream = id ? streams.get(id) : undefined
     if (!stream) return
     void stream.writeSSE({ data: JSON.stringify(event) })
   }
