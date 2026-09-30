@@ -43,6 +43,7 @@ import {
   toolParamsText,
   toolOutputText,
   toolEntryPath,
+  toolCallDiff,
   toolEntryMachine,
   TURN_MIRROR_MARKER,
   type TurnToolEntry,
@@ -718,6 +719,9 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (!toolCallId) return undefined
     const params = toolParamsText(content.raw_input)
     const output = toolOutputText(content.content)
+    // The encoder computed the diff from the untruncated ACP event; recompute only
+    // if it did not (e.g. a raw_input that arrived on the initial tool_call).
+    const diff = nonEmptyString(content.diff) ?? toolCallDiff(content)
     const path = toolEntryPath(content)
     const machine = toolEntryMachine(content)
     const existing = group.index.get(toolCallId)
@@ -729,6 +733,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       }
       if (params) entry.params = params
       if (output) entry.output = output
+      if (diff) entry.diff = diff
       if (path) entry.path = path
       if (machine) entry.machine = machine
       group.index.set(toolCallId, group.entries.length)
@@ -742,6 +747,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (status) entry.status = status
     if (params) entry.params = params
     if (output) entry.output = output
+    if (diff) entry.diff = diff
     // Some agents send rawInput/locations only on a later update — fill them
     // in when they arrive, but never blank a value this entry already has.
     if (path) entry.path = path
