@@ -1,5 +1,20 @@
 # @zooid/transport-matrix
 
+## 0.17.0
+
+### Minor Changes
+
+- 0198f5f: Agents can ask a question mid-turn through ACP form elicitation. Questions appear in their Matrix thread and answers return to the same tool call and turn. Upgrades the ACP SDK to 1.5.
+
+### Patch Changes
+
+- b8cf931: A `zooid_handoff` from a thread whose delegated task has already closed now wakes the callee. Before, the daemon reported `started` but dropped the handoff message, so the callee never ran.
+- 78c796b: A `zooid_handoff` inside an open delegated task now wakes the callee even when the homeserver's sync delivers the handoff message before the send call returns. Before, the daemon reported `started` but sometimes dropped the message, so the callee never ran and the caller waited forever.
+- Updated dependencies [0198f5f]
+- Updated dependencies [78c796b]
+  - @zooid/acp-client@0.17.0
+  - @zooid/core@0.17.0
+
 ## 0.16.1
 
 ### Patch Changes

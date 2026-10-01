@@ -1,5 +1,27 @@
 # zooid
 
+## 0.17.0
+
+### Minor Changes
+
+- 0198f5f: Agents can ask a question mid-turn through ACP form elicitation. Questions appear in their Matrix thread and answers return to the same tool call and turn. Upgrades the ACP SDK to 1.5.
+
+### Patch Changes
+
+- Serves `@zooid/web` 0.14.0: agent elicitation questions render as answerable question cards in their thread, and a message the server rejects shows as "Not sent" on its tile with Retry and Delete.
+- Updated dependencies [0198f5f]
+- Updated dependencies [b8cf931]
+- Updated dependencies [78c796b]
+- Updated dependencies [ffa52d4]
+  - @zooid/acp-client@0.17.0
+  - @zooid/core@0.17.0
+  - @zooid/transport-matrix@0.17.0
+  - @zooid/pi-extension@0.14.0
+  - @zooid/context-mcp@0.17.0
+  - @zooid/runtime-local@0.17.0
+  - @zooid/transport-http@0.17.0
+  - @zooid/runtime-docker@0.17.0
+
 ## 0.16.1
 
 ### Patch Changes

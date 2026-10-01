@@ -1,5 +1,11 @@
 # @zooid/acp-client
 
+## 0.17.0
+
+### Minor Changes
+
+- 0198f5f: Agents can ask a question mid-turn through ACP form elicitation. Questions appear in their Matrix thread and answers return to the same tool call and turn. Upgrades the ACP SDK to 1.5.
+
 ## 0.16.1
 
 ## 0.16.0
