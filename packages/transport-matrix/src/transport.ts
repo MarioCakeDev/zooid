@@ -666,9 +666,13 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const [group, edit] = next
     state.pendingEdits.delete(group)
     enqueueMirrorEdit(sessionId, async () => {
-      if (edit.body === group.lastBody) return
-      state.lastEditAt = Date.now()
-      await editMirrorLine(edit.ctx, group, edit.body, edit.formattedBody)
+      // A coalesced edit can revert to the body already on the line (last-frame-
+      // wins): skip the no-op send, but still re-arm for anything queued behind
+      // it — otherwise an oldest no-op strands the rest of the tail.
+      if (edit.body !== group.lastBody) {
+        state.lastEditAt = Date.now()
+        await editMirrorLine(edit.ctx, group, edit.body, edit.formattedBody)
+      }
       if (state.pendingEdits.size > 0) armMirrorEditTimer(sessionId, state, mirrorEditIntervalMs)
     })
   }
@@ -818,7 +822,6 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       }
       return
     }
-    if (body === group.lastBody) return
     await scheduleMirrorEdit(sessionId, ctx, state, group, body, formattedBody)
   }
 
@@ -843,6 +846,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       const pending = [...state.pendingEdits.values()]
       state.pendingEdits.clear()
       for (const edit of pending) {
+        // Skip a coalesced edit that reverted to the body already on the line.
+        if (edit.body === edit.group.lastBody) continue
         await editMirrorLine(edit.ctx, edit.group, edit.body, edit.formattedBody)
       }
       const body = turnFinalBody(
