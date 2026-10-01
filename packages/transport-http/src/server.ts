@@ -103,11 +103,29 @@ export function createApp({
   // currently-attached stream by session id.
   const streams = new Map<string, SSEStreamingApi>()
 
+  // A wedged session is recovered on a fresh ACP session; move the client's
+  // SSE handle across so the replayed turn's events (and the wedge notice
+  // itself) reach the same HTTP client instead of being dropped as orphaned.
+  agents.onSessionRekey = (_name, _threadId, prev, next) => {
+    const stream = streams.get(prev)
+    if (!stream) return
+    streams.delete(prev)
+    streams.set(next, stream)
+  }
   agents.onEvent = (_name, event: AgentEvent) => {
-    const stream = streams.get(event.sessionId)
+    // A wedge is reported *after* the stream was re-keyed onto the replacement
+    // session, so look that up first — reading `sessionId` alone would drop
+    // every recovery notice, i.e. exactly the silence this PR exists to fix.
+    // Either id may be null when the wedge happened before a session existed.
+    const id =
+      event.type === 'session_wedge'
+        ? event.recoveredSessionId ?? event.sessionId
+        : event.sessionId
+    const stream = id ? streams.get(id) : undefined
     if (!stream) return
     void stream.writeSSE({ data: JSON.stringify(event) })
   }
+
   // Always wire the registry's approval handler to the correlator. The
   // per-agent `approval_timeout_ms` is read off the registry so YAML-driven
   // timeouts still apply.
@@ -188,6 +206,10 @@ export function createApp({
           threadId,
           content: [{ type: 'text', text: body.prompt }],
         })
+        // A wedged session is recovered on a fresh ACP session (the stream
+        // handle was moved in the registry's onSessionRekey hook); follow it
+        // so the cleanup below cancels approvals on the session that ran.
+        if (result.sessionId) sessionId = result.sessionId
         await sse.writeSSE({
           data: JSON.stringify({ type: 'turn.end', stop_reason: result.stopReason }),
         })

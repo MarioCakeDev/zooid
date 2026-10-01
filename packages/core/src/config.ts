@@ -115,17 +115,57 @@ function parseAcpBlock(name: string, raw: unknown): AcpAgentSpec {
 }
 
 function parseApprovalTimeout(name: string, raw: unknown): number {
-  if (raw === undefined) return 0
-  if (raw === 0 || raw === '0') return 0
+  return parseAgentDurationMs(name, 'approval_timeout', raw, 0)
+}
+
+/**
+ * `agents.<name>.first_response_timeout`: how long a dispatched prompt may
+ * produce *nothing at all* before the session is declared wedged and the
+ * daemon recovers on a fresh one. Only tune this down for agents that are
+ * known to answer instantly; the default is deliberately generous so a slow
+ * but healthy agent is never mistaken for a dead session.
+ */
+function parseFirstResponseTimeout(name: string, raw: unknown): number | undefined {
+  if (raw === undefined) return undefined
+  if (raw === 0 || raw === '0') {
+    throw new Error(
+      `agents.${name}.first_response_timeout: 0 (no deadline) is not allowed — ` +
+        `a wedged session is otherwise completely silent. Omit the key to use the default.`,
+    )
+  }
+  const ms = parseAgentDurationMs(name, 'first_response_timeout', raw, undefined)
+  // Validate the *parsed* value, not the spelling: "0s"/"0m"/"0h" parse to 0
+  // just as cleanly as 0, and disabling the deadline is the one outcome this
+  // option must never produce.
+  if (ms <= 0) {
+    throw new Error(
+      `agents.${name}.first_response_timeout: must be greater than 0 — a wedged ` +
+        `session produces no output at all, so no deadline means permanent silence.`,
+    )
+  }
+  return ms
+}
+
+function parseAgentDurationMs(
+  name: string,
+  field: string,
+  raw: unknown,
+  dflt: number | undefined,
+): number {
+  if (raw === undefined) {
+    if (dflt === undefined) throw new Error(`agents.${name}.${field}: internal default missing`)
+    return dflt
+  }
+  if ((raw === 0 || raw === '0') && dflt !== undefined) return 0
   if (typeof raw !== 'string') {
     throw new Error(
-      `agents.${name}.approval_timeout: must be a duration like "1h", "15m", "30s", or 0 to disable (got ${JSON.stringify(raw)})`,
+      `agents.${name}.${field}: must be a duration like "1h", "15m", "30s", or 0 to disable (got ${JSON.stringify(raw)})`,
     )
   }
   const m = /^(\d+)(s|m|h)$/.exec(raw)
   if (!m) {
     throw new Error(
-      `agents.${name}.approval_timeout: "${raw}" is not a valid duration (use "<n>s", "<n>m", or "<n>h")`,
+      `agents.${name}.${field}: "${raw}" is not a valid duration (use "<n>s", "<n>m", or "<n>h")`,
     )
   }
   const n = Number(m[1])
@@ -717,6 +757,7 @@ function parseAgents(
     }
     const acp = parseAcpBlock(name, entry.acp)
     const approval_timeout_ms = parseApprovalTimeout(name, entry.approval_timeout)
+    const first_response_timeout_ms = parseFirstResponseTimeout(name, entry.first_response_timeout)
 
     // Reject legacy fields up front with pointers to [ZOD043].
     if (entry.docker !== undefined) {
@@ -794,6 +835,11 @@ function parseAgents(
       hooks: agentHooks,
       acp,
       approval_timeout_ms,
+    }
+    // Undefined means "use the AcpClient default" — the per-agent override is
+    // an override, not a second source of truth for the same number.
+    if (first_response_timeout_ms !== undefined) {
+      agentCfg.first_response_timeout_ms = first_response_timeout_ms
     }
     if (containerBlock) agentCfg.container = containerBlock
     if (binding.matrix) agentCfg.matrix = binding.matrix

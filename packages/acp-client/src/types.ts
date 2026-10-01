@@ -59,6 +59,13 @@ export interface PromptInput {
 
 export interface PromptResult {
   stopReason: StopReason
+  /**
+   * The ACP session id the turn actually ran on. Normally the id the caller
+   * already has; it changes when the daemon had to recover from a wedged
+   * session and replay the prompt on a fresh one. Callers key per-session state
+   * by id, so they should re-read it from here.
+   */
+  sessionId?: string
 }
 
 export type AgentEvent =
@@ -67,6 +74,31 @@ export type AgentEvent =
   | ToolCallUpdateEvent
   | PlanEvent
   | AvailableCommandsEvent
+  | SessionWedgeEvent
+
+/**
+ * A prompt produced no agent output at all within the first-response deadline,
+ * so the daemon threw the session away and moved on. Emitted *only* when the
+ * daemon has something to tell the owner about it — transports should
+ * surface it in-thread instead of letting the turn look like it silently
+ * ended, because the owner's only other signal is absence.
+ */
+export interface SessionWedgeEvent {
+  type: 'session_wedge'
+  /** Session the wedge was detected on. May already be gone when it arrives. */
+  sessionId: string | null
+  /**
+   * True when the daemon recovered and the prompt is being replayed on a fresh
+   * session; false when the retry budget is exhausted and the turn failed.
+   */
+  recovered: boolean
+  /** Replay attempt this notice belongs to (1 = the wedge itself). */
+  attempt: number
+  /** Total attempts allowed for this prompt. */
+  maxAttempts: number
+  /** Session id the prompt was replayed on, when `recovered`. */
+  recoveredSessionId?: string
+}
 
 export interface AvailableCommandsEvent {
   type: 'available_commands'

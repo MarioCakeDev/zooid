@@ -10,6 +10,7 @@ import {
   type PromptResult,
   type TapEvent,
   type AcpClientTimeouts,
+  isSessionWedge,
 } from '@zooid/acp-client'
 import type { AcpAgentSpec, AcpMount, AcpRuntime } from './acp-types.js'
 import type { AgentConfig } from './types.js'
@@ -52,6 +53,17 @@ export interface AcpRegistry {
   onEvent: AcpRegistryEventHandler
   /** Set by the transport. Resolves permission requests. */
   onApprovalRequest: AcpRegistryApprovalHandler
+  /**
+   * Optional. Set by the transport to learn that a prompt moved onto a new ACP
+   * session because the previous one wedged, so per-session state can be
+   * re-keyed before the replayed turn's events arrive.
+   */
+  onSessionRekey?: (
+    agentName: string,
+    threadId: string,
+    prevSessionId: string,
+    nextSessionId: string,
+  ) => void
 }
 
 export interface AcpAgentRegistryOptions {
@@ -121,7 +133,35 @@ export interface AcpAgentRegistryOptions {
    * the dispatch instead of hanging the daemon.
    */
   timeouts?: AcpClientTimeouts
+  /**
+   * How many times a single prompt may be attempted against an agent. The
+   * first attempt is the original dispatch; `2` (the default) means exactly one
+   * replay after a wedged session. Bounded on purpose: the same prompt must
+   * never be replayed indefinitely, which is how an unguarded re-arm turned a
+   * session wedge into a reconnect loop.
+   */
+  maxPromptAttempts?: number
+  /**
+   * Called when a prompt had to be moved onto a new ACP session because the
+   * previous one never answered. Transports key per-session state (stream
+   * registries, buffers, thread context) by session id, so they need this to
+   * re-key before the replayed turn's events arrive. Fired *before* the
+   * `session_wedge` event.
+   */
+  onSessionRekey?: (
+    agentName: string,
+    threadId: string,
+    prevSessionId: string,
+    nextSessionId: string,
+  ) => void
 }
+
+/**
+ * Original dispatch + one replay. A wedge is a rare, structural failure — if
+ * the replacement session also wedges, something is wrong with the agent
+ * itself and replaying again only burns CPU.
+ */
+const DEFAULT_MAX_PROMPT_ATTEMPTS = 2
 
 export type ContextSpawnFactory = (
   threadId: string,
@@ -143,9 +183,11 @@ export class AcpAgentRegistry implements AcpRegistry {
 
   onEvent: AcpRegistryEventHandler
   onApprovalRequest: AcpRegistryApprovalHandler
+  onSessionRekey?: AcpAgentRegistryOptions['onSessionRekey']
 
   constructor(opts: AcpAgentRegistryOptions) {
     this.opts = opts
+    this.onSessionRekey = opts.onSessionRekey
     this.onEvent = opts.onEvent ?? (() => {})
     if (opts.onApprovalRequest) {
       this.onApprovalRequest = opts.onApprovalRequest
@@ -231,15 +273,100 @@ export class AcpAgentRegistry implements AcpRegistry {
     }
   }
 
+  /**
+   * Dispatch a prompt, recovering once from a wedged session.
+   *
+   * A session resumed across a daemon restart can accept a prompt and then
+   * never answer — the ACP stream carries the notification and nothing comes
+   * back. The `AcpClient` detects that (first-response deadline) and throws
+   * an `AcpSessionWedgeError` having already invalidated the session and
+   * marked itself dead. Here we reconnect, establish a *fresh* session and
+   * replay the same prompt, so the owner never has to retype "continue".
+   * Bounded by `maxPromptAttempts`; when the budget runs out we surface the
+   * wedge (`recovered: false`) and let the error propagate.
+   */
   async prompt(name: string, input: PromptInput): Promise<PromptResult> {
     if (!this.hasAgent(name)) throw new Error(`unknown agent: ${name}`)
-    const client = await this.ensureClient(name)
-    return client.prompt(input)
+    const maxAttempts = this.resolveMaxPromptAttempts()
+    let client = await this.ensureClient(name)
+    for (let attempt = 1; ; attempt++) {
+      try {
+        // `prompt()` reports the session it ran on, which after a recovery is
+        // the *fresh* one — callers key their per-session state off it.
+        return await client.prompt(input)
+      } catch (err) {
+        if (!isSessionWedge(err)) throw err
+        const wedged = err.sessionId
+        if (attempt >= maxAttempts) {
+          console.warn(
+            `[acp:${name}] session ${wedged ?? '<none>'} wedged; ` +
+              `replay budget exhausted after ${attempt} attempt(s):`,
+            err,
+          )
+          this.onEvent(name, {
+            type: 'session_wedge',
+            sessionId: wedged,
+            recovered: false,
+            attempt,
+            maxAttempts,
+          })
+          throw err
+        }
+        // Fresh client (the wedged one is dead) and a fresh session: the wedged
+        // session id was dropped from the store, so `ensureSession` issues
+        // session/new rather than resuming the corpse.
+        client = await this.ensureClient(name)
+        const next = await client.ensureSession(
+          input.threadId,
+          input.channelId,
+          input.contextThreadId,
+        )
+        this.opts.onSessionEstablished?.(name, input.threadId, next)
+        if (wedged) this.onSessionRekey?.(name, input.threadId, wedged, next)
+        console.warn(
+          `[acp:${name}] session ${wedged} wedged (no output after prompt); ` +
+            `recovered on fresh session ${next}; replaying prompt ` +
+            `(attempt ${attempt + 1}/${maxAttempts})`,
+        )
+        this.onEvent(name, {
+          type: 'session_wedge',
+          sessionId: wedged,
+          recovered: true,
+          attempt,
+          maxAttempts,
+          recoveredSessionId: next,
+        })
+      }
+    }
+  }
+
+  /**
+   * Replay budget, validated once. `Math.max(1, NaN)` is `NaN`, which would
+   * make the attempt loop never run and reject with bare `undefined` — the
+   * exact kind of silent-with-no-cause failure this layer exists to prevent.
+   */
+  private resolveMaxPromptAttempts(): number {
+    const raw = this.opts.maxPromptAttempts
+    if (raw === undefined) return DEFAULT_MAX_PROMPT_ATTEMPTS
+    if (!Number.isInteger(raw) || raw < 1) {
+      throw new Error(
+        `maxPromptAttempts: must be an integer >= 1 (got ${JSON.stringify(raw)})`,
+      )
+    }
+    return raw
   }
 
   async stopAll(): Promise<void> {
     await Promise.allSettled([...this.clients.values()].map((c) => c.stop()))
     this.clients.clear()
+  }
+
+  /** Registry-wide deadlines, with this agent's first-response override applied. */
+  private resolveTimeouts(name: string): AcpClientTimeouts | undefined {
+    const base = this.opts.timeouts
+    const override = this.opts.agents[name]?.first_response_timeout_ms
+    if (!base && override === undefined) return undefined
+    return { ...base, firstResponseMs: override ?? base?.firstResponseMs }
   }
 
   private async ensureClient(name: string): Promise<AcpClient> {
@@ -289,7 +416,7 @@ export class AcpAgentRegistry implements AcpRegistry {
       onApprovalRequest: (req) => this.onApprovalRequest(name, req),
       onTap: this.opts.onTap ? (e) => this.opts.onTap!(name, e) : undefined,
       contextSpawn: this.opts.contextSpawns?.[name],
-      timeouts: this.opts.timeouts,
+      timeouts: this.resolveTimeouts(name),
     })
     try {
       await client.start()

@@ -11,7 +11,46 @@ export type ErrorCode =
   | 'acp_protocol'
   | 'permission_denied'
   | 'media_failed'
+  | 'session_wedge'
   | 'internal'
+
+/**
+ * A prompt was delivered into the agent's ACP stream but the agent produced
+ * nothing at all — no `agent_message_chunk`, no tool call, no completion —
+ * within the first-response deadline. The classic case is a session resumed
+ * across a daemon restart whose backing process is gone: the shim accepts the
+ * notification and then stays silent forever.
+ *
+ * Distinct from a slow agent: a slow agent *does* answer, it just answers
+ * late, and the deadline is sized for that. A wedge never answers at all.
+ *
+ * The thrower has already invalidated the wedged session and marked the client
+ * dead, so callers treat this as "discard everything you had and start over".
+ */
+export class AcpSessionWedgeError extends Error {
+  readonly wedge = true
+  /** ACP session id that never answered, when one was established. */
+  readonly sessionId: string | null
+  /** Deadline that elapsed, in ms. 0 means the check was disabled. */
+  readonly timeoutMs: number
+
+  constructor(message: string, opts: { sessionId?: string | null; timeoutMs: number }) {
+    super(message)
+    this.name = 'AcpSessionWedgeError'
+    this.sessionId = opts.sessionId ?? null
+    this.timeoutMs = opts.timeoutMs
+  }
+}
+
+/** Type guard for {@link AcpSessionWedgeError} (survives realm boundaries). */
+export function isSessionWedge(err: unknown): err is AcpSessionWedgeError {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { wedge?: unknown }).wedge === true &&
+    (err as { name?: unknown }).name === 'AcpSessionWedgeError'
+  )
+}
 
 export interface Classified {
   code: ErrorCode
@@ -45,6 +84,8 @@ export function classify(err: unknown): Classified {
     }
     return { code: 'internal', transient: false, acp_error }
   }
+
+  if (isSessionWedge(err)) return { code: 'session_wedge', transient: true }
 
   // Out-of-band errors (no RequestError → no acp_error).
   if (err instanceof Error) {

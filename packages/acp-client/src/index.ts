@@ -25,10 +25,11 @@ export type {
   PromptResult,
   ToolCallEvent,
   ToolCallUpdateEvent,
+  SessionWedgeEvent,
 } from './types.js'
 export type { SessionKey, SessionRecord } from './session-map.js'
 export type { AcpClientOptions, AcpClientTimeouts } from './acp-client.js'
 export { TurnTracker } from './turn-tracker.js'
 export type { TapEvent, SessionUpdate, TurnTrackerOpts } from './turn-tracker.js'
-export { classify } from './errors.js'
+export { classify, AcpSessionWedgeError, isSessionWedge } from './errors.js'
 export type { ErrorCode, Classified } from './errors.js'
