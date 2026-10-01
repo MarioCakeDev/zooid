@@ -3097,6 +3097,95 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
   })
 
+
+  it("renders an edit as a unified diff, refreshed in place on the same entry", async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession("$g40")
+    await emitTool(agents, sessionId, {
+      toolCallId: "tc-1",
+      title: "edit src/x.ts",
+      status: "in_progress",
+      rawInput: { filePath: "src/x.ts", oldString: "a\nb\n", newString: "a\nc\n" },
+    })
+    await settleTurn()
+    // One line: the diff, plus the params the diff does not cover (the file
+    // path) — the old/new text itself appears only in the diff.
+    expect(lines(client)).toEqual([
+      [
+        "🔧 architect: 1 tool — ✏️ src/x.ts",
+        "⏳ ✏️ src/x.ts",
+        "filePath=src/x.ts",
+        "--- a/src/x.ts",
+        "+++ b/src/x.ts",
+        "@@ -1,2 +1,2 @@",
+        " a",
+        "-b",
+        "+c",
+      ].join("\n"),
+    ])
+    // The HTML body is the same diff in a language-diff code block.
+    const created = contentOf(creates(client)[0]![0])
+    expect(created["formatted_body"]).toContain(
+      '<pre><code class="language-diff">--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,2 +1,2 @@\n a\n-b\n+c</code></pre>',
+    )
+    const id = ((await client.sendMessage.mock.results[
+      client.sendMessage.mock.calls.findIndex(([a]) => contentOf(a)["dev.zooid.mirror"] === true && !isEdit(a))
+    ]!.value) as { event_id: string }).event_id
+    await updateTool(agents, sessionId, { toolCallId: "tc-1", status: "completed" })
+    await settleTurn()
+    // Still one line, one entry — the status glyph changed, the diff did not.
+    expect(lines(client)).toHaveLength(1)
+    expect(appliedEditBody(client, id)).toContain("-b\n+c")
+    expect(edits(client)).toHaveLength(1)
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it("prefers a diff content block from the tool_call_update over the raw input", async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession("$g41")
+    await emitTool(agents, sessionId, {
+      toolCallId: "tc-1",
+      title: "edit src/y.ts",
+      status: "in_progress",
+      rawInput: { filePath: "src/y.ts", oldString: "raw", newString: "raw" },
+    })
+    await updateTool(agents, sessionId, {
+      toolCallId: "tc-1",
+      status: "completed",
+      content: [{ type: "diff", path: "src/y.ts", oldText: "one\n", newText: "two\n" }],
+    })
+    await settleTurn()
+    const body = appliedEditBody(
+      client,
+      ((await client.sendMessage.mock.results[
+        client.sendMessage.mock.calls.findIndex(([a]) => contentOf(a)["dev.zooid.mirror"] === true && !isEdit(a))
+      ]!.value) as { event_id: string }).event_id,
+    )
+    expect(body).toContain("--- a/src/y.ts")
+    expect(body).toContain("-one")
+    expect(body).toContain("+two")
+    // The old/new keys are filtered out of the params line, so they are
+    // reported once, in the diff's form.
+    expect(body).not.toContain("oldString=")
+    expect(body).toContain("filePath=src/y.ts")
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it("leaves a non-editing tool without a diff block", async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession("$g42")
+    await emitTool(agents, sessionId, {
+      toolCallId: "tc-1",
+      title: "bash",
+      status: "completed",
+      rawInput: { command: "git status" },
+    })
+    await settleTurn()
+    expect(lines(client)[0]).not.toContain("language-diff")
+    expect(lines(client)[0]).toContain("command=git status")
+    finishPrompt()
+    await settleTurn()
+  })
+
   it('names the file and the machine in the tagline (read/write, ssh, local bash)', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g15')
     // A read tool names its file in rawInput — the path replaces the tool word.

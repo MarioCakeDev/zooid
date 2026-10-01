@@ -25,6 +25,7 @@ import {
   turnFinalBody,
   turnMirrorNoticeContent,
   turnMirrorEditContent,
+  DIFF_PARAM_KEYS,
   type TurnToolEntry,
 } from './event-encoders.js'
 
@@ -428,6 +429,21 @@ describe('toolParamsText', () => {
     expect(toolParamsText({})).toBeUndefined()
     expect(toolParamsText('')).toBeUndefined()
   })
+
+  it('drops the omitted keys and keeps the rest of the input', () => {
+    const raw = {
+      filePath: 'src/x.ts',
+      oldString: 'a',
+      newString: 'b',
+      replace_all: true,
+      expected_replacements: 2,
+    }
+    expect(toolParamsText(raw, DIFF_PARAM_KEYS)).toBe(
+      'filePath=src/x.ts, replace_all=true, expected_replacements=2',
+    )
+    // Without the omit set nothing is filtered.
+    expect(toolParamsText(raw)).toContain('oldString=a')
+  })
 })
 
 describe('toolOutputText', () => {
@@ -591,6 +607,30 @@ describe('turnGroupBody', () => {
       '',
       '────────────────',
       '✓ 📖 Read file',
+    ])
+  })
+
+  it('shows the params line and the diff together, params first', () => {
+    const body = turnGroupBody('dev', [
+      entry({
+        title: 'edit src/x.ts',
+        status: 'completed',
+        params: 'filePath=src/x.ts, replace_all=false',
+        diff: '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-a\n+b',
+        output: 'ok',
+      }),
+    ])
+    expect(body.split('\n')).toEqual([
+      '🔧 dev: 1 tool — ✏️ edit src/x.ts',
+      '✓ ✏️ edit src/x.ts',
+      'filePath=src/x.ts, replace_all=false',
+      '--- a/src/x.ts',
+      '+++ b/src/x.ts',
+      '@@ -1 +1 @@',
+      '-a',
+      '+b',
+      '────────────────',
+      'ok',
     ])
   })
 
@@ -1040,5 +1080,70 @@ describe('turnMirrorEditContent', () => {
       },
       'm.relates_to': { rel_type: 'm.replace', event_id: '$notice' },
     })
+  })
+})
+
+describe('tool diff rendering', () => {
+  const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
+    toolCallId: 'tc-1',
+    title: 'edit src/x.ts',
+    status: 'completed',
+    path: '/w/src/x.ts',
+    ...over,
+  })
+  const diff = ['--- a/src/x.ts', '+++ b/src/x.ts', '@@ -1 +1 @@', '-a', '+b'].join('\n')
+
+  it('renders the change in the plain body as a unified diff, keeping the params the diff omits', () => {
+    // upsertGroupEntry filters the diff's own keys out of `params` before the
+    // entry is built, so what reaches the renderer is the remainder.
+    const body = turnGroupBody('dev', [
+      entry({ params: 'filePath=src/x.ts, replace_all=false', diff }),
+    ])
+    expect(body).toContain('@@ -1 +1 @@')
+    expect(body).toContain('-a\n+b')
+    expect(body).toContain('filePath=src/x.ts, replace_all=false')
+    expect(body).not.toContain('oldString=')
+  })
+
+  it('renders the change in the HTML body as a language-diff code block', () => {
+    const html = turnGroupHtml('dev', [entry({ diff })])
+    expect(html).toContain('<pre><code class="language-diff">')
+    expect(html).toContain('@@ -1 +1 @@')
+    // Escaped, and the block stays a diff — no params block in its place.
+    expect(html).not.toContain('oldString=')
+    expect(html).not.toContain('<pre><code>filePath=')
+  })
+
+  it('escapes HTML in the diff block', () => {
+    const html = turnGroupHtml('dev', [
+      entry({ diff: ['--- a/f', '+++ b/f', '@@ -1 +1 @@', '-<script>alert(1)</script>', '+a & b'].join('\n') }),
+    ])
+    expect(html).toContain('-&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(html).toContain('+a &amp; b')
+    expect(html).not.toContain('<script>')
+  })
+
+  it('keeps the tagline summary and the marker line unchanged', () => {
+    const body = turnGroupBody('dev', [entry({ diff })])
+    expect(body.split('\n')[0]).toBe('🔧 dev: 1 tool — ✏️ /w/src/x.ts')
+    expect(body.split('\n')[1]).toBe('✓ ✏️ /w/src/x.ts')
+    expect(turnGroupHtml('dev', [entry({ diff })])).toContain(
+      '<summary>🔧 dev: 1 tool — ✏️ /w/src/x.ts</summary>',
+    )
+  })
+
+  it('still shows output after a diff, separated by the rule', () => {
+    const html = turnGroupHtml('dev', [entry({ diff, output: 'applied' })])
+    expect(html).toContain('class="language-diff"')
+    expect(html).toContain('<pre><code>applied</code></pre>')
+    expect(turnGroupBody('dev', [entry({ diff, output: 'applied' })])).toContain(
+      '────────────────',
+    )
+  })
+
+  it('falls back to params when the entry has no diff', () => {
+    const html = turnGroupHtml('dev', [entry({ title: 'bash', params: 'command=ls' })])
+    expect(html).toContain('<pre><code>command=ls</code></pre>')
+    expect(html).not.toContain('language-diff')
   })
 })

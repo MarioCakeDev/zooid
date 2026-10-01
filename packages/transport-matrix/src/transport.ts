@@ -43,6 +43,8 @@ import {
   toolParamsText,
   toolOutputText,
   toolEntryPath,
+  toolCallDiff,
+  DIFF_PARAM_KEYS,
   toolEntryMachine,
   TURN_MIRROR_MARKER,
   type TurnToolEntry,
@@ -716,7 +718,9 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   ): TurnToolEntry | undefined {
     const toolCallId = nonEmptyString(content.tool_call_id)
     if (!toolCallId) return undefined
-    const params = toolParamsText(content.raw_input)
+    // The encoder computed the diff from the untruncated ACP event; recompute only
+    // if it did not (e.g. a raw_input that arrived on the initial tool_call).
+    const diff = nonEmptyString(content.diff) ?? toolCallDiff(content)
     const output = toolOutputText(content.content)
     const path = toolEntryPath(content)
     const machine = toolEntryMachine(content)
@@ -727,8 +731,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         title: nonEmptyString(content.title) ?? toolCallId,
         status: nonEmptyString(content.status),
       }
-      if (params) entry.params = params
+      if (content.raw_input !== undefined) entry.rawInput = content.raw_input
       if (output) entry.output = output
+      if (diff) entry.diff = diff
+      entry.params = entryParams(entry)
       if (path) entry.path = path
       if (machine) entry.machine = machine
       group.index.set(toolCallId, group.entries.length)
@@ -740,13 +746,26 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     if (title) entry.title = title
     const status = nonEmptyString(content.status)
     if (status) entry.status = status
-    if (params) entry.params = params
+    if (content.raw_input !== undefined) entry.rawInput = content.raw_input
     if (output) entry.output = output
+    if (diff) entry.diff = diff
+    entry.params = entryParams(entry)
     // Some agents send rawInput/locations only on a later update — fill them
     // in when they arrive, but never blank a value this entry already has.
     if (path) entry.path = path
     if (machine) entry.machine = machine
     return entry
+  }
+
+  /**
+   * The params line of a tool entry, derived from its stored `rawInput` with the
+   * diff's own keys filtered out when the entry renders a diff. Derived rather
+   * than accumulated, so a `tool_call_update` that carries the diff but no input
+   * still re-derives the params of the earlier `tool_call` without the keys the
+   * diff now shows.
+   */
+  function entryParams(entry: TurnToolEntry): string | undefined {
+    return toolParamsText(entry.rawInput, entry.diff ? DIFF_PARAM_KEYS : undefined)
   }
 
   async function updateTurnMirror(
