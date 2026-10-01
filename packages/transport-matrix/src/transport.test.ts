@@ -74,7 +74,11 @@ const baseAgents = [
   },
 ]
 
-function makeTransport(drain?: { drainQuietMs?: number; drainMaxMs?: number }) {
+function makeTransport(drain?: {
+  drainQuietMs?: number
+  drainMaxMs?: number
+  mirrorEditIntervalMs?: number
+}) {
   const { reg, finishPrompt } = fakeRegistry()
   const approvals = fakeApprovals()
   const client = fakeClient()
@@ -89,6 +93,9 @@ function makeTransport(drain?: { drainQuietMs?: number; drainMaxMs?: number }) {
     // Tests covering trailing-chunk behavior pass an explicit window.
     drainQuietMs: drain?.drainQuietMs ?? 0,
     drainMaxMs: drain?.drainMaxMs,
+    // Throttle off by default so the interactive tests see every edit inline;
+    // the fake-timer tests set 5000 explicitly to cover the production cadence.
+    mirrorEditIntervalMs: drain?.mirrorEditIntervalMs ?? 0,
   })
   return { transport, agents: reg, approvals, client, finishPrompt }
 }
@@ -3196,6 +3203,191 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       ),
     ).toBe(true)
     expect(lines(client)).toEqual([])
+  })
+
+  describe('in-place edit throttle', () => {
+    const INTERVAL = 5_000
+    // Same turn bootstrap as `startTurnAndGetSession`, but waiting on fake
+    // timers: the paired tests below drive the throttle clock with
+    // advanceTimersByTime, so real-timer settleTurn would never resolve.
+    async function startThrottled(root: string) {
+      const h = makeTransport({ mirrorEditIntervalMs: INTERVAL })
+      await postTxn(h.transport.app, {
+        events: [
+          {
+            type: 'm.room.message',
+            event_id: root,
+            origin_server_ts: Date.now(),
+            room_id: '!r:example.com',
+            sender: '@user:example.com',
+            content: {
+              msgtype: 'm.text',
+              body: 'hi',
+              'm.mentions': { user_ids: ['@architect:example.com'] },
+            },
+          },
+        ],
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      return { ...h, sessionId: `sess-${root}` }
+    }
+
+    it('coalesces a burst to at most one edit per 5s window, latest frame wins', async () => {
+      vi.useFakeTimers()
+      try {
+        const { agents, client, finishPrompt, sessionId } = await startThrottled('$th1')
+        await emitTool(agents, sessionId, {
+          toolCallId: 'tc-1',
+          title: 'bash',
+          status: 'in_progress',
+        })
+        const id = await createdId(
+          client,
+          '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local',
+        )
+        // The first post-create edit is the leading edge and goes out at once.
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        expect(edits(client)).toHaveLength(1)
+        // Three more updates inside the window: coalesced, not sent.
+        for (const status of ['in_progress', 'completed', 'failed']) {
+          await updateTool(agents, sessionId, { toolCallId: 'tc-1', status })
+        }
+        expect(edits(client)).toHaveLength(1)
+        // Crossing the boundary flushes exactly ONE edit with the latest frame.
+        await vi.advanceTimersByTimeAsync(INTERVAL)
+        expect(edits(client)).toHaveLength(2)
+        expect(appliedEditBody(client, id)).toContain('✗ 🐚 bash @local')
+        // Single-entry invariant + thread relation survive the throttle: every
+        // edit retargets the one created event, threaded on the turn root.
+        const targets = edits(client).map(([a]) =>
+          (contentOf(a)['m.relates_to'] as { event_id?: string }).event_id,
+        )
+        expect(new Set(targets)).toEqual(new Set([id]))
+        expect(contentOf(edits(client).at(-1)![0])['m.new_content']).toMatchObject({
+          'm.relates_to': { rel_type: 'm.thread', event_id: '$th1' },
+        })
+        finishPrompt()
+        await vi.advanceTimersByTimeAsync(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('flushes the pending throttled frame immediately on turn end', async () => {
+      vi.useFakeTimers()
+      try {
+        const { agents, client, finishPrompt, sessionId } = await startThrottled('$th2')
+        await emitTool(agents, sessionId, {
+          toolCallId: 'tc-1',
+          title: 'bash',
+          status: 'in_progress',
+        })
+        const id = await createdId(
+          client,
+          '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local',
+        )
+        // Leading-edge pending edit establishes the window...
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        expect(edits(client)).toHaveLength(1)
+        // ...then a terminal completed frame arrives inside the window and is
+        // coalesced rather than sent.
+        await updateTool(agents, sessionId, {
+          toolCallId: 'tc-1',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+        })
+        await vi.advanceTimersByTimeAsync(1_000)
+        expect(edits(client)).toHaveLength(1)
+        // The turn ends mid-window: the pending frame must flush now, and the
+        // terminal summary must still land.
+        finishPrompt()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(edits(client)).toHaveLength(2)
+        expect(appliedEditBody(client, id)).toContain('✓ 🐚 bash @local')
+        expect(appliedEditBody(client, id)).toContain('ok, 12 passed')
+        expect(lines(client)).toContain('✅ architect: done · 1 tool · 0 files')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('keeps the latest frame when a coalesced edit reverts to the applied body', async () => {
+      vi.useFakeTimers()
+      try {
+        const { agents, client, finishPrompt, sessionId } = await startThrottled('$th3')
+        await emitTool(agents, sessionId, {
+          toolCallId: 'tc-1',
+          title: 'bash',
+          status: 'in_progress',
+        })
+        const id = await createdId(
+          client,
+          '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local',
+        )
+        // Leading edge: the applied body becomes the pending frame.
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        expect(edits(client)).toHaveLength(1)
+        // `completed` queues inside the window...
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
+        // ...then the next frame reverts to the applied body (last-frame-wins).
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        // The window closes: the stale `completed` frame must NOT flush — there
+        // is no net change to apply, so no extra edit is sent.
+        await vi.advanceTimersByTimeAsync(INTERVAL)
+        expect(edits(client)).toHaveLength(1)
+        expect(appliedEditBody(client, id)).toContain('• 🐚 bash @local')
+        expect(appliedEditBody(client, id)).not.toContain('✓')
+        finishPrompt()
+        await vi.advanceTimersByTimeAsync(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('re-arms the tail when the oldest coalesced edit collapses to a no-op', async () => {
+      vi.useFakeTimers()
+      try {
+        const { agents, client, finishPrompt, sessionId } = await startThrottled('$th4')
+        await emitTool(agents, sessionId, {
+          toolCallId: 'tc-1',
+          title: 'bash',
+          status: 'in_progress',
+        })
+        await createdId(client, '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local')
+        // Group 1: leading edge, then a queued frame reverted before the window
+        // closes — so the oldest queued edit is a no-op.
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        // Prose closes group 1; group 2 opens and queues its own edit.
+        await emitText(agents, sessionId, 'now verify.', 'm2')
+        await emitTool(agents, sessionId, {
+          toolCallId: 'tc-2',
+          title: 'Read file',
+          status: 'in_progress',
+        })
+        const id2 = await createdId(
+          client,
+          '🔧 architect: 1 tool — 📖 Read file\n⏳ 📖 Read file',
+        )
+        await updateTool(agents, sessionId, { toolCallId: 'tc-2', status: 'completed' })
+        expect(edits(client)).toHaveLength(1)
+        // First window flushes group 1's no-op; the timer must re-arm for the
+        // still-queued group-2 edit rather than stranding it until turn end.
+        await vi.advanceTimersByTimeAsync(INTERVAL)
+        expect(edits(client)).toHaveLength(1)
+        // Second window flushes group 2.
+        await vi.advanceTimersByTimeAsync(INTERVAL)
+        expect(edits(client)).toHaveLength(2)
+        expect(appliedEditBody(client, id2)).toBe(
+          '🔧 architect: 1 tool — 📖 Read file\n✓ 📖 Read file',
+        )
+        finishPrompt()
+        await vi.advanceTimersByTimeAsync(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 })
 

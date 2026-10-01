@@ -101,6 +101,14 @@ export interface CreateMatrixTransportOptions {
   drainQuietMs?: number
   /** Hard cap on the post-turn drain. Defaults to `DRAIN_MAX_MS`. */
   drainMaxMs?: number
+  /**
+   * Minimum gap between in-place `m.replace` edits to a turn's mirror line.
+   * Intermediate tool/plan frames arriving inside the window are coalesced and
+   * flushed once it elapses; the turn-end flush is always immediate. `0`
+   * disables the throttle (every frame edits at once, as before) and is meant
+   * for tests. Defaults to `MIRROR_EDIT_INTERVAL_MS`.
+   */
+  mirrorEditIntervalMs?: number
   /** Injected media client for downloading/uploading Matrix media. */
   media?: MediaClientLike
   /** Injected attachment writer (defaults to the real writeAttachment). */
@@ -363,6 +371,15 @@ const DRAIN_QUIET_MS = 300
 // content has settled, so this cap only kicks in for genuinely-stuck turns.
 const DRAIN_MAX_MS = 30_000
 
+/**
+ * Default ceiling on how often a turn's mirror line may be rewritten in place.
+ * A busy turn emits a `tool_call`/`tool_call_update` burst (dozens of edits);
+ * each was an `m.replace` and the rate tripped `M_LIMIT_EXCEEDED` on the
+ * homeserver. Coalescing to one edit per window keeps the line live without the
+ * flood. Terminal frames are exempt — see `finalizeTurnMirror`.
+ */
+const MIRROR_EDIT_INTERVAL_MS = 5_000
+
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 function inboundThreadRoot(evt: MatrixEvent): string | undefined {
@@ -383,6 +400,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   } = opts
   const drainQuietMs = opts.drainQuietMs ?? DRAIN_QUIET_MS
   const drainMaxMs = opts.drainMaxMs ?? DRAIN_MAX_MS
+  const mirrorEditIntervalMs = opts.mirrorEditIntervalMs ?? MIRROR_EDIT_INTERVAL_MS
   const returnGraceMs = opts.returnGraceMs ?? RETURN_GRACE_MS
   const mediaClient = opts.media
   const writeAttachmentFn = opts.writeAttachmentFn ?? writeAttachment
@@ -513,6 +531,19 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     /** True once any line has been posted; gates the turn-end summary. */
     createdAny: boolean
     finalized: boolean
+    /** Wall-clock ms of the last in-place edit sent this turn (throttle clock). */
+    lastEditAt?: number
+    /** Desired edits coalesced while the throttle window is closed, by line. */
+    pendingEdits: Map<MirrorGroup, PendingMirrorEdit>
+    /** Timer that opens the next throttle window; undefined when none is armed. */
+    editTimer?: ReturnType<typeof setTimeout>
+  }
+  /** A coalesced in-place edit waiting for the throttle window to elapse. */
+  interface PendingMirrorEdit {
+    ctx: SessionContext
+    group: MirrorGroup
+    body: string
+    formattedBody?: string
   }
   const turnMirrors = new Map<string, TurnMirrorState>()
 
@@ -594,6 +625,85 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   }
 
   /**
+   * Append a coalesced edit to the session's serialization queue. The throttle
+   * timer fires outside the queue, so enqueuing (rather than sending directly)
+   * keeps the edit ordered after in-flight mirror work; `finalizeTurnMirror`,
+   * which runs after the queue drains, therefore always sees it first.
+   */
+  function enqueueMirrorEdit(sessionId: string, task: () => Promise<void>): void {
+    const tail = (sendQueue.get(sessionId) ?? Promise.resolve()).then(() =>
+      task().catch((err) => console.warn('[matrix] mirror line edit failed:', err)),
+    )
+    sendQueue.set(sessionId, tail)
+  }
+
+  /** Arm the single per-turn timer that opens the next edit window. */
+  function armMirrorEditTimer(
+    sessionId: string,
+    state: TurnMirrorState,
+    delayMs: number,
+  ): void {
+    if (state.editTimer || mirrorEditIntervalMs <= 0) return
+    state.editTimer = setTimeout(() => {
+      state.editTimer = undefined
+      flushMirrorEdit(sessionId)
+    }, Math.max(delayMs, 0))
+    state.editTimer.unref?.()
+  }
+
+  /**
+   * Send the oldest coalesced edit and, if others queued while it waited, arm
+   * the next window. One edit per window is the whole point: the turn's mirror
+   * can never rewrite faster than `mirrorEditIntervalMs`.
+   */
+  function flushMirrorEdit(sessionId: string): void {
+    const state = turnMirrors.get(sessionId)
+    if (!state) return
+    const next = state.pendingEdits.entries().next().value as
+      | [MirrorGroup, PendingMirrorEdit]
+      | undefined
+    if (!next) return
+    const [group, edit] = next
+    state.pendingEdits.delete(group)
+    enqueueMirrorEdit(sessionId, async () => {
+      // A coalesced edit can revert to the body already on the line (last-frame-
+      // wins): skip the no-op send, but still re-arm for anything queued behind
+      // it — otherwise an oldest no-op strands the rest of the tail.
+      if (edit.body !== group.lastBody) {
+        state.lastEditAt = Date.now()
+        await editMirrorLine(edit.ctx, group, edit.body, edit.formattedBody)
+      }
+      if (state.pendingEdits.size > 0) armMirrorEditTimer(sessionId, state, mirrorEditIntervalMs)
+    })
+  }
+
+  /**
+   * Apply or coalesce an in-place edit. The first edit of a window is sent
+   * immediately (the turn stays responsive); anything inside the window
+   * replaces the queued body, so a burst collapses to its latest frame and the
+   * trailing flush lands at the window boundary.
+   */
+  async function scheduleMirrorEdit(
+    sessionId: string,
+    ctx: SessionContext,
+    state: TurnMirrorState,
+    group: MirrorGroup,
+    body: string,
+    formattedBody?: string,
+  ): Promise<void> {
+    if (body === group.lastBody && !state.pendingEdits.has(group)) return
+    const now = Date.now()
+    const nextAllowed = (state.lastEditAt ?? Number.NEGATIVE_INFINITY) + mirrorEditIntervalMs
+    if (state.pendingEdits.size === 0 && now >= nextAllowed) {
+      state.lastEditAt = now
+      await editMirrorLine(ctx, group, body, formattedBody)
+      return
+    }
+    state.pendingEdits.set(group, { ctx, group, body, formattedBody })
+    armMirrorEditTimer(sessionId, state, nextAllowed - now)
+  }
+
+  /**
    * Add or update a tool entry within `group`. A `tool_call` and a later
    * `tool_call_update` for the same id share one entry (and one line): the
    * update refreshes the title/status in place and merges in the compact
@@ -662,6 +772,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         files: new Set(),
         createdAny: false,
         finalized: false,
+        pendingEdits: new Map(),
       }
       turnMirrors.set(sessionId, state)
     }
@@ -711,8 +822,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       }
       return
     }
-    if (body === group.lastBody) return
-    await editMirrorLine(ctx, group, body, formattedBody)
+    await scheduleMirrorEdit(sessionId, ctx, state, group, body, formattedBody)
   }
 
   async function finalizeTurnMirror(
@@ -723,9 +833,23 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const state = turnMirrors.get(sessionId)
     if (!state || state.finalized) return
     state.finalized = true
+    if (state.editTimer) {
+      clearTimeout(state.editTimer)
+      state.editTimer = undefined
+    }
     // A turn with no tool/plan activity gets no mirror line at all — do not add
     // a summary line for it.
     if (state.createdAny) {
+      // Flush every coalesced edit immediately, ahead of the terminal line: the
+      // last tool frame must never be stranded on a stale throttled body. This
+      // is the terminal exception to the edit throttle.
+      const pending = [...state.pendingEdits.values()]
+      state.pendingEdits.clear()
+      for (const edit of pending) {
+        // Skip a coalesced edit that reverted to the body already on the line.
+        if (edit.body === edit.group.lastBody) continue
+        await editMirrorLine(edit.ctx, edit.group, edit.body, edit.formattedBody)
+      }
       const body = turnFinalBody(
         ctx.agent.name,
         { toolCount: state.toolIds.size, fileCount: state.files.size },
