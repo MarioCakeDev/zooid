@@ -82,6 +82,18 @@ describe('toToolCallBody', () => {
     })
   })
 
+  it('forwards a webfetch rawInput url unchanged', () => {
+    const evt: ToolCallEvent = {
+      type: 'tool_call',
+      sessionId: 'sess-1',
+      toolCallId: 'tc-1',
+      title: 'webfetch',
+      kind: 'fetch',
+      rawInput: { url: 'https://example.com', format: 'text' },
+    }
+    expect(toToolCallBody(evt).raw_input).toEqual({ url: 'https://example.com', format: 'text' })
+  })
+
   it('truncates long string values inside rawInput', () => {
     const longDiff = 'a'.repeat(500)
     const evt: ToolCallEvent = {
@@ -981,6 +993,42 @@ describe('toolEntryLine', () => {
     expect(toolEntryLine(entry({ title: 'write', status: 'completed', path: '/workspace/src/x.ts' }))).toBe(
       '✓ ✏️ /workspace/src/x.ts',
     )
+  })
+
+  it('shows the request URL instead of the tool word for a web fetch', () => {
+    const line = toolEntryLine(
+      entry({
+        title: 'webfetch',
+        status: 'completed',
+        rawInput: { url: 'https://example.com', format: 'text' },
+      }),
+    )
+    expect(line).toBe('✓ 🌐 https://example.com')
+  })
+
+  it('falls back to the title for a web call that names no url', () => {
+    expect(toolEntryLine(entry({ title: 'websearch', rawInput: { query: 'zooid' } }))).toBe(
+      '• 🌐 websearch',
+    )
+    expect(toolEntryLine(entry({ title: 'webfetch' }))).toBe('• 🌐 webfetch')
+  })
+
+  it('ignores a url on a tool that is not a web call', () => {
+    expect(toolEntryLine(entry({ title: 'read', rawInput: { url: 'https://example.com' } }))).toBe(
+      '• 📖 read',
+    )
+    expect(toolEntryLine(entry({ title: 'bash', rawInput: { url: 'https://example.com' } }))).toBe(
+      '• >_ bash @local',
+    )
+  })
+
+  it('clamps a long web url so it cannot eat the line', () => {
+    const line = toolEntryLine(
+      entry({ title: 'webfetch', rawInput: { url: `https://example.com/${'x'.repeat(400)}` } }),
+    )
+    expect(line.startsWith('• 🌐 https://example.com/')).toBe(true)
+    expect(line.endsWith('…')).toBe(true)
+    expect(line.length).toBeLessThanOrEqual(200)
   })
 
   it('keeps the title for a path-bearing tool that named no file', () => {
