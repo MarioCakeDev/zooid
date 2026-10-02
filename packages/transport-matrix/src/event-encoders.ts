@@ -311,12 +311,13 @@ function toolStatusIcon(status: string | undefined): string {
 }
 
 /**
- * Emoji identifying a tool by its ACP title's first word (`bash`,
+ * Marker identifying a tool by its ACP title's first word (`bash`,
  * `edit src/x.ts`, `coolify_get_application`, `ssh_run-command`, …), so a long
  * list of taglines is scannable by shape rather than by reading every name.
- * Exact names win; a prefix fallback covers descriptive titles (`Reading
- * auth.ts`); anything else gets a generic marker. Icons sit between the status
- * glyph and the tool name (`✓ 📖 read`) and never replace either.
+ * Most are emoji; the shell family uses the literal `>_` prompt. Exact names
+ * win; a prefix fallback covers descriptive titles (`Reading auth.ts`);
+ * anything else gets a generic marker. Markers sit between the status glyph and
+ * the tool name (`✓ 📖 read`) and never replace either.
  */
 const TOOL_ICON_BY_NAME: Record<string, string> = {
   read: '📖',
@@ -329,12 +330,12 @@ const TOOL_ICON_BY_NAME: Record<string, string> = {
   patch: '✏️',
   apply: '✏️',
   multiedit: '✏️',
-  bash: '🖥️',
-  shell: '🖥️',
-  ssh: '🖥️',
-  exec: '🖥️',
-  terminal: '🖥️',
-  run: '🖥️',
+  bash: '>_',
+  shell: '>_',
+  ssh: '>_',
+  exec: '>_',
+  terminal: '>_',
+  run: '>_',
   grep: '🔍',
   search: '🔍',
   find: '🔍',
@@ -388,7 +389,10 @@ const TOOL_ICON_PREFIX: [string, string][] = [
 
 const DEFAULT_TOOL_ICON = '🛠'
 
-/** The identifying emoji for a tool title; one code point plus VS16 at most. */
+/**
+ * The identifying marker for a tool title: an emoji (one code point plus VS16
+ * at most) or the literal two-character `>_` for shell tools.
+ */
 export function toolIcon(title: string): string {
   const words = title.trim().toLowerCase().split(/[\s_./:-]+/)
   const head = words[0]
@@ -407,7 +411,7 @@ export function toolIcon(title: string): string {
 const PATH_TOOL_ICONS: ReadonlySet<string> = new Set(['📖', '✏️'])
 
 /** Icon family whose calls run on a machine the tagline must name (bash/ssh). */
-const SHELL_TOOL_ICON = '🖥️'
+const SHELL_TOOL_ICON = '>_'
 
 /**
  * Machine label for a shell call whose ACP event carries none: bash/ssh tools
@@ -476,7 +480,7 @@ const SUBJECT_OVERHEAD = 6
 
 /**
  * What a tagline talks about — `icon + named + @machine`:
- * `🖥️ bash @local`, `📖 /workspace/AGENTS.md`, `✏️ /workspace/src/x.ts`. The
+ * `>_ bash @local`, `📖 /workspace/AGENTS.md`, `✏️ /workspace/src/x.ts`. The
  * *named* part is the file path for a read/write tool that named one (the path
  * says more than the word "read"), the title otherwise. A machine suffix
  * ` @<profile|host>` rides along whenever the call names one, and shell tools
@@ -531,7 +535,7 @@ const TOOL_SEPARATOR: GroupLine[] = [
 ]
 
 /**
- * Compact one-line rendering of a tool entry: `✓ 🖥️ bash @local`,
+ * Compact one-line rendering of a tool entry: `✓ >_ bash @local`,
  * `⏳ ✏️ /workspace/src/x.ts`, `✗ 📖 /workspace/AGENTS.md`. The status glyph
  * comes first and carries the status on its own — ✓ done, ✗ failed, ⏳ running,
  * • pending — so no status word is repeated in the line. Then the tool's
@@ -762,7 +766,7 @@ export function turnGroupBody(
 /**
  * HTML for one tool inside a group: a nested collapsed `<details>` whose
  * `<summary>` (first child, no `open`) is the tool's one-line rendering
- * (`✓ 🖥️ bash @local`, see `toolEntryLine`), and whose body is its params and its
+ * (`✓ >_ bash @local`, see `toolEntryLine`), and whose body is its params and its
  * output as two separate `<pre><code>` blocks — so the timeline shows a tool's
  * tagline (its status glyph first) and hides its input/output until the reader
  * opens it.
