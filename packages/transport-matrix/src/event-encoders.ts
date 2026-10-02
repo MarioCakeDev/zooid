@@ -57,6 +57,11 @@ export function toUpdateBody(evt: ToolCallUpdateEvent): Record<string, unknown> 
   }
   if (evt.status !== undefined) out.status = evt.status
   if (evt.kind !== undefined) out.kind = evt.kind
+  // The title is the only thing that tells a whole-file `write` apart from an
+  // in-place `edit`: ACP has no `write` kind, so opencode reports both as
+  // `kind: "edit"` and the diff's create fallback keys on the title instead.
+  // Forward it, and give it to toolCallDiff so that fallback fires for a write.
+  if (evt.title !== undefined) out.title = evt.title
   // content[] carries display-ready output (text/diff/terminal); rawOutput is
   // intentionally NOT serialized — it's typically large and duplicates content.
   if (evt.content !== undefined) out.content = evt.content
@@ -67,6 +72,7 @@ export function toUpdateBody(evt: ToolCallUpdateEvent): Record<string, unknown> 
   // See toToolCallBody: computed pre-truncation, and it prefers the update's
   // own diff content block over the raw input.
   const diff = toolCallDiff({
+    title: evt.title,
     kind: evt.kind,
     raw_input: evt.rawInput,
     content: evt.content,

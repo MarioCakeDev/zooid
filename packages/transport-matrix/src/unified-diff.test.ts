@@ -184,6 +184,18 @@ describe('toolCallDiff', () => {
     expect(diff).toContain('+y')
   })
 
+  it('keys the create fallback on the write title, not the edit kind', () => {
+    // opencode reports its `write` tool with ACP kind "edit" (ACP has no write
+    // kind). The title is what identifies the whole-file create.
+    const diff = toolCallDiff({
+      title: 'Write /tmp/x',
+      kind: 'edit',
+      raw_input: { filePath: '/tmp/x', content: 'x\n' },
+    })!
+    expect(diff).toContain('--- /dev/null')
+    expect(diff).toContain('+x')
+  })
+
   it('does not invent a diff for a non-writing tool with a content key', () => {
     expect(
       toolCallDiff({ title: 'fetch', raw_input: { path: '/api', content: 'body' } }),
