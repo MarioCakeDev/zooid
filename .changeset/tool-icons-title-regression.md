@@ -2,7 +2,7 @@
 '@zooid/transport-matrix': patch
 ---
 
-Element mirror: stable tool icons and a terminal glyph for shell calls
+Element mirror: stable tool icons and a literal `>_` mark for shell calls
 
 Two tagline fixes:
 
@@ -14,4 +14,4 @@ Two tagline fixes:
   update's title is still passed to the write/create diff fallback, so writes
   keep rendering as a diff.
 - Shell tools (`bash`, `shell`, `ssh`, `exec`, `terminal`, `run`) now render
-  with 🖥️ instead of 🐚.
+  with the literal `>_` mark instead of 🐚.
