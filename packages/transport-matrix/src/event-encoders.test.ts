@@ -1074,6 +1074,12 @@ describe('toolEntryLine', () => {
     ).toBe('• >_ @coolify docker exec app ls')
   })
 
+  it('treats a whitespace-only command as no command', () => {
+    expect(
+      toolEntryLine(entry({ title: 'bash', rawInput: { command: '   ' } })),
+    ).toBe('• >_ bash @local')
+  })
+
   it('collapses a multi-line shell command onto one tagline', () => {
     expect(
       toolEntryLine(entry({ title: 'bash', rawInput: { command: 'cd /app\npnpm test' } })),

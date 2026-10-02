@@ -519,9 +519,11 @@ function toolSubject(entry: TurnToolEntry, lineMax = TOOL_LINE_MAX): string {
   const named = url ?? (PATH_TOOL_ICONS.has(icon) && entry.path ? entry.path : entry.title)
   const budget = lineMax - icon.length - suffix.length - SUBJECT_OVERHEAD
   const command = isShell ? firstString(entry.rawInput, RAW_INPUT_COMMAND_KEYS) : undefined
-  if (command) {
-    // A command can be multi-line; collapse it so the tagline stays one line.
-    const oneLine = command.replace(/\s+/g, ' ').trim()
+  // A command can be multi-line; collapse it so the tagline stays one line. A
+  // whitespace-only command collapses to nothing — treat it as no command and
+  // fall back to the title rather than drop the subject.
+  const oneLine = command?.replace(/\s+/g, ' ').trim()
+  if (oneLine) {
     const head =
       oneLine.length > budget ? oneLine.slice(0, Math.max(1, budget - 1)) + '…' : oneLine
     return `${icon}${suffix} ${head}`
