@@ -82,6 +82,18 @@ describe('toToolCallBody', () => {
     })
   })
 
+  it('forwards a webfetch rawInput url unchanged', () => {
+    const evt: ToolCallEvent = {
+      type: 'tool_call',
+      sessionId: 'sess-1',
+      toolCallId: 'tc-1',
+      title: 'webfetch',
+      kind: 'fetch',
+      rawInput: { url: 'https://example.com', format: 'text' },
+    }
+    expect(toToolCallBody(evt).raw_input).toEqual({ url: 'https://example.com', format: 'text' })
+  })
+
   it('truncates long string values inside rawInput', () => {
     const longDiff = 'a'.repeat(500)
     const evt: ToolCallEvent = {
@@ -983,6 +995,42 @@ describe('toolEntryLine', () => {
     )
   })
 
+  it('shows the request URL instead of the tool word for a web fetch', () => {
+    const line = toolEntryLine(
+      entry({
+        title: 'webfetch',
+        status: 'completed',
+        rawInput: { url: 'https://example.com', format: 'text' },
+      }),
+    )
+    expect(line).toBe('✓ 🌐 https://example.com')
+  })
+
+  it('falls back to the title for a web call that names no url', () => {
+    expect(toolEntryLine(entry({ title: 'websearch', rawInput: { query: 'zooid' } }))).toBe(
+      '• 🌐 websearch',
+    )
+    expect(toolEntryLine(entry({ title: 'webfetch' }))).toBe('• 🌐 webfetch')
+  })
+
+  it('ignores a url on a tool that is not a web call', () => {
+    expect(toolEntryLine(entry({ title: 'read', rawInput: { url: 'https://example.com' } }))).toBe(
+      '• 📖 read',
+    )
+    expect(toolEntryLine(entry({ title: 'bash', rawInput: { url: 'https://example.com' } }))).toBe(
+      '• >_ bash @local',
+    )
+  })
+
+  it('clamps a long web url so it cannot eat the line', () => {
+    const line = toolEntryLine(
+      entry({ title: 'webfetch', rawInput: { url: `https://example.com/${'x'.repeat(400)}` } }),
+    )
+    expect(line.startsWith('• 🌐 https://example.com/')).toBe(true)
+    expect(line.endsWith('…')).toBe(true)
+    expect(line.length).toBeLessThanOrEqual(200)
+  })
+
   it('keeps the title for a path-bearing tool that named no file', () => {
     expect(toolEntryLine(entry({ title: 'Read file' }))).toBe('• 📖 Read file')
   })
@@ -998,6 +1046,73 @@ describe('toolEntryLine', () => {
     expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• >_ bash @local')
     expect(toolEntryLine(entry({ title: 'bash', machine: 'hass' }))).toBe('• >_ bash @hass')
     expect(toolEntryLine(entry({ title: 'Verify' }))).toBe('• 🛠 Verify')
+  })
+
+  it('puts the executed command after the host for a local shell call', () => {
+    expect(
+      toolEntryLine(
+        entry({
+          title: 'bash',
+          status: 'completed',
+          rawInput: { command: 'docker exec app ls', cwd: '/workspace' },
+        }),
+      ),
+    ).toBe('✓ >_ @local docker exec app ls')
+  })
+
+  it('puts the executed command after the ssh-mcp profile for a remote call', () => {
+    const content = {
+      raw_input: { command: 'docker exec app ls', profile: 'coolify' },
+    }
+    expect(
+      toolEntryLine({
+        toolCallId: 'tc-1',
+        title: 'ssh_run-command',
+        machine: toolEntryMachine(content),
+        rawInput: content.raw_input,
+      }),
+    ).toBe('• >_ @coolify docker exec app ls')
+  })
+
+  it('treats a whitespace-only command as no command', () => {
+    expect(
+      toolEntryLine(entry({ title: 'bash', rawInput: { command: '   ' } })),
+    ).toBe('• >_ bash @local')
+  })
+
+  it('collapses a multi-line shell command onto one tagline', () => {
+    expect(
+      toolEntryLine(entry({ title: 'bash', rawInput: { command: 'cd /app\npnpm test' } })),
+    ).toBe('• >_ @local cd /app pnpm test')
+  })
+
+  it('keeps the title and trailing machine for a shell call that names no command', () => {
+    expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• >_ bash @local')
+    expect(toolEntryLine(entry({ title: 'ssh_run-command', machine: 'coolify' }))).toBe(
+      '• >_ ssh_run-command @coolify',
+    )
+  })
+
+  it('ignores a command on a tool that is not a shell call', () => {
+    expect(toolEntryLine(entry({ title: 'read', rawInput: { command: 'ls' } }))).toBe('• 📖 read')
+    expect(
+      toolEntryLine(
+        entry({ title: 'webfetch', rawInput: { command: 'ls', url: 'https://example.com' } }),
+      ),
+    ).toBe('• 🌐 https://example.com')
+  })
+
+  it('clamps a long shell command so it cannot eat the line', () => {
+    const line = toolEntryLine(
+      entry({
+        title: 'bash',
+        status: 'completed',
+        rawInput: { command: `echo ${'x'.repeat(400)}` },
+      }),
+    )
+    expect(line.startsWith('✓ >_ @local echo ')).toBe(true)
+    expect(line.endsWith('…')).toBe(true)
+    expect(line.length).toBeLessThanOrEqual(200)
   })
 
   it('keeps the machine on the line even when a long title is clamped', () => {

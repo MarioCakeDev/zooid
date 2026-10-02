@@ -3087,7 +3087,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     const id = await createdId(
       client,
-      '🔧 architect: 1 tool — >_ bash @local\n• >_ bash @local\ncommand=pnpm test',
+      '🔧 architect: 1 tool — >_ @local pnpm test\n• >_ @local pnpm test\ncommand=pnpm test',
     )
     await updateTool(agents, sessionId, {
       toolCallId: 'tc-1',
@@ -3097,11 +3097,11 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
     // Same block, same entry: the update refreshed status and output in place.
     expect(lines(client)).toEqual([
-      '🔧 architect: 1 tool — >_ bash @local\n• >_ bash @local\ncommand=pnpm test',
+      '🔧 architect: 1 tool — >_ @local pnpm test\n• >_ @local pnpm test\ncommand=pnpm test',
     ])
     expect(edits(client)).toHaveLength(1)
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 1 tool — >_ bash @local\n✓ >_ bash @local\ncommand=pnpm test\n────────────────\nok, 12 passed',
+      '🔧 architect: 1 tool — >_ @local pnpm test\n✓ >_ @local pnpm test\ncommand=pnpm test\n────────────────\nok, 12 passed',
     )
     const newContent = contentOf(edits(client)[0]![0])['m.new_content'] as Record<string, unknown>
     expect(newContent['dev.zooid.mirror']).toBe(true)
@@ -3112,8 +3112,8 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     expect(newContent).toMatchObject({
       format: 'org.matrix.custom.html',
       formatted_body:
-        '<details><summary>🔧 architect: 1 tool — &gt;_ bash @local</summary>' +
-        '<details><summary>✓ &gt;_ bash @local</summary>' +
+        '<details><summary>🔧 architect: 1 tool — &gt;_ @local pnpm test</summary>' +
+        '<details><summary>✓ &gt;_ @local pnpm test</summary>' +
         '<pre><code>command=pnpm test</code></pre><pre><code>ok, 12 passed</code></pre></details>' +
         '</details>',
     })
@@ -3240,7 +3240,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         'filePath=/workspace/AGENTS.md',
         '',
         '────────────────',
-        '✓ >_ ssh_run-command @coolify',
+        '✓ >_ @coolify uptime',
         'profile=coolify, command=uptime',
         '',
         '────────────────',
@@ -3252,7 +3252,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       '<summary>🔧 architect: 3 tools — &gt;_ bash @local</summary>',
     )
     expect(String(newContent.formatted_body)).toContain(
-      '<summary>✓ &gt;_ ssh_run-command @coolify</summary>',
+      '<summary>✓ &gt;_ @coolify uptime</summary>',
     )
     finishPrompt()
     await settleTurn()
