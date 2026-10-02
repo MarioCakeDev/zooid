@@ -57,11 +57,16 @@ export function toUpdateBody(evt: ToolCallUpdateEvent): Record<string, unknown> 
   }
   if (evt.status !== undefined) out.status = evt.status
   if (evt.kind !== undefined) out.kind = evt.kind
-  // The title is the only thing that tells a whole-file `write` apart from an
-  // in-place `edit`: ACP has no `write` kind, so opencode reports both as
-  // `kind: "edit"` and the diff's create fallback keys on the title instead.
-  // Forward it, and give it to toolCallDiff so that fallback fires for a write.
-  if (evt.title !== undefined) out.title = evt.title
+  // The update's title is NOT forwarded into the body: it is not a stable tool
+  // name. On the completed frame opencode replaces it with a runtime display
+  // string (bash → the command, edit/write → the file path, todowrite →
+  // "0 todos"), and `toolIcon` derives the tagline emoji from the title's first
+  // word, so forwarding it makes bash/edit/write/todowrite fall back to 🛠.
+  // The initial `tool_call` already set the entry's tool-name title; updates
+  // must not overwrite it. The title is still passed to `toolCallDiff` below —
+  // it is the only thing that tells a whole-file `write` apart from an in-place
+  // `edit` (ACP has no `write` kind), and the in-progress frame carries the
+  // tool name (`title: "write"`) exactly when the create fallback needs it.
   // content[] carries display-ready output (text/diff/terminal); rawOutput is
   // intentionally NOT serialized — it's typically large and duplicates content.
   if (evt.content !== undefined) out.content = evt.content
@@ -324,12 +329,12 @@ const TOOL_ICON_BY_NAME: Record<string, string> = {
   patch: '✏️',
   apply: '✏️',
   multiedit: '✏️',
-  bash: '🐚',
-  shell: '🐚',
-  ssh: '🐚',
-  exec: '🐚',
-  terminal: '🐚',
-  run: '🐚',
+  bash: '🖥️',
+  shell: '🖥️',
+  ssh: '🖥️',
+  exec: '🖥️',
+  terminal: '🖥️',
+  run: '🖥️',
   grep: '🔍',
   search: '🔍',
   find: '🔍',
@@ -402,7 +407,7 @@ export function toolIcon(title: string): string {
 const PATH_TOOL_ICONS: ReadonlySet<string> = new Set(['📖', '✏️'])
 
 /** Icon family whose calls run on a machine the tagline must name (bash/ssh). */
-const SHELL_TOOL_ICON = '🐚'
+const SHELL_TOOL_ICON = '🖥️'
 
 /**
  * Machine label for a shell call whose ACP event carries none: bash/ssh tools
@@ -471,7 +476,7 @@ const SUBJECT_OVERHEAD = 6
 
 /**
  * What a tagline talks about — `icon + named + @machine`:
- * `🐚 bash @local`, `📖 /workspace/AGENTS.md`, `✏️ /workspace/src/x.ts`. The
+ * `🖥️ bash @local`, `📖 /workspace/AGENTS.md`, `✏️ /workspace/src/x.ts`. The
  * *named* part is the file path for a read/write tool that named one (the path
  * says more than the word "read"), the title otherwise. A machine suffix
  * ` @<profile|host>` rides along whenever the call names one, and shell tools
@@ -526,7 +531,7 @@ const TOOL_SEPARATOR: GroupLine[] = [
 ]
 
 /**
- * Compact one-line rendering of a tool entry: `✓ 🐚 bash @local`,
+ * Compact one-line rendering of a tool entry: `✓ 🖥️ bash @local`,
  * `⏳ ✏️ /workspace/src/x.ts`, `✗ 📖 /workspace/AGENTS.md`. The status glyph
  * comes first and carries the status on its own — ✓ done, ✗ failed, ⏳ running,
  * • pending — so no status word is repeated in the line. Then the tool's
@@ -757,7 +762,7 @@ export function turnGroupBody(
 /**
  * HTML for one tool inside a group: a nested collapsed `<details>` whose
  * `<summary>` (first child, no `open`) is the tool's one-line rendering
- * (`✓ 🐚 bash @local`, see `toolEntryLine`), and whose body is its params and its
+ * (`✓ 🖥️ bash @local`, see `toolEntryLine`), and whose body is its params and its
  * output as two separate `<pre><code>` blocks — so the timeline shows a tool's
  * tagline (its status glyph first) and hides its input/output until the reader
  * opens it.
