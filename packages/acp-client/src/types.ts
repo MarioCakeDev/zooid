@@ -139,6 +139,13 @@ export interface ToolCallUpdateEvent {
   type: 'tool_call_update'
   sessionId: string
   toolCallId: string
+  /**
+   * Updated human-readable title. opencode re-sends the tool name (and its
+   * argument summary) on every update; the transport relies on it to tell a
+   * whole-file `write` apart from an in-place `edit`, both of which ACP reports
+   * as `kind: "edit"` (ACP has no `write` kind).
+   */
+  title?: string
   status?: ToolCallStatus
   kind?: ToolKind
   content?: ToolCallContent[]

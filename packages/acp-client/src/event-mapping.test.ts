@@ -82,6 +82,24 @@ describe('acpUpdateToAgentEvent', () => {
     })
   })
 
+  it('forwards the title on a tool_call_update', () => {
+    const event = acpUpdateToAgentEvent({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-8',
+        title: 'Write /tmp/x',
+        kind: 'edit',
+        rawInput: { filePath: '/tmp/x', content: 'x\n' },
+      },
+    })
+    expect(event).toMatchObject({
+      type: 'tool_call_update',
+      toolCallId: 'tc-8',
+      title: 'Write /tmp/x',
+    })
+  })
+
   it('maps plan update', () => {
     const event = acpUpdateToAgentEvent({
       sessionId: 's-1',

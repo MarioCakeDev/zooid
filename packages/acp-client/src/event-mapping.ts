@@ -38,6 +38,10 @@ export function acpUpdateToAgentEvent(
         type: 'tool_call_update',
         sessionId,
         toolCallId: update.toolCallId,
+        // opencode re-sends the title on the update (and only then is rawInput
+        // present); the mirror needs it to recognise a whole-file write, which
+        // ACP otherwise reports as `kind: "edit"`.
+        title: nullToUndef<string>(update.title),
         status: nullToUndef<ToolCallStatus>(update.status),
         kind: nullToUndef<ToolKind>(update.kind),
         content: nullToUndef<ToolCallContent[]>(update.content),

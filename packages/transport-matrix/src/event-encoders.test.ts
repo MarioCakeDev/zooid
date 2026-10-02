@@ -126,6 +126,53 @@ describe('toUpdateBody', () => {
       tool_call_id: 'tc-1',
     })
   })
+
+  it('forwards the title and diffs a write reported as kind:"edit"', () => {
+    const evt: ToolCallUpdateEvent = {
+      type: 'tool_call_update',
+      sessionId: 'sess-1',
+      toolCallId: 'tc-1',
+      kind: 'edit',
+      title: 'Write /tmp/x',
+      rawInput: { filePath: '/tmp/x', content: 'x\ny\n' },
+    }
+    const out = toUpdateBody(evt)
+    expect(out.title).toBe('Write /tmp/x')
+    expect(out.diff).toMatch(/^--- \/dev\/null/)
+    expect(out.diff).toContain('+x')
+    expect(out.diff).toContain('+y')
+  })
+
+  it('does not fabricate a creation for an in-place edit with a content key', () => {
+    const evt: ToolCallUpdateEvent = {
+      type: 'tool_call_update',
+      sessionId: 'sess-1',
+      toolCallId: 'tc-1',
+      kind: 'edit',
+      title: 'Edit /tmp/x',
+      rawInput: { filePath: '/tmp/x', content: 'x\ny\n' },
+    }
+    const out = toUpdateBody(evt)
+    expect(out.title).toBe('Edit /tmp/x')
+    expect(out.diff).toBeUndefined()
+    // Still a params line, not a diff.
+    expect(out.raw_input).toEqual({ filePath: '/tmp/x', content: 'x\ny\n' })
+  })
+
+  it('still diffs an update carrying oldString/newString', () => {
+    const evt: ToolCallUpdateEvent = {
+      type: 'tool_call_update',
+      sessionId: 'sess-1',
+      toolCallId: 'tc-1',
+      kind: 'edit',
+      title: 'Edit /tmp/x',
+      rawInput: { filePath: '/tmp/x', oldString: 'a\n', newString: 'b\n' },
+    }
+    const out = toUpdateBody(evt)
+    expect(out.diff).toContain('--- a//tmp/x')
+    expect(out.diff).toContain('-a')
+    expect(out.diff).toContain('+b')
+  })
 })
 
 describe('toPlanBody', () => {
