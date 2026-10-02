@@ -127,7 +127,7 @@ describe('toUpdateBody', () => {
     })
   })
 
-  it('forwards the title and diffs a write reported as kind:"edit"', () => {
+  it('diffs a write reported as kind:"edit" without overwriting the display title', () => {
     const evt: ToolCallUpdateEvent = {
       type: 'tool_call_update',
       sessionId: 'sess-1',
@@ -137,10 +137,26 @@ describe('toUpdateBody', () => {
       rawInput: { filePath: '/tmp/x', content: 'x\ny\n' },
     }
     const out = toUpdateBody(evt)
-    expect(out.title).toBe('Write /tmp/x')
+    // The title is consumed by toolCallDiff (the create fallback), but must NOT
+    // be written into the body: an update's title is a runtime display string on
+    // the completed frame, not the stable tool name that set the entry title.
+    expect(out.title).toBeUndefined()
     expect(out.diff).toMatch(/^--- \/dev\/null/)
     expect(out.diff).toContain('+x')
     expect(out.diff).toContain('+y')
+  })
+
+  it('never overwrites the display title, even when the update title is a runtime string', () => {
+    for (const title of ['cd /tmp/whatever && pnpm test', 'workspace/src/CHANGELOG.md', '0 todos']) {
+      const out = toUpdateBody({
+        type: 'tool_call_update',
+        sessionId: 'sess-1',
+        toolCallId: 'tc-1',
+        status: 'in_progress',
+        title,
+      })
+      expect(out.title).toBeUndefined()
+    }
   })
 
   it('does not fabricate a creation for an in-place edit with a content key', () => {
@@ -153,7 +169,7 @@ describe('toUpdateBody', () => {
       rawInput: { filePath: '/tmp/x', content: 'x\ny\n' },
     }
     const out = toUpdateBody(evt)
-    expect(out.title).toBe('Edit /tmp/x')
+    expect(out.title).toBeUndefined()
     expect(out.diff).toBeUndefined()
     // Still a params line, not a diff.
     expect(out.raw_input).toEqual({ filePath: '/tmp/x', content: 'x\ny\n' })
@@ -553,7 +569,7 @@ describe('turnGroupSummary', () => {
 
   it('reads `🔧 <agent>: <N tools> — <last tool>` with no status word', () => {
     expect(turnGroupSummary('dev', [entry({ title: 'bash', status: 'completed' })])).toBe(
-      '🔧 dev: 1 tool — 🐚 bash @local',
+      '🔧 dev: 1 tool — 🖥️ bash @local',
     )
     expect(
       turnGroupSummary('dev', [
@@ -574,9 +590,9 @@ describe('turnGroupSummary', () => {
   it('appends the machine the last shell call ran on', () => {
     expect(
       turnGroupSummary('dev', [entry({ title: 'ssh_run-command', machine: 'coolify' })]),
-    ).toBe('🔧 dev: 1 tool — 🐚 ssh_run-command @coolify')
+    ).toBe('🔧 dev: 1 tool — 🖥️ ssh_run-command @coolify')
     expect(turnGroupSummary('dev', [entry({ title: 'bash' })])).toBe(
-      '🔧 dev: 1 tool — 🐚 bash @local',
+      '🔧 dev: 1 tool — 🖥️ bash @local',
     )
   })
 
@@ -617,7 +633,7 @@ describe('turnGroupBody', () => {
     ).toBe(
       [
         '🔧 dev: 2 tools — ✏️ edit src/x.ts',
-        '⏳ 🐚 bash @local',
+        '⏳ 🖥️ bash @local',
         'command=git status',
         '────────────────',
         'clean',
@@ -634,8 +650,8 @@ describe('turnGroupBody', () => {
       entry({ title: 'bash', params: 'command=npm test, cwd=/workspace', output: '12 passed' }),
     ])
     expect(body.split('\n')).toEqual([
-      '🔧 dev: 1 tool — 🐚 bash @local',
-      '• 🐚 bash @local',
+      '🔧 dev: 1 tool — 🖥️ bash @local',
+      '• 🖥️ bash @local',
       'command=npm test, cwd=/workspace',
       '────────────────',
       '12 passed',
@@ -649,7 +665,7 @@ describe('turnGroupBody', () => {
     ])
     expect(body.split('\n')).toEqual([
       '🔧 dev: 2 tools — 📖 Read file',
-      '✓ 🐚 bash @local',
+      '✓ 🖥️ bash @local',
       'clean',
       '',
       '────────────────',
@@ -683,17 +699,17 @@ describe('turnGroupBody', () => {
 
   it('adds no rule when a tool has params or output alone', () => {
     expect(turnGroupBody('dev', [entry({ title: 'bash', params: 'command=ls' })])).toBe(
-      '🔧 dev: 1 tool — 🐚 bash @local\n• 🐚 bash @local\ncommand=ls',
+      '🔧 dev: 1 tool — 🖥️ bash @local\n• 🖥️ bash @local\ncommand=ls',
     )
     expect(turnGroupBody('dev', [entry({ title: 'bash', output: 'clean' })])).toBe(
-      '🔧 dev: 1 tool — 🐚 bash @local\n• 🐚 bash @local\nclean',
+      '🔧 dev: 1 tool — 🖥️ bash @local\n• 🖥️ bash @local\nclean',
     )
   })
 
   it('renders a multi-line output one line per entry', () => {
     expect(
       turnGroupBody('dev', [entry({ title: 'bash', output: 'first\nsecond' })]),
-    ).toBe('🔧 dev: 1 tool — 🐚 bash @local\n• 🐚 bash @local\nfirst\nsecond')
+    ).toBe('🔧 dev: 1 tool — 🖥️ bash @local\n• 🖥️ bash @local\nfirst\nsecond')
   })
 
   it('appends the plan detail as the last line', () => {
@@ -735,7 +751,7 @@ describe('turnGroupBody', () => {
     const body = turnGroupBody('dev', [
       entry({ title: 'bash', status: 'completed', output: 'x'.repeat(9000) }),
     ])
-    expect(body).toContain('✓ 🐚 bash @local')
+    expect(body).toContain('✓ 🖥️ bash @local')
     expect(body).toContain('x'.repeat(20))
     expect(body).not.toContain('more')
   })
@@ -755,7 +771,7 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — ✏️ edit src/x.ts</summary>' +
-        '⏳ 🐚 bash @local<br>✓ ✏️ edit src/x.ts</details>',
+        '⏳ 🖥️ bash @local<br>✓ ✏️ edit src/x.ts</details>',
     )
     expect(html.startsWith('<details><summary>')).toBe(true)
     expect(html).not.toContain('<details open')
@@ -772,13 +788,13 @@ describe('turnGroupHtml', () => {
       }),
     ])
     expect(html).toBe(
-      '<details><summary>🔧 dev: 1 tool — 🐚 bash @local</summary>' +
-        '<details><summary>✓ 🐚 bash @local</summary>' +
+      '<details><summary>🔧 dev: 1 tool — 🖥️ bash @local</summary>' +
+        '<details><summary>✓ 🖥️ bash @local</summary>' +
         '<pre><code>command=git status</code></pre><pre><code>clean tree</code></pre></details>' +
         '</details>',
     )
     // The tool line is the inner <summary>; input and output are separate blocks.
-    expect(html).toContain('<details><summary>✓ 🐚 bash @local</summary><pre><code>command=git status')
+    expect(html).toContain('<details><summary>✓ 🖥️ bash @local</summary><pre><code>command=git status')
     expect(html).toContain('</code></pre><pre><code>clean tree</code></pre>')
     // No icon prefixes on the input/output text.
     expect(html).not.toContain('⚙')
@@ -806,7 +822,7 @@ describe('turnGroupHtml', () => {
     ])
     expect(html).toBe(
       '<details><summary>🔧 dev: 2 tools — 📖 Read file</summary>' +
-        '<details><summary>✓ 🐚 bash @local</summary>' +
+        '<details><summary>✓ 🖥️ bash @local</summary>' +
         '<pre><code>command=ls</code></pre><pre><code>clean</code></pre></details>' +
         '<br>✓ 📖 Read file</details>',
     )
@@ -939,7 +955,7 @@ describe('toolEntryLine', () => {
   })
 
   it('renders a completed tool as ✓ <icon> <title> — no status word', () => {
-    expect(toolEntryLine(entry({ status: 'completed' }))).toBe('✓ 🐚 bash @local')
+    expect(toolEntryLine(entry({ status: 'completed' }))).toBe('✓ 🖥️ bash @local')
   })
 
   it('renders an in-flight tool with a ⏳ glyph and no label', () => {
@@ -977,10 +993,10 @@ describe('toolEntryLine', () => {
 
   it('names the machine of a remote shell call, or local for a container one', () => {
     expect(toolEntryLine(entry({ title: 'ssh_run-command', machine: 'coolify' }))).toBe(
-      '• 🐚 ssh_run-command @coolify',
+      '• 🖥️ ssh_run-command @coolify',
     )
-    expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• 🐚 bash @local')
-    expect(toolEntryLine(entry({ title: 'bash', machine: 'hass' }))).toBe('• 🐚 bash @hass')
+    expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• 🖥️ bash @local')
+    expect(toolEntryLine(entry({ title: 'bash', machine: 'hass' }))).toBe('• 🖥️ bash @hass')
     expect(toolEntryLine(entry({ title: 'Verify' }))).toBe('• 🛠 Verify')
   })
 
@@ -994,7 +1010,7 @@ describe('toolEntryLine', () => {
 
   it('shows only the tagline — never raw tool output', () => {
     const line = toolEntryLine(entry({ status: 'completed', output: 'ok', params: 'command=x' }))
-    expect(line).toBe('✓ 🐚 bash @local')
+    expect(line).toBe('✓ 🖥️ bash @local')
     expect(line).not.toContain('·')
     expect(line).not.toContain('ok')
     expect(line).not.toContain('command=x')
@@ -1003,8 +1019,8 @@ describe('toolEntryLine', () => {
 
 describe('toolIcon', () => {
   it('maps common tools to their identifying emoji', () => {
-    expect(toolIcon('bash')).toBe('🐚')
-    expect(toolIcon('ssh_run-command')).toBe('🐚')
+    expect(toolIcon('bash')).toBe('🖥️')
+    expect(toolIcon('ssh_run-command')).toBe('🖥️')
     expect(toolIcon('Read file')).toBe('📖')
     expect(toolIcon('edit src/x.ts')).toBe('✏️')
     expect(toolIcon('Edit file')).toBe('✏️')
@@ -1065,21 +1081,21 @@ describe('activityDetail', () => {
 
 describe('turnMirrorNoticeContent', () => {
   it('is a single threaded m.notice line carrying the marker', () => {
-    expect(turnMirrorNoticeContent('⏳ 🐚 bash', '$root')).toEqual({
+    expect(turnMirrorNoticeContent('⏳ 🖥️ bash', '$root')).toEqual({
       msgtype: 'm.notice',
-      body: '⏳ 🐚 bash',
+      body: '⏳ 🖥️ bash',
       'dev.zooid.mirror': true,
       'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
     })
   })
 
   it('adds the HTML format and formatted_body when a formatted body is given', () => {
-    expect(turnMirrorNoticeContent('🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit', '$root', '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit')).toEqual(
+    expect(turnMirrorNoticeContent('🔧 dev: ⏳ 🖥️ bash\n✓ ✏️ edit', '$root', '🔧 dev: ⏳ 🖥️ bash<br>✓ ✏️ edit')).toEqual(
       {
         msgtype: 'm.notice',
-        body: '🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit',
+        body: '🔧 dev: ⏳ 🖥️ bash\n✓ ✏️ edit',
         format: 'org.matrix.custom.html',
-        formatted_body: '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit',
+        formatted_body: '🔧 dev: ⏳ 🖥️ bash<br>✓ ✏️ edit',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
       },
@@ -1089,13 +1105,13 @@ describe('turnMirrorNoticeContent', () => {
 
 describe('turnMirrorEditContent', () => {
   it('is an m.replace of the original, with the thread relation in m.new_content', () => {
-    expect(turnMirrorEditContent('$notice', '✓ 🐚 bash @local', '$root')).toEqual({
+    expect(turnMirrorEditContent('$notice', '✓ 🖥️ bash @local', '$root')).toEqual({
       msgtype: 'm.notice',
-      body: '* ✓ 🐚 bash @local',
+      body: '* ✓ 🖥️ bash @local',
       'dev.zooid.mirror': true,
       'm.new_content': {
         msgtype: 'm.notice',
-        body: '✓ 🐚 bash @local',
+        body: '✓ 🖥️ bash @local',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
       },
@@ -1107,21 +1123,21 @@ describe('turnMirrorEditContent', () => {
     expect(
       turnMirrorEditContent(
         '$notice',
-        '🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit',
+        '🔧 dev: ⏳ 🖥️ bash\n✓ ✏️ edit',
         '$root',
-        '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit',
+        '🔧 dev: ⏳ 🖥️ bash<br>✓ ✏️ edit',
       ),
     ).toEqual({
       msgtype: 'm.notice',
-      body: '* 🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit',
+      body: '* 🔧 dev: ⏳ 🖥️ bash\n✓ ✏️ edit',
       format: 'org.matrix.custom.html',
-      formatted_body: '* 🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit',
+      formatted_body: '* 🔧 dev: ⏳ 🖥️ bash<br>✓ ✏️ edit',
       'dev.zooid.mirror': true,
       'm.new_content': {
         msgtype: 'm.notice',
-        body: '🔧 dev: ⏳ 🐚 bash\n✓ ✏️ edit',
+        body: '🔧 dev: ⏳ 🖥️ bash\n✓ ✏️ edit',
         format: 'org.matrix.custom.html',
-        formatted_body: '🔧 dev: ⏳ 🐚 bash<br>✓ ✏️ edit',
+        formatted_body: '🔧 dev: ⏳ 🖥️ bash<br>✓ ✏️ edit',
         'dev.zooid.mirror': true,
         'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
       },

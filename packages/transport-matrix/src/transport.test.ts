@@ -2780,7 +2780,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
   it('groups consecutive tool calls into one <details> block (one create, edited in place)', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g1')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'bash', status: 'in_progress' })
-    const id = await createdId(client, '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local')
+    const id = await createdId(client, '🔧 architect: 1 tool — 🖥️ bash @local\n⏳ 🖥️ bash @local')
     await emitTool(agents, sessionId, {
       toolCallId: 'tc-2',
       title: 'edit src/x.ts',
@@ -2788,7 +2788,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     await settleTurn()
     // One block, not two.
-    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local'])
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🖥️ bash @local\n⏳ 🖥️ bash @local'])
     const replaces = edits(client)
     expect(replaces).toHaveLength(1)
     expect(contentOf(replaces[0]![0])['m.relates_to']).toEqual({
@@ -2796,11 +2796,11 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       event_id: id,
     })
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 2 tools — ✏️ edit src/x.ts\n⏳ 🐚 bash @local\n\n────────────────\n• ✏️ edit src/x.ts',
+      '🔧 architect: 2 tools — ✏️ edit src/x.ts\n⏳ 🖥️ bash @local\n\n────────────────\n• ✏️ edit src/x.ts',
     )
     expect(contentOf(replaces[0]![0])['m.new_content']).toMatchObject({
       body:
-        '🔧 architect: 2 tools — ✏️ edit src/x.ts\n⏳ 🐚 bash @local\n\n────────────────\n• ✏️ edit src/x.ts',
+        '🔧 architect: 2 tools — ✏️ edit src/x.ts\n⏳ 🖥️ bash @local\n\n────────────────\n• ✏️ edit src/x.ts',
       'dev.zooid.mirror': true,
       'm.relates_to': { rel_type: 'm.thread', event_id: '$g1' },
     })
@@ -2809,7 +2809,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       format: 'org.matrix.custom.html',
       formatted_body:
         '<details><summary>🔧 architect: 2 tools — ✏️ edit src/x.ts</summary>' +
-        '⏳ 🐚 bash @local<br>• ✏️ edit src/x.ts</details>',
+        '⏳ 🖥️ bash @local<br>• ✏️ edit src/x.ts</details>',
     })
     finishPrompt()
     await settleTurn()
@@ -2818,7 +2818,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
   it('edits the block in place as a tool updates — never a new block', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g2')
     await emitTool(agents, sessionId, { toolCallId: 'tc-1', title: 'bash', status: 'pending' })
-    const id = await createdId(client, '🔧 architect: 1 tool — 🐚 bash @local\n• 🐚 bash @local')
+    const id = await createdId(client, '🔧 architect: 1 tool — 🖥️ bash @local\n• 🖥️ bash @local')
     await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'in_progress' })
     await updateTool(agents, sessionId, {
       toolCallId: 'tc-1',
@@ -2826,10 +2826,34 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
     })
     await settleTurn()
-    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🐚 bash @local\n• 🐚 bash @local'])
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🖥️ bash @local\n• 🖥️ bash @local'])
     expect(edits(client)).toHaveLength(2)
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 1 tool — 🐚 bash @local\n✓ 🐚 bash @local\nok, 12 passed',
+      '🔧 architect: 1 tool — 🖥️ bash @local\n✓ 🖥️ bash @local\nok, 12 passed',
+    )
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('keeps the initial tool-name title after an update carrying a runtime display string', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g-title')
+    await emitTool(agents, sessionId, {
+      toolCallId: 'tc-1',
+      title: 'bash',
+      status: 'in_progress',
+    })
+    const id = await createdId(client, '🔧 architect: 1 tool — 🖥️ bash @local\n⏳ 🖥️ bash @local')
+    // opencode's completed frame replaces the title with the command it ran; the
+    // mirror must keep the initial tool name so toolIcon stays 🖥️, not 🛠.
+    await updateTool(agents, sessionId, {
+      toolCallId: 'tc-1',
+      status: 'completed',
+      title: 'cd /tmp/whatever && pnpm test',
+      content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+    })
+    await settleTurn()
+    expect(appliedEditBody(client, id)).toBe(
+      '🔧 architect: 1 tool — 🖥️ bash @local\n✓ 🖥️ bash @local\nok, 12 passed',
     )
     finishPrompt()
     await settleTurn()
@@ -3011,7 +3035,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await emitTool(agents, sessionId, evt)
     await emitTool(agents, sessionId, evt)
     await settleTurn()
-    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🐚 Run tests @local\n• 🐚 Run tests @local'])
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🖥️ Run tests @local\n• 🖥️ Run tests @local'])
     expect(edits(client)).toHaveLength(0)
     finishPrompt()
     await settleTurn()
@@ -3027,8 +3051,8 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
     await settleTurn()
     expect(lines(client)).toEqual([
-      '🔧 architect: 1 tool — 🐚 Run tests @local\n• 🐚 Run tests @local',
-      '🔧 architect: 1 tool — 🐚 Run tests @local\n✓ 🐚 Run tests @local',
+      '🔧 architect: 1 tool — 🖥️ Run tests @local\n• 🖥️ Run tests @local',
+      '🔧 architect: 1 tool — 🖥️ Run tests @local\n✓ 🖥️ Run tests @local',
     ])
     finishPrompt()
     await settleTurn()
@@ -3048,7 +3072,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     )
     await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
     await settleTurn()
-    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🐚 Run tests @local\n• 🐚 Run tests @local'])
+    expect(lines(client)).toEqual(['🔧 architect: 1 tool — 🖥️ Run tests @local\n• 🖥️ Run tests @local'])
     finishPrompt()
     await settleTurn()
   })
@@ -3063,7 +3087,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     const id = await createdId(
       client,
-      '🔧 architect: 1 tool — 🐚 bash @local\n• 🐚 bash @local\ncommand=pnpm test',
+      '🔧 architect: 1 tool — 🖥️ bash @local\n• 🖥️ bash @local\ncommand=pnpm test',
     )
     await updateTool(agents, sessionId, {
       toolCallId: 'tc-1',
@@ -3073,11 +3097,11 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
     // Same block, same entry: the update refreshed status and output in place.
     expect(lines(client)).toEqual([
-      '🔧 architect: 1 tool — 🐚 bash @local\n• 🐚 bash @local\ncommand=pnpm test',
+      '🔧 architect: 1 tool — 🖥️ bash @local\n• 🖥️ bash @local\ncommand=pnpm test',
     ])
     expect(edits(client)).toHaveLength(1)
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 1 tool — 🐚 bash @local\n✓ 🐚 bash @local\ncommand=pnpm test\n────────────────\nok, 12 passed',
+      '🔧 architect: 1 tool — 🖥️ bash @local\n✓ 🖥️ bash @local\ncommand=pnpm test\n────────────────\nok, 12 passed',
     )
     const newContent = contentOf(edits(client)[0]![0])['m.new_content'] as Record<string, unknown>
     expect(newContent['dev.zooid.mirror']).toBe(true)
@@ -3088,8 +3112,8 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     expect(newContent).toMatchObject({
       format: 'org.matrix.custom.html',
       formatted_body:
-        '<details><summary>🔧 architect: 1 tool — 🐚 bash @local</summary>' +
-        '<details><summary>✓ 🐚 bash @local</summary>' +
+        '<details><summary>🔧 architect: 1 tool — 🖥️ bash @local</summary>' +
+        '<details><summary>✓ 🖥️ bash @local</summary>' +
         '<pre><code>command=pnpm test</code></pre><pre><code>ok, 12 passed</code></pre></details>' +
         '</details>',
     })
@@ -3211,24 +3235,24 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
     expect(appliedEditBody(client, id)).toBe(
       [
-        '🔧 architect: 3 tools — 🐚 bash @local',
+        '🔧 architect: 3 tools — 🖥️ bash @local',
         '✓ 📖 /workspace/AGENTS.md',
         'filePath=/workspace/AGENTS.md',
         '',
         '────────────────',
-        '✓ 🐚 ssh_run-command @coolify',
+        '✓ 🖥️ ssh_run-command @coolify',
         'profile=coolify, command=uptime',
         '',
         '────────────────',
-        '✓ 🐚 bash @local',
+        '✓ 🖥️ bash @local',
       ].join('\n'),
     )
     const newContent = contentOf(edits(client).at(-1)![0])['m.new_content'] as Record<string, unknown>
     expect(String(newContent.formatted_body)).toContain(
-      '<summary>🔧 architect: 3 tools — 🐚 bash @local</summary>',
+      '<summary>🔧 architect: 3 tools — 🖥️ bash @local</summary>',
     )
     expect(String(newContent.formatted_body)).toContain(
-      '<summary>✓ 🐚 ssh_run-command @coolify</summary>',
+      '<summary>✓ 🖥️ ssh_run-command @coolify</summary>',
     )
     finishPrompt()
     await settleTurn()
@@ -3332,7 +3356,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         })
         const id = await createdId(
           client,
-          '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local',
+          '🔧 architect: 1 tool — 🖥️ bash @local\n⏳ 🖥️ bash @local',
         )
         // The first post-create edit is the leading edge and goes out at once.
         await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
@@ -3345,7 +3369,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         // Crossing the boundary flushes exactly ONE edit with the latest frame.
         await vi.advanceTimersByTimeAsync(INTERVAL)
         expect(edits(client)).toHaveLength(2)
-        expect(appliedEditBody(client, id)).toContain('✗ 🐚 bash @local')
+        expect(appliedEditBody(client, id)).toContain('✗ 🖥️ bash @local')
         // Single-entry invariant + thread relation survive the throttle: every
         // edit retargets the one created event, threaded on the turn root.
         const targets = edits(client).map(([a]) =>
@@ -3373,7 +3397,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         })
         const id = await createdId(
           client,
-          '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local',
+          '🔧 architect: 1 tool — 🖥️ bash @local\n⏳ 🖥️ bash @local',
         )
         // Leading-edge pending edit establishes the window...
         await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
@@ -3392,7 +3416,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         finishPrompt()
         await vi.advanceTimersByTimeAsync(0)
         expect(edits(client)).toHaveLength(2)
-        expect(appliedEditBody(client, id)).toContain('✓ 🐚 bash @local')
+        expect(appliedEditBody(client, id)).toContain('✓ 🖥️ bash @local')
         expect(appliedEditBody(client, id)).toContain('ok, 12 passed')
         expect(lines(client)).toContain('✅ architect: done · 1 tool · 0 files')
       } finally {
@@ -3411,7 +3435,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         })
         const id = await createdId(
           client,
-          '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local',
+          '🔧 architect: 1 tool — 🖥️ bash @local\n⏳ 🖥️ bash @local',
         )
         // Leading edge: the applied body becomes the pending frame.
         await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
@@ -3424,7 +3448,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         // is no net change to apply, so no extra edit is sent.
         await vi.advanceTimersByTimeAsync(INTERVAL)
         expect(edits(client)).toHaveLength(1)
-        expect(appliedEditBody(client, id)).toContain('• 🐚 bash @local')
+        expect(appliedEditBody(client, id)).toContain('• 🖥️ bash @local')
         expect(appliedEditBody(client, id)).not.toContain('✓')
         finishPrompt()
         await vi.advanceTimersByTimeAsync(0)
@@ -3442,7 +3466,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
           title: 'bash',
           status: 'in_progress',
         })
-        await createdId(client, '🔧 architect: 1 tool — 🐚 bash @local\n⏳ 🐚 bash @local')
+        await createdId(client, '🔧 architect: 1 tool — 🖥️ bash @local\n⏳ 🖥️ bash @local')
         // Group 1: leading edge, then a queued frame reverted before the window
         // closes — so the oldest queued edit is a no-op.
         await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
