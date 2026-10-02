@@ -1048,6 +1048,67 @@ describe('toolEntryLine', () => {
     expect(toolEntryLine(entry({ title: 'Verify' }))).toBe('• 🛠 Verify')
   })
 
+  it('puts the executed command after the host for a local shell call', () => {
+    expect(
+      toolEntryLine(
+        entry({
+          title: 'bash',
+          status: 'completed',
+          rawInput: { command: 'docker exec app ls', cwd: '/workspace' },
+        }),
+      ),
+    ).toBe('✓ >_ @local docker exec app ls')
+  })
+
+  it('puts the executed command after the ssh-mcp profile for a remote call', () => {
+    const content = {
+      raw_input: { command: 'docker exec app ls', profile: 'coolify' },
+    }
+    expect(
+      toolEntryLine({
+        toolCallId: 'tc-1',
+        title: 'ssh_run-command',
+        machine: toolEntryMachine(content),
+        rawInput: content.raw_input,
+      }),
+    ).toBe('• >_ @coolify docker exec app ls')
+  })
+
+  it('collapses a multi-line shell command onto one tagline', () => {
+    expect(
+      toolEntryLine(entry({ title: 'bash', rawInput: { command: 'cd /app\npnpm test' } })),
+    ).toBe('• >_ @local cd /app pnpm test')
+  })
+
+  it('keeps the title and trailing machine for a shell call that names no command', () => {
+    expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• >_ bash @local')
+    expect(toolEntryLine(entry({ title: 'ssh_run-command', machine: 'coolify' }))).toBe(
+      '• >_ ssh_run-command @coolify',
+    )
+  })
+
+  it('ignores a command on a tool that is not a shell call', () => {
+    expect(toolEntryLine(entry({ title: 'read', rawInput: { command: 'ls' } }))).toBe('• 📖 read')
+    expect(
+      toolEntryLine(
+        entry({ title: 'webfetch', rawInput: { command: 'ls', url: 'https://example.com' } }),
+      ),
+    ).toBe('• 🌐 https://example.com')
+  })
+
+  it('clamps a long shell command so it cannot eat the line', () => {
+    const line = toolEntryLine(
+      entry({
+        title: 'bash',
+        status: 'completed',
+        rawInput: { command: `echo ${'x'.repeat(400)}` },
+      }),
+    )
+    expect(line.startsWith('✓ >_ @local echo ')).toBe(true)
+    expect(line.endsWith('…')).toBe(true)
+    expect(line.length).toBeLessThanOrEqual(200)
+  })
+
   it('keeps the machine on the line even when a long title is clamped', () => {
     const line = toolEntryLine(
       entry({ title: `bash ${'x'.repeat(400)}`, status: 'completed' }),

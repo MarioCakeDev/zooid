@@ -439,6 +439,9 @@ const RAW_INPUT_MACHINE_KEYS = ['profile', 'host', 'hostname']
 /** URL key an ACP `rawInput` uses for a web request. */
 const RAW_INPUT_URL_KEYS = ['url']
 
+/** Command key an ACP `rawInput` uses for a shell call. */
+const RAW_INPUT_COMMAND_KEYS = ['command']
+
 /** First non-empty string among `keys` of a raw object; `undefined` when absent. */
 function firstString(obj: unknown, keys: readonly string[]): string | undefined {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return undefined
@@ -489,14 +492,19 @@ const SUBJECT_OVERHEAD = 6
 
 /**
  * What a tagline talks about — `icon + named + @machine`:
- * `>_ bash @local`, `📖 /workspace/AGENTS.md`, `✏️ /workspace/src/x.ts`,
- * `🌐 https://example.com`. The *named* part is the file path for a read/write
- * tool that named one (the path says more than the word "read"), the request URL
- * for a 🌐 web call that named one (the URL says more than "webfetch"), the title
- * otherwise. A machine suffix ` @<profile|host>` rides along whenever the call
- * names one, and shell tools that name none get ` @local`, so every bash/ssh line
- * says where it ran; read/write and web tools normally carry no suffix — they run
- * in the agent container, so the path or URL is the useful half of the line.
+ * `>_ @local pnpm -r build`, `📖 /workspace/AGENTS.md`,
+ * `✏️ /workspace/src/x.ts`, `🌐 https://example.com`. The *named* part is the file
+ * path for a read/write tool that named one (the path says more than the word
+ * "read"), the request URL for a 🌐 web call that named one (the URL says more
+ * than "webfetch"), the executed command for a shell call that named one (the
+ * command says more than "bash"), the title otherwise. A machine
+ * ` @<profile|host>` rides along whenever the call names one, and shell tools
+ * that name none get ` @local`, so every bash/ssh line says where it ran. For a
+ * shell call that carries a command the machine sits right after the icon, before
+ * the command (`>_ @local pnpm test`); a shell call with no command keeps the
+ * title and a trailing machine (`>_ bash @local`). Read/write and web tools
+ * normally carry no suffix — they run in the agent container, so the path or URL
+ * is the useful half of the line.
  *
  * `lineMax` is what the whole line may use; the head is clamped to what is left
  * after the icon and the suffix, so a long path or command can never push the
@@ -504,11 +512,20 @@ const SUBJECT_OVERHEAD = 6
  */
 function toolSubject(entry: TurnToolEntry, lineMax = TOOL_LINE_MAX): string {
   const icon = toolIcon(entry.title)
-  const machine = entry.machine ?? (icon === SHELL_TOOL_ICON ? LOCAL_MACHINE : undefined)
+  const isShell = icon === SHELL_TOOL_ICON
+  const machine = entry.machine ?? (isShell ? LOCAL_MACHINE : undefined)
   const suffix = machine ? ` @${machine}` : ''
   const url = icon === WEB_TOOL_ICON ? firstString(entry.rawInput, RAW_INPUT_URL_KEYS) : undefined
   const named = url ?? (PATH_TOOL_ICONS.has(icon) && entry.path ? entry.path : entry.title)
   const budget = lineMax - icon.length - suffix.length - SUBJECT_OVERHEAD
+  const command = isShell ? firstString(entry.rawInput, RAW_INPUT_COMMAND_KEYS) : undefined
+  if (command) {
+    // A command can be multi-line; collapse it so the tagline stays one line.
+    const oneLine = command.replace(/\s+/g, ' ').trim()
+    const head =
+      oneLine.length > budget ? oneLine.slice(0, Math.max(1, budget - 1)) + '…' : oneLine
+    return `${icon}${suffix} ${head}`
+  }
   const head =
     named.length > budget ? named.slice(0, Math.max(1, budget - 1)) + '…' : named
   return `${icon} ${head}${suffix}`
