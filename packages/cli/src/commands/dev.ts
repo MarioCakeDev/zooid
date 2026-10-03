@@ -208,6 +208,7 @@ export async function runDev(flags: DevFlags): Promise<DevHandle> {
             // the web client without needing an invite.
             publicWorkforceSpace: true,
             onTap: (agentName, event) => captures[agentName]?.onTap(event),
+            onLifecycle: (agentName, event) => captures[agentName]?.onLifecycle(event),
             prepullLog: (line) => {
               t.output = line.replace(/^\[zooid\]\s+/, '').trim()
             },
@@ -251,6 +252,8 @@ export async function runDev(flags: DevFlags): Promise<DevHandle> {
           const app = webStatic({
             webRoot,
             homeserverUrl: homeserver,
+            // Same default as the daemon's space provisioning (start-daemon.ts).
+            workforceSpace: matrix.transport.space ?? 'dev',
             ...(ctx.daemon?.vapidPublicKey
               ? {
                   // Tuwunel runs in a container; `localhost` here would

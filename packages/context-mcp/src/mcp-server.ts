@@ -1,6 +1,11 @@
 import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { TaskActions, TaskCallerRef, TaskRole, TransportContextProvider } from '@zooid/core'
+import {
+  AGENT_NOTIFY_INSTRUCTIONS,
+  HANDOFF_DESCRIPTION,
+  SEND_MESSAGE_DESCRIPTION,
+} from './tool-text.js'
 
 const MAX_LIMIT = 200
 const DEFAULT_LIMIT = 50
@@ -73,10 +78,28 @@ export function registerTaskTools(
       },
     )
   }
+  if (role.can_handoff) {
+    server.tool(
+      'zooid_handoff',
+      HANDOFF_DESCRIPTION,
+      { agent: z.string(), prompt: z.string() },
+      async ({ agent, prompt }) => {
+        const out = await resolveTasks().then((actions) =>
+          actions.handoff(CALLER_FROM_BINDING, { agent, prompt }),
+        )
+        return { content: [{ type: 'text', text: JSON.stringify(out) }] }
+      },
+    )
+  }
 }
 
 export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServer {
-  const server = new McpServer({ name: 'zooid-context', version: '0.0.1' })
+  const server = new McpServer(
+    { name: 'zooid-context', version: '0.0.1' },
+    {
+      instructions: AGENT_NOTIFY_INSTRUCTIONS,
+    },
+  )
 
   server.tool(
     'zooid_get_history',
@@ -172,7 +195,7 @@ export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServe
 
   server.tool(
     'zooid_send_message',
-    'Post a message into a room or thread this agent is bound to. `room` accepts a room id or name from zooid_get_rooms (e.g. "!abc:hs", "#review", "review"). Fire-and-forget: no assignee, no completion tracking, no notify. Use zooid_start_task_threads instead when the intent is delegation.',
+    SEND_MESSAGE_DESCRIPTION,
     {
       room: z.string(),
       thread_id: z.string().optional(),

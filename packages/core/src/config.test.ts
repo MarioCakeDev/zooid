@@ -73,6 +73,7 @@ ${HTTP_TRANSPORT.trimStart()}${QA_AGENTS}`)
           hooks: {},
           acp: { preset: 'claude' },
           approval_timeout_ms: 0,
+        session_idle_timeout_ms: 600_000,
           http: { transport: 'http-local' },
         },
       },
@@ -326,6 +327,7 @@ describe('mergeCliFlags', () => {
           hooks: {},
           acp: { preset: 'claude' },
           approval_timeout_ms: 0,
+        session_idle_timeout_ms: 600_000,
           http: { transport: 'http-local' },
         },
       },
@@ -613,6 +615,47 @@ agents:
     matrix: { rooms: ['#docs'] }
 `)
     expect('model' in (config.agents.docs!.acp as object)).toBe(false)
+  })
+
+  it('accepts an optional acp.mode string alongside a preset', () => {
+    const config = loadZooidConfig(`
+runtime: local
+${MATRIX_TRANSPORT.trimStart()}
+agents:
+  docs:
+    acp: { preset: claude, mode: bypassPermissions }
+    matrix: { rooms: ['#docs'] }
+`)
+    expect(config.agents.docs!.acp).toEqual({ preset: 'claude', mode: 'bypassPermissions' })
+  })
+
+  it('accepts acp.mode alongside an explicit command', () => {
+    const config = loadZooidConfig(`
+runtime: local
+${MATRIX_TRANSPORT.trimStart()}
+agents:
+  docs:
+    acp: { command: my-agent, args: ['--acp'], mode: full-access }
+    matrix: { rooms: ['#docs'] }
+`)
+    expect(config.agents.docs!.acp).toEqual({
+      command: 'my-agent',
+      args: ['--acp'],
+      mode: 'full-access',
+    })
+  })
+
+  it('rejects acp.mode when not a non-empty string', () => {
+    expect(() =>
+      loadZooidConfig(`
+runtime: local
+${MATRIX_TRANSPORT.trimStart()}
+agents:
+  docs:
+    acp: { preset: claude, mode: '  ' }
+    matrix: { rooms: ['#docs'] }
+`),
+    ).toThrow(/acp\.mode.*non-empty string/i)
   })
 })
 

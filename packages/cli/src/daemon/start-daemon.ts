@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net'
 import { serve, type ServerType } from '@hono/node-server'
 import {
   ApprovalCorrelator,
+  ElicitationCorrelator,
   findConfigFile,
   findHttpTransport,
   findMatrixTransport,
@@ -13,6 +14,7 @@ import {
   mergeCliFlags,
   type CliFlags,
   type TapEvent,
+  type SessionLifecycleEvent,
 } from '@zooid/core'
 import { createApp } from '@zooid/transport-http'
 import {
@@ -49,6 +51,7 @@ export interface StartDaemonOpts {
   adminUserId?: string
   /** Observability tap forwarded to each AcpClient. */
   onTap?: (agentName: string, event: TapEvent) => void
+  onLifecycle?: (agentName: string, event: SessionLifecycleEvent) => void
   /**
    * Per-agent state root (`<dataRoot>/agents/`). Threaded into
    * `buildAcpRegistry` so each AcpClient persists `sessionId`s across
@@ -121,6 +124,7 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
   const config = mergeCliFlags(base, opts.cliFlags ?? {})
 
   const approvals = new ApprovalCorrelator()
+  const elicitations = new ElicitationCorrelator()
 
   const runDir = opts.agentsDir
     ? join(opts.agentsDir, '..', 'run')
@@ -136,7 +140,9 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
   const dataDir = opts.agentsDir ? dirname(opts.agentsDir) : undefined
   const registry = buildAcpRegistry(config, {
     approvals,
+    elicitations,
     onTap: opts.onTap,
+    onLifecycle: opts.onLifecycle,
     agentsDir: opts.agentsDir,
     contextSpawnRegistry,
     daemonSockPaths: contextSockets.paths,
@@ -251,6 +257,7 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
     const transport = createMatrixTransport({
       agents: registry,
       approvals,
+      elicitations,
       client,
       bindings,
       hsToken: matrix.transport.hs_token,
@@ -426,6 +433,7 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
           spaceRoomId,
           asUserId,
           getAgents: () => bindings,
+          stateKey: matrix.transport.workstation ?? '',
         })
         console.log(`[matrix] published dev.zooid.workforce (${bindings.length} agents)`)
         void publisher
