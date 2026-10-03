@@ -398,8 +398,17 @@ function inboundThreadRoot(evt: MatrixEvent): string | undefined {
  */
 const INTERRUPT_COMMAND_RE = /^\/interrupt(?:@[^\s]+)?$/i
 
-function isInterruptCommand(body: unknown): boolean {
-  return typeof body === 'string' && INTERRUPT_COMMAND_RE.test(body.trim())
+/**
+ * Alternative interrupt trigger: a bare "stop" or "stopp" (surrounding
+ * whitespace allowed), case-insensitively. Only the whole message counts, so
+ * ordinary prose that merely contains the word ("please stop the build")
+ * stays a prompt.
+ */
+const INTERRUPT_STOP_RE = /^\s*stopp?\s*$/i
+
+function isInterruptTrigger(body: unknown): boolean {
+  if (typeof body !== 'string') return false
+  return INTERRUPT_COMMAND_RE.test(body.trim()) || INTERRUPT_STOP_RE.test(body)
 }
 
 export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
@@ -1727,13 +1736,14 @@ agents.onEvent = async (name, event: AgentEvent) => {
   }
 
   /**
-   * A human typing `/interrupt` in a stock client. Returns true when the
-   * message was consumed as the command (so it is not routed as a prompt).
-   * Our own agents are ignored — an agent turn that emits `/interrupt` as prose
-   * must not cancel a peer (or itself) and ripple into a loop.
+   * A human typing `/interrupt` (or a bare `stop` / `stopp`) in a stock client.
+   * Returns true when the message was consumed as the command (so it is not
+   * routed as a prompt). Our own agents are ignored — an agent turn that emits
+   * the command as prose must not cancel a peer (or itself) and ripple into a
+   * loop.
    */
   async function maybeHandleInterruptMessage(evt: MatrixEvent): Promise<boolean> {
-    if (!isInterruptCommand(evt.content?.body)) return false
+    if (!isInterruptTrigger(evt.content?.body)) return false
     if (evt.sender && ourBotUserIds.has(evt.sender)) return true
     if (!evt.room_id) return true
     // A top-level `/interrupt` carries no thread relation; under the same
@@ -1907,9 +1917,9 @@ agents.onEvent = async (name, event: AgentEvent) => {
     if (evt.type === 'm.room.message' && (await maybeHandleApprovalMessage(evt))) {
       return
     }
-    // A human typing `/interrupt` is a command, not a prompt: cancel the
-    // thread's sessions/task and never enqueue a turn. Agents' own `/interrupt`
-    // prose is swallowed so it cannot loop.
+    // A human typing `/interrupt` (or a bare `stop` / `stopp`) is a command,
+    // not a prompt: cancel the thread's sessions/task and never enqueue a turn.
+    // Agents' own command prose is swallowed so it cannot loop.
     if (evt.type === 'm.room.message' && (await maybeHandleInterruptMessage(evt))) {
       return
     }
