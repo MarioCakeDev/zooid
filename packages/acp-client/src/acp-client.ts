@@ -930,6 +930,11 @@ export class AcpClient {
     this.elicitationCancels.set(request.sessionId, controllers)
     if (threadId) this.setHumanRequestPending(threadId, true)
     debugLog(agentId, 'createElicitation', { sessionId: request.sessionId, toolCallId: request.toolCallId })
+    // An elicitation request is the agent asking a question: it is alive and
+    // working, exactly like a permission request. Disarm the first-response
+    // wedge deadline before awaiting the human, or an agent that opens with a
+    // question would be declared wedged while it waits for the answer.
+    this.notifyActivity(request.sessionId)
     try {
       const response = await this.options.onElicitationRequest!(request, controller.signal)
       if (signal.aborted) throw signal.reason
