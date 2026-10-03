@@ -78,6 +78,19 @@ export function registerTaskTools(
       },
     )
   }
+  if (role.can_handoff) {
+    server.tool(
+      'zooid_handoff',
+      HANDOFF_DESCRIPTION,
+      { agent: z.string(), prompt: z.string() },
+      async ({ agent, prompt }) => {
+        const out = await resolveTasks().then((actions) =>
+          actions.handoff(CALLER_FROM_BINDING, { agent, prompt }),
+        )
+        return { content: [{ type: 'text', text: JSON.stringify(out) }] }
+      },
+    )
+  }
 }
 
 export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServer {
@@ -108,19 +121,6 @@ export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServe
 
   if (opts.resolveTasks && opts.role) {
     registerTaskTools(server, { resolveTasks: opts.resolveTasks, role: opts.role })
-  }
-  if (opts.resolveTasks && opts.role?.can_handoff) {
-    server.tool(
-      'zooid_handoff',
-      HANDOFF_DESCRIPTION,
-      { agent: z.string(), prompt: z.string() },
-      async ({ agent, prompt }) => {
-        const out = await opts.resolveTasks!().then((actions) =>
-          actions.handoff(CALLER_FROM_BINDING, { agent, prompt }),
-        )
-        return { content: [{ type: 'text', text: JSON.stringify(out) }] }
-      },
-    )
   }
 
   server.tool(

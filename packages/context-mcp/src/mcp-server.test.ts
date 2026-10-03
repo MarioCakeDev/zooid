@@ -432,6 +432,34 @@ describe('zooid_handoff ([[ZOD092]])', () => {
     expect(tool?.description).toMatch(/only way to involve another agent/i)
   })
 
+  it('registers zooid_handoff via registerTaskTools on an already-connected server (the production bin.ts path)', async () => {
+    // Production never passes a role to buildContextMcpServer: bin.ts connects
+    // first, then calls registerTaskTools once the daemon role query resolves.
+    // Handoff must be exposed from that path, or no agent-involving tool exists.
+    const server = buildContextMcpServer({
+      resolve: async () => makeProvider(),
+      resolveTasks: async () => makeTasks(),
+    })
+    const client = await connect(server)
+    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain('zooid_handoff')
+
+    registerTaskTools(server, {
+      resolveTasks: async () => makeTasks(),
+      role: { is_task_assignee: false, can_start_task_threads: false, can_handoff: true },
+    })
+
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'zooid_handoff')
+    expect(tool?.description).toMatch(/only way to involve another agent/i)
+    const res = await client.callTool({
+      name: 'zooid_handoff',
+      arguments: { agent: 'product', prompt: 'write the spec' },
+    })
+    expect(JSON.parse((res.content as Array<{ text: string }>)[0].text)).toEqual({
+      status: 'refused',
+      reason: 'stub',
+    })
+  })
+
   it('forwards agent and prompt and returns the result verbatim', async () => {
     const seen: unknown[] = []
     const client = await connect(
