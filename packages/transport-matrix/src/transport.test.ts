@@ -1767,7 +1767,31 @@ describe('typed /interrupt command', () => {
   })
 
   it('ignores /interrupt authored by one of our agents', async () => {
-    const { transport, agents } = makeTransport()
+    const { transport, agents, finishPrompt } = makeTransport()
+    // Bind a live session to a thread root first. A top-level `/interrupt`
+    // resolves as its own (unbound) root, so asserting on it would pass even
+    // with the sender guard removed — a false negative. Posting the agent's
+    // command as a reply to the live root makes the guard the only thing
+    // preventing `interruptThread` from cancelling `sess-$agent-root`.
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$agent-root',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    agents.prompt.mockClear()
+
     await postTxn(transport.app, {
       events: [
         {
@@ -1776,12 +1800,18 @@ describe('typed /interrupt command', () => {
           origin_server_ts: Date.now(),
           room_id: room,
           sender: '@architect:example.com',
-          content: { msgtype: 'm.text', body: '/interrupt' },
+          content: {
+            msgtype: 'm.text',
+            body: '/interrupt',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$agent-root' },
+          },
         },
       ],
     })
     expect(agents.cancelSession).not.toHaveBeenCalled()
     expect(agents.prompt).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
   })
 
   it('accepts the /interrupt@<agent> form, case-insensitively', async () => {
