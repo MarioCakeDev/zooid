@@ -8,6 +8,7 @@ import type {
   TaskActions,
   TaskRole,
   TransportContextProvider,
+  HandoffOutput,
 } from '@zooid/core'
 
 const spawnIdIdx = process.argv.indexOf('--spawn-id')
@@ -85,6 +86,12 @@ const remoteTasks: TaskActions = {
       method: 'describeRole',
       params: {},
     }) as Promise<TaskRole>,
+  handoff: (_caller, input) =>
+    callDaemon(sockPath, {
+      spawnId,
+      method: 'handoff',
+      params: input as unknown as Record<string, unknown>,
+    }) as Promise<HandoffOutput>,
 }
 
 // Connect the MCP transport BEFORE the daemon role query. The old order

@@ -27,6 +27,12 @@ export interface AgentConfig {
   preset?: PresetName
   /** Optional model id, forwarded to the preset as `--model <id>` where supported. */
   model?: string
+  /**
+   * Optional ACP session mode id (adapter-defined, e.g. claude's
+   * `bypassPermissions`). Applied with `session/set_mode` to every new or
+   * loaded session; the session fails if the adapter doesn't offer it.
+   */
+  mode?: string
   /** Explicit command. Overrides whatever the preset would set. */
   command?: string
   /** Explicit args. Overrides whatever the preset would set. */
@@ -175,3 +181,21 @@ export interface ApprovalRequest {
 export type ApprovalDecision =
   | { decision: 'allow'; optionId: string }
   | { decision: 'cancel' }
+
+import type { ElicitationContentValue, ElicitationSchema } from '@agentclientprotocol/sdk'
+export type { ElicitationContentValue, ElicitationPropertySchema, ElicitationSchema } from '@agentclientprotocol/sdk'
+
+/** A session-scoped form elicitation, as Zooid accepts it. */
+export interface ElicitationRequest {
+  sessionId: string
+  toolCallId?: string
+  message: string
+  requestedSchema: ElicitationSchema
+  /** ACP `_meta`, preserved for inspection; never interpreted. */
+  meta?: Record<string, unknown>
+}
+
+export type ElicitationResponse =
+  | { action: 'accept'; content: Record<string, ElicitationContentValue> }
+  | { action: 'decline' }
+  | { action: 'cancel' }

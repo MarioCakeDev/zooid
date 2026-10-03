@@ -1,5 +1,41 @@
 # @zooid/core
 
+## 0.17.0
+
+### Minor Changes
+
+- 0198f5f: Agents can ask a question mid-turn through ACP form elicitation. Questions appear in their Matrix thread and answers return to the same tool call and turn. Upgrades the ACP SDK to 1.5.
+
+### Patch Changes
+
+- 78c796b: A `zooid_handoff` inside an open delegated task now wakes the callee even when the homeserver's sync delivers the handoff message before the send call returns. Before, the daemon reported `started` but sometimes dropped the message, so the callee never ran and the caller waited forever.
+- Updated dependencies [0198f5f]
+  - @zooid/acp-client@0.17.0
+
+## 0.16.1
+
+### Patch Changes
+
+- @zooid/acp-client@0.16.1
+
+## 0.16.0
+
+### Minor Changes
+
+- ac219ba: Idle ACP sessions are now closed and their adapter processes reclaimed, so a long-running daemon no longer grows by one resident agent process (~250 MB for Claude) per thread. Each agent takes `session_idle_timeout` (`"30s"`, `"15m"`, `"2h"`, or `0` to disable; default `10m`). The next message in a reclaimed thread resumes the same session with its context intact. Idle close only applies when the adapter supports `session/close` plus resume or load; otherwise sessions stay resident and the daemon warns once. `/clear` now closes the old session before starting fresh. `zooid start` logs one `[lifecycle]` line per close and recovery.
+- 1291a1b: Agents now hand off with the `zooid_handoff` tool instead of @mentioning each other. An agent's @mentions — in prose, relayed instructions, status reports or `zooid_send_message` — no longer wake other agents; human @mentions are unchanged. Handoff calls carry structured `dev.zooid.handoff` metadata keyed by Matrix ID, so a callee on another workstation now returns to its caller. **Upgrade every daemon in a workforce together:** an older daemon's agents still hand off by @mention, which newer daemons ignore. Update agent instructions that say "@mention the agent to hand off" to "call zooid_handoff".
+
+### Patch Changes
+
+- Updated dependencies [ac219ba]
+  - @zooid/acp-client@0.16.0
+
+## 0.15.0
+
+### Patch Changes
+
+- @zooid/acp-client@0.15.0
+
 ## 0.14.1
 
 ### Patch Changes
