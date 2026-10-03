@@ -82,7 +82,7 @@ import {
 import { classify } from '@zooid/acp-client'
 import { toMatrixHtml } from './markdown-to-matrix-html.js'
 import { PendingMediaStore, type PendingMediaItem } from './pending-media.js'
-import { MediaClient, MAX_INLINE_IMAGE_BYTES, INLINE_IMAGE_MIMES } from './media-client.js'
+import { MAX_INLINE_IMAGE_BYTES, INLINE_IMAGE_MIMES } from './media-client.js'
 import { writeAttachment } from './attachments.js'
 import { SyncLoop } from './sync-loop.js'
 import { NO_PENDING_INPUT } from '@zooid/core'
@@ -1807,6 +1807,9 @@ agents.onEvent = async (name, event: AgentEvent) => {
     roomId?: string
   }): Promise<{ agentUserIds: string[] }> {
     const { threadRoot, reason, roomId } = input
+    // Release any deferred return the interrupt supersedes, whichever entry
+    // point fired (custom `dev.zooid.interrupt` event or typed `/interrupt`).
+    returns.interrupt(threadRoot)
     const targets: Array<{ sessionId: string; agent: string }> = []
     for (const [sessionId, ctx] of sessions) {
       if (ctx.threadRoot === threadRoot) {
@@ -2036,7 +2039,6 @@ agents.onEvent = async (name, event: AgentEvent) => {
       const threadRoot =
         relates?.rel_type === 'm.thread' && relates.event_id ? relates.event_id : undefined
       if (threadRoot) {
-        returns.interrupt(threadRoot)
         await interruptThread({ threadRoot, reason: content.reason, roomId: evt.room_id })
         return
       }

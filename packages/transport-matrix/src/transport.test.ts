@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { createMatrixTransport, rebuildThreadState } from './transport.js'
+import { PendingReturns } from './pending-returns.js'
 
 function fakeRegistry() {
   let resolvePrompt: (() => void) | undefined
@@ -1746,6 +1747,54 @@ describe('typed /interrupt command', () => {
     expect(agents.cancelSession).toHaveBeenCalledWith('architect', 'sess-$cmd-root')
     // The command must not itself become a prompt.
     expect(agents.prompt).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('releases a held return on the typed path too, like the custom event', async () => {
+    // The typed `/interrupt` entry point must funnel through the same
+    // `interruptThread` as `dev.zooid.interrupt`; the consolidation puts
+    // `returns.interrupt` (release/flag the deferred handoff return) inside it.
+    const interruptSpy = vi.spyOn(PendingReturns.prototype, 'interrupt')
+    const { transport, agents, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd-root-2',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    interruptSpy.mockClear()
+
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd-int-2',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '/interrupt',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$cmd-root-2' },
+          },
+        },
+      ],
+    })
+    expect(agents.cancelSession).toHaveBeenCalledWith('architect', 'sess-$cmd-root-2')
+    expect(interruptSpy).toHaveBeenCalledWith('$cmd-root-2')
+    interruptSpy.mockRestore()
     finishPrompt()
     await settleTurn()
   })
