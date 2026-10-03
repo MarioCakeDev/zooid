@@ -74,11 +74,14 @@ const baseAgents = [
   },
 ]
 
-function makeTransport(drain?: {
-  drainQuietMs?: number
-  drainMaxMs?: number
-  mirrorEditIntervalMs?: number
-}) {
+function makeTransport(
+  drain?: {
+    drainQuietMs?: number
+    drainMaxMs?: number
+    mirrorEditIntervalMs?: number
+  },
+  bindings: typeof baseAgents = baseAgents,
+) {
   const { reg, finishPrompt } = fakeRegistry()
   const approvals = fakeApprovals()
   const client = fakeClient()
@@ -86,7 +89,7 @@ function makeTransport(drain?: {
     agents: reg as never,
     approvals: approvals as never,
     client: client as never,
-    bindings: baseAgents,
+    bindings,
     hsToken: 'hs-secret',
     botUserId: '@zooid:example.com',
     // Disable post-turn drain by default so settleTurn (microtasks) suffices.
@@ -1663,6 +1666,405 @@ describe('dev.zooid.interrupt handling', () => {
       'Bearer wrong-secret',
     )
     expect(r.status).toBe(403)
+  })
+})
+
+describe('typed /interrupt command', () => {
+  const room = '!r:example.com'
+  const taskBindings = [
+    {
+      name: 'supervisor',
+      userId: '@supervisor:example.com',
+      rooms: [{ alias: room }],
+      trigger: 'mention' as const,
+    },
+    {
+      name: 'worker',
+      userId: '@worker:example.com',
+      rooms: [{ alias: room }],
+      trigger: 'mention' as const,
+    },
+  ]
+
+  it('cancels the targeted session and never enqueues a turn', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd-root',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    agents.prompt.mockClear()
+
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd-int',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '/interrupt',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$cmd-root' },
+          },
+        },
+      ],
+    })
+    expect(agents.cancelSession).toHaveBeenCalledWith('architect', 'sess-$cmd-root')
+    // The command must not itself become a prompt.
+    expect(agents.prompt).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('closes an open task as cancelled when no live session handles it', async () => {
+    const { transport, agents, client, finishPrompt } = makeTransport(undefined, taskBindings)
+    const started = await transport.taskActions.startTasks(
+      { agentName: 'supervisor', channelId: room, threadRoot: '$parent', sessionKey: '$parent' },
+      { tasks: [{ agent: 'worker', prompt: 'audit' }] },
+    )
+    expect(started.results[0]).toMatchObject({ status: 'started' })
+    const taskRoot = started.results[0]!.thread_id!
+    // The assignment is never delivered, so the task has no live session.
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$cmd-task',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@alice:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '/interrupt',
+            'm.relates_to': { rel_type: 'm.thread', event_id: taskRoot },
+          },
+        },
+      ],
+    })
+    expect(agents.cancelSession).not.toHaveBeenCalled()
+    const finish = client.sendCustomEvent.mock.calls.find(
+      (call) => (call[0] as { eventType: string }).eventType === 'dev.zooid.thread_result',
+    )
+    expect(finish?.[0]).toMatchObject({
+      content: { agent: 'worker', status: 'cancelled', thread_id: taskRoot },
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('ignores /interrupt authored by one of our agents', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    // Bind a live session to a thread root first. A top-level `/interrupt`
+    // resolves as its own (unbound) root, so asserting on it would pass even
+    // with the sender guard removed — a false negative. Posting the agent's
+    // command as a reply to the live root makes the guard the only thing
+    // preventing `interruptThread` from cancelling `sess-$agent-root`.
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$agent-root',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    agents.prompt.mockClear()
+
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$agent-int',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@architect:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '/interrupt',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$agent-root' },
+          },
+        },
+      ],
+    })
+    expect(agents.cancelSession).not.toHaveBeenCalled()
+    expect(agents.prompt).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('accepts the /interrupt@<agent> form, case-insensitively', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$suffix-root',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$suffix-int',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '/INTERRUPT@architect',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$suffix-root' },
+          },
+        },
+      ],
+    })
+    expect(agents.cancelSession).toHaveBeenCalledWith('architect', 'sess-$suffix-root')
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('consumes a top-level /interrupt without cancelling or enqueuing a turn', async () => {
+    const { transport, agents } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$top-int',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: { msgtype: 'm.text', body: '/interrupt' },
+        },
+      ],
+    })
+    // Top-level, so the event resolves as its own root — nothing is bound to it.
+    expect(agents.cancelSession).not.toHaveBeenCalled()
+    expect(agents.prompt).not.toHaveBeenCalled()
+  })
+
+  it('leaves other slash strings and ordinary text as prose', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$prose-root',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '/status please',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.prompt).toHaveBeenCalledTimes(1)
+    expect(agents.cancelSession).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('posts a non-triggering confirmation notice after interrupting', async () => {
+    const { transport, client, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$notice-root',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    client.sendMessage.mockClear()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$notice-int',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: '/interrupt',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$notice-root' },
+          },
+        },
+      ],
+    })
+    const notice = client.sendMessage.mock.calls.find((call) =>
+      String((call[0] as { content: { body?: string } }).content.body).includes('interrupted by'),
+    )
+    expect(notice?.[0]).toMatchObject({
+      threadRoot: '$notice-root',
+      content: { msgtype: 'm.notice', 'dev.zooid.mirror': true },
+    })
+    finishPrompt()
+    await settleTurn()
+  })
+})
+
+describe('bare stop/stopp interrupt trigger', () => {
+  const room = '!r:example.com'
+
+  it.each(['stop', ' STOP ', 'Stopp'])(
+    'treats %j as an interrupt and never enqueues a turn',
+    async (body) => {
+      const { transport, agents, finishPrompt } = makeTransport()
+      const root = `$stop-${body.trim().toLowerCase()}-root`
+      await postTxn(transport.app, {
+        events: [
+          {
+            type: 'm.room.message',
+            event_id: root,
+            origin_server_ts: Date.now(),
+            room_id: room,
+            sender: '@user:example.com',
+            content: {
+              msgtype: 'm.text',
+              body: 'hi',
+              'm.mentions': { user_ids: ['@architect:example.com'] },
+            },
+          },
+        ],
+      })
+      await settleTurn()
+      agents.prompt.mockClear()
+
+      await postTxn(transport.app, {
+        events: [
+          {
+            type: 'm.room.message',
+            event_id: `${root}-int`,
+            origin_server_ts: Date.now(),
+            room_id: room,
+            sender: '@user:example.com',
+            content: {
+              msgtype: 'm.text',
+              body,
+              'm.relates_to': { rel_type: 'm.thread', event_id: root },
+            },
+          },
+        ],
+      })
+      expect(agents.cancelSession).toHaveBeenCalledWith('architect', `sess-${root}`)
+      // The command must not itself become a prompt.
+      expect(agents.prompt).not.toHaveBeenCalled()
+      finishPrompt()
+      await settleTurn()
+    },
+  )
+
+  it('ignores a bare stop authored by one of our agents', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    // Bind a live session to the root first so the sender guard is the only
+    // thing preventing `interruptThread` from cancelling it.
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$agent-stop-root',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'hi',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    agents.prompt.mockClear()
+
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$agent-stop',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@architect:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'stop',
+            'm.relates_to': { rel_type: 'm.thread', event_id: '$agent-stop-root' },
+          },
+        },
+      ],
+    })
+    expect(agents.cancelSession).not.toHaveBeenCalled()
+    expect(agents.prompt).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
+  })
+
+  it('leaves a sentence containing "stop" as prose', async () => {
+    const { transport, agents, finishPrompt } = makeTransport()
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: '$stop-prose',
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: '@user:example.com',
+          content: {
+            msgtype: 'm.text',
+            body: 'please stop the build',
+            'm.mentions': { user_ids: ['@architect:example.com'] },
+          },
+        },
+      ],
+    })
+    await settleTurn()
+    expect(agents.prompt).toHaveBeenCalledTimes(1)
+    expect(agents.cancelSession).not.toHaveBeenCalled()
+    finishPrompt()
+    await settleTurn()
   })
 })
 

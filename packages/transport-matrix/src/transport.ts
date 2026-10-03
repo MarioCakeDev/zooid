@@ -389,6 +389,28 @@ function inboundThreadRoot(evt: MatrixEvent): string | undefined {
   return r?.rel_type === 'm.thread' && r.event_id ? r.event_id : undefined
 }
 
+/**
+ * A stock Matrix client cannot send the `dev.zooid.interrupt` custom event, so
+ * the transport also accepts the command as prose: `/interrupt` or
+ * `/interrupt@<agent>` (the mention form clients append when the room has
+ * several agents), case-insensitively. Anchored so a sentence that merely
+ * mentions the word (`please /interrupt`) stays ordinary prose.
+ */
+const INTERRUPT_COMMAND_RE = /^\/interrupt(?:@[^\s]+)?$/i
+
+/**
+ * Alternative interrupt trigger: a bare "stop" or "stopp" (surrounding
+ * whitespace allowed), case-insensitively. Only the whole message counts, so
+ * ordinary prose that merely contains the word ("please stop the build")
+ * stays a prompt.
+ */
+const INTERRUPT_STOP_RE = /^\s*stopp?\s*$/i
+
+function isInterruptTrigger(body: unknown): boolean {
+  if (typeof body !== 'string') return false
+  return INTERRUPT_COMMAND_RE.test(body.trim()) || INTERRUPT_STOP_RE.test(body)
+}
+
 export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   const {
     agents,
@@ -1635,6 +1657,110 @@ agents.onEvent = async (name, event: AgentEvent) => {
     return rootId
   }
 
+  /**
+   * Cancel every live session bound to a thread and close its open task.
+   * Shared by the `dev.zooid.interrupt` custom event and the typed `/interrupt`
+   * command. A live session is cancelled through the agent registry and reports
+   * ACP's `cancelled` stop reason at its turn boundary; a restored/no-session
+   * task has no such boundary, so it is closed here. Returns the agent user ids
+   * that were targeted, for the confirmation notice.
+   */
+  async function interruptThread(input: {
+    threadRoot: string
+    reason?: string
+    roomId?: string
+  }): Promise<{ agentUserIds: string[] }> {
+    const { threadRoot, reason, roomId } = input
+    const targets: Array<{ sessionId: string; agent: string }> = []
+    for (const [sessionId, ctx] of sessions) {
+      if (ctx.threadRoot === threadRoot) {
+        targets.push({ sessionId, agent: ctx.agent.name })
+      }
+    }
+    for (const t of targets) {
+      console.log(
+        `[matrix] interrupt session=${t.sessionId} agent=${t.agent} thread=${threadRoot}` +
+          ` room=${roomId ?? '?'}` +
+          (reason ? ` reason=${reason}` : ''),
+      )
+      await agents.cancelSession(t.agent, t.sessionId).catch((err) => {
+        console.error(`[matrix] cancelSession(${t.agent}, ${t.sessionId}) failed:`, err)
+      })
+    }
+    // A live session will report ACP's `cancelled` stop reason and finish in
+    // its turn boundary, preserving any prose it already emitted. A
+    // restored/no-session task has no such boundary, so close it here.
+    const task = taskRegistry.taskForRoot(threadRoot)
+    if (task?.phase === 'open' && !targets.some((t) => t.agent === task.assignee)) {
+      const assignee = bindingFor(task.assignee)
+      if (assignee) {
+        await finishTask(task, {
+          agent: assignee,
+          completion: { agent: assignee.name, thread_id: threadRoot, status: 'cancelled' },
+        })
+      }
+    }
+    return {
+      agentUserIds: targets
+        .map((t) => bindingFor(t.agent)?.userId)
+        .filter((id): id is string => Boolean(id)),
+    }
+  }
+
+  /**
+   * Post the in-thread `/interrupt` acknowledgement. Sent as a mirror notice
+   * (`TURN_MIRROR_MARKER`) so `route()` never treats the confirmation itself as
+   * content and wakes an agent again.
+   */
+  async function postInterruptNotice(
+    roomId: string,
+    threadRoot: string,
+    asUserId: string | undefined,
+    actor: string | undefined,
+  ): Promise<void> {
+    const sender = asUserId ?? firstAgentUserIdForRoom(roomId)
+    if (!sender) return
+    const who = actor?.replace(/^@/, '').split(':')[0] || 'user'
+    await client
+      .sendMessage({
+        roomId,
+        asUserId: sender,
+        threadRoot,
+        content: {
+          msgtype: 'm.notice',
+          body: `⏹ interrupted by ${who}`,
+          [TURN_MIRROR_MARKER]: true,
+        },
+      })
+      .catch((e) => console.warn('[matrix] interrupt notice send failed:', e))
+  }
+
+  /**
+   * A human typing `/interrupt` (or a bare `stop` / `stopp`) in a stock client.
+   * Returns true when the message was consumed as the command (so it is not
+   * routed as a prompt). Our own agents are ignored — an agent turn that emits
+   * the command as prose must not cancel a peer (or itself) and ripple into a
+   * loop.
+   */
+  async function maybeHandleInterruptMessage(evt: MatrixEvent): Promise<boolean> {
+    if (!isInterruptTrigger(evt.content?.body)) return false
+    if (evt.sender && ourBotUserIds.has(evt.sender)) return true
+    if (!evt.room_id) return true
+    // A top-level `/interrupt` carries no thread relation; under the same
+    // agent-promotion rule a top-level message uses, its own event id is the
+    // root.
+    const threadRoot = inboundThreadRoot(evt) ?? evt.event_id
+    if (!threadRoot) return true
+    console.log(`[matrix] inbound /interrupt in ${evt.room_id} thread=${threadRoot}`)
+    const { agentUserIds } = await interruptThread({
+      threadRoot,
+      reason: 'user_initiated',
+      roomId: evt.room_id,
+    })
+    await postInterruptNotice(evt.room_id, threadRoot, agentUserIds[0], evt.sender)
+    return true
+  }
+
   async function handleInboundEvent(evt: MatrixEvent): Promise<void> {
     if (evt.event_id) {
       if (seenEventIds.has(evt.event_id)) {
@@ -1738,33 +1864,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
       const threadRoot =
         relates?.rel_type === 'm.thread' && relates.event_id ? relates.event_id : undefined
       if (threadRoot) {
-        const targets: Array<{ sessionId: string; agent: string }> = []
-        for (const [sessionId, ctx] of sessions) {
-          if (ctx.threadRoot === threadRoot) {
-            targets.push({ sessionId, agent: ctx.agent.name })
-          }
-        }
-        for (const t of targets) {
-          console.log(
-            `[matrix] interrupt session=${t.sessionId} agent=${t.agent} thread=${threadRoot}` +
-              (content.reason ? ` reason=${content.reason}` : ''),
-          )
-          await agents.cancelSession(t.agent, t.sessionId).catch((err) => {
-            console.error(`[matrix] cancelSession(${t.agent}, ${t.sessionId}) failed:`, err)
-          })
-        }
-        // A live session will report ACP's `cancelled` stop reason and finish
-        // in its turn boundary, preserving any prose it already emitted. A
-        // restored/no-session task has no such boundary, so close it here.
-        const task = taskRegistry.taskForRoot(threadRoot)
-        if (task?.phase === 'open' && !targets.some((t) => t.agent === task.assignee)) {
-          const assignee = bindingFor(task.assignee)
-          if (assignee)
-            await finishTask(task, {
-              agent: assignee,
-              completion: { agent: assignee.name, thread_id: threadRoot, status: 'cancelled' },
-            })
-        }
+        await interruptThread({ threadRoot, reason: content.reason, roomId: evt.room_id })
         return
       }
       // Legacy form: explicit session_id in content.
@@ -1815,6 +1915,12 @@ agents.onEvent = async (name, event: AgentEvent) => {
       return
     }
     if (evt.type === 'm.room.message' && (await maybeHandleApprovalMessage(evt))) {
+      return
+    }
+    // A human typing `/interrupt` (or a bare `stop` / `stopp`) is a command,
+    // not a prompt: cancel the thread's sessions/task and never enqueue a turn.
+    // Agents' own command prose is swallowed so it cannot loop.
+    if (evt.type === 'm.room.message' && (await maybeHandleInterruptMessage(evt))) {
       return
     }
     logInbound(evt)
