@@ -602,7 +602,7 @@ describe('turnGroupSummary', () => {
   it('appends the machine the last shell call ran on', () => {
     expect(
       turnGroupSummary('dev', [entry({ title: 'ssh_run-command', machine: 'coolify' })]),
-    ).toBe('🔧 dev: 1 tool — >_ ssh_run-command @coolify')
+    ).toBe('🔧 dev: 1 tool — >_ run-command @coolify')
     expect(turnGroupSummary('dev', [entry({ title: 'bash' })])).toBe(
       '🔧 dev: 1 tool — >_ bash @local',
     )
@@ -1058,7 +1058,7 @@ describe('toolEntryLine', () => {
 
   it('names the machine of a remote shell call, or local for a container one', () => {
     expect(toolEntryLine(entry({ title: 'ssh_run-command', machine: 'coolify' }))).toBe(
-      '• >_ ssh_run-command @coolify',
+      '• >_ run-command @coolify',
     )
     expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• >_ bash @local')
     expect(toolEntryLine(entry({ title: 'bash', machine: 'hass' }))).toBe('• >_ bash @hass')
@@ -1106,7 +1106,7 @@ describe('toolEntryLine', () => {
   it('keeps the title and trailing machine for a shell call that names no command', () => {
     expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• >_ bash @local')
     expect(toolEntryLine(entry({ title: 'ssh_run-command', machine: 'coolify' }))).toBe(
-      '• >_ ssh_run-command @coolify',
+      '• >_ run-command @coolify',
     )
   })
 
@@ -1156,7 +1156,18 @@ describe('family subjects', () => {
     ...over,
   })
 
-  it('names the GitHub subject from the repo, path, number, ref, head or query', () => {
+  it('strips the family prefix from the verb but keeps the specific one', () => {
+    expect(toolEntryLine(entry({ title: 'github_get_me' }))).toBe('• 🐙 get_me')
+    expect(toolEntryLine(entry({ title: 'coolify_get_infrastructure_overview' }))).toBe(
+      '• ☁️ get_infrastructure_overview',
+    )
+    expect(toolEntryLine(entry({ title: 'ha_GetDateTime' }))).toBe('• 🏠 GetDateTime')
+    expect(toolEntryLine(entry({ title: 'zooid-context_zooid_get_rooms' }))).toBe('• 💬 get_rooms')
+    expect(toolEntryLine(entry({ title: 'task' }))).toBe('• 🤖 task')
+    expect(toolEntryLine(entry({ title: 'grep' }))).toBe('• 🔍 grep')
+  })
+
+  it('names the GitHub subject from the repo, path, number, ref, head, query, team or user', () => {
     expect(
       toolEntryLine(
         entry({
@@ -1164,12 +1175,12 @@ describe('family subjects', () => {
           rawInput: { owner: 'MarioCakeDev', repo: 'zooid', path: 'src/x.ts', ref: 'main' },
         }),
       ),
-    ).toBe('• 🐙 github_get_file_contents MarioCakeDev/zooid:src/x.ts')
+    ).toBe('• 🐙 get_file_contents MarioCakeDev/zooid:src/x.ts')
     expect(
       toolEntryLine(
         entry({ title: 'github_issue_read', rawInput: { owner: 'o', repo: 'r', issue_number: 42 } }),
       ),
-    ).toBe('• 🐙 github_issue_read o/r#42')
+    ).toBe('• 🐙 issue_read o/r#42')
     expect(
       toolEntryLine(
         entry({
@@ -1177,7 +1188,7 @@ describe('family subjects', () => {
           rawInput: { owner: 'o', repo: 'r', sha: 'abcdef1234567890' },
         }),
       ),
-    ).toBe('• 🐙 github_get_commit o/r@abcdef123456')
+    ).toBe('• 🐙 get_commit o/r@abcdef123456')
     expect(
       toolEntryLine(
         entry({
@@ -1185,19 +1196,32 @@ describe('family subjects', () => {
           rawInput: { owner: 'o', repo: 'r', head: 'feat/x', base: 'main' },
         }),
       ),
-    ).toBe('• 🐙 github_create_pull_request o/r feat/x→main')
+    ).toBe('• 🐙 create_pull_request o/r feat/x→main')
     expect(
       toolEntryLine(entry({ title: 'github_search_code', rawInput: { query: 'websearch in:file' } })),
-    ).toBe('• 🐙 github_search_code websearch in:file')
+    ).toBe('• 🐙 search_code websearch in:file')
     expect(
       toolEntryLine(entry({ title: 'github_list_branches', rawInput: { owner: 'o', repo: 'r' } })),
-    ).toBe('• 🐙 github_list_branches o/r')
+    ).toBe('• 🐙 list_branches o/r')
+    expect(
+      toolEntryLine(
+        entry({ title: 'github_create_branch', rawInput: { owner: 'o', repo: 'r', branch: 'fix/x' } }),
+      ),
+    ).toBe('• 🐙 create_branch o/r@fix/x')
+    expect(
+      toolEntryLine(
+        entry({ title: 'github_get_team_members', rawInput: { org: 'acme', team_slug: 'infra' } }),
+      ),
+    ).toBe('• 🐙 get_team_members acme/infra')
+    expect(toolEntryLine(entry({ title: 'github_get_teams', rawInput: { user: 'zoe' } }))).toBe(
+      '• 🐙 get_teams zoe',
+    )
   })
 
   it('names the Coolify resource, or the control action when only that is present', () => {
     expect(
       toolEntryLine(entry({ title: 'coolify_deploy', rawInput: { tag_or_uuid: 'zooid' } })),
-    ).toBe('• ☁️ coolify_deploy zooid')
+    ).toBe('• ☁️ deploy zooid')
     expect(
       toolEntryLine(
         entry({
@@ -1205,7 +1229,15 @@ describe('family subjects', () => {
           rawInput: { resource: 'application', uuid: 'abc', container: 'web' },
         }),
       ),
-    ).toBe('• ☁️ coolify_logs abc/web')
+    ).toBe('• ☁️ logs abc/web')
+    expect(
+      toolEntryLine(
+        entry({
+          title: 'coolify_env_vars',
+          rawInput: { resource: 'application', action: 'list', uuid: 'abc', key: 'GITHUB_TOKEN' },
+        }),
+      ),
+    ).toBe('• ☁️ env_vars abc:GITHUB_TOKEN')
     expect(
       toolEntryLine(
         entry({
@@ -1213,46 +1245,92 @@ describe('family subjects', () => {
           rawInput: { action: 'restart', resource: 'application', uuid: 'abc' },
         }),
       ),
-    ).toBe('• ☁️ coolify_control abc')
+    ).toBe('• ☁️ control abc')
     expect(
       toolEntryLine(
         entry({ title: 'coolify_control', rawInput: { action: 'restart', resource: 'application' } }),
       ),
-    ).toBe('• ☁️ coolify_control restart application')
-  })
-
-  it('names the TrueNAS dataset or snapshot', () => {
+    ).toBe('• ☁️ control restart application')
     expect(
       toolEntryLine(
-        entry({ title: 'truenas_create_snapshot', rawInput: { dataset: 'tank/data' } }),
+        entry({
+          title: 'coolify_tags',
+          rawInput: { action: 'attach', uuid: 'abc', tag_names: ['prod', 'web'] },
+        }),
       ),
-    ).toBe('• 💾 truenas_create_snapshot tank/data')
-    expect(toolEntryLine(entry({ title: 'truenas_list_users' }))).toBe('• 💾 truenas_list_users')
+    ).toBe('• ☁️ tags prod,web')
+    expect(
+      toolEntryLine(
+        entry({ title: 'coolify_cloud_tokens', rawInput: { action: 'list', provider: 'hetzner' } }),
+      ),
+    ).toBe('• ☁️ cloud_tokens list hetzner')
+    expect(
+      toolEntryLine(
+        entry({
+          title: 'coolify_database_backups',
+          rawInput: { action: 'list_executions', database_uuid: 'db1' },
+        }),
+      ),
+    ).toBe('• ☁️ database_backups db1')
+  })
+
+  it('names the TrueNAS dataset, snapshot, pool or user', () => {
+    expect(
+      toolEntryLine(entry({ title: 'truenas_create_snapshot', rawInput: { dataset: 'tank/data' } })),
+    ).toBe('• 💾 create_snapshot tank/data')
+    expect(
+      toolEntryLine(entry({ title: 'truenas_get_pool_status', rawInput: { pool_name: 'tank' } })),
+    ).toBe('• 💾 get_pool_status tank')
+    expect(toolEntryLine(entry({ title: 'truenas_list_users' }))).toBe('• 💾 list_users')
   })
 
   it('names the Pocket ID entity', () => {
     expect(
       toolEntryLine(entry({ title: 'pocketid_oidc_client_update', rawInput: { id: '01JABCD' } })),
-    ).toBe('• 🔑 pocketid_oidc_client_update 01JABCD')
+    ).toBe('• 🔑 oidc_client_update 01JABCD')
     expect(
       toolEntryLine(entry({ title: 'pocketid_user_create', rawInput: { username: 'zoe' } })),
-    ).toBe('• 🔑 pocketid_user_create zoe')
+    ).toBe('• 🔑 user_create zoe')
+    expect(
+      toolEntryLine(
+        entry({ title: 'pocketid_user_group_update_allowed_clients', rawInput: { id: 'g1' } }),
+      ),
+    ).toBe('• 🔑 user_group_update_allowed_clients g1')
+    expect(
+      toolEntryLine(
+        entry({ title: 'pocketid_oidc_client_preview_claims', rawInput: { id: 'c1', userId: 'u1' } }),
+      ),
+    ).toBe('• 🔑 oidc_client_preview_claims c1')
+    expect(toolEntryLine(entry({ title: 'pocketid_app_image_update_logo' }))).toBe(
+      '• 🔑 app_image_update_logo',
+    )
   })
 
-  it('names the Home Assistant entity, area or list item', () => {
-    expect(
-      toolEntryLine(entry({ title: 'ha_HassTurnOn', rawInput: { name: 'Küchenlicht' } })),
-    ).toBe('• 🏠 ha_HassTurnOn Küchenlicht')
+  it('names the Home Assistant entity, area, list item or reported observation', () => {
+    expect(toolEntryLine(entry({ title: 'ha_HassTurnOn', rawInput: { name: 'Küchenlicht' } }))).toBe(
+      '• 🏠 HassTurnOn Küchenlicht',
+    )
     expect(
       toolEntryLine(
         entry({ title: 'ha_HassLightSet', rawInput: { area: 'Wohnzimmer', brightness: 40 } }),
       ),
-    ).toBe('• 🏠 ha_HassLightSet Wohnzimmer')
+    ).toBe('• 🏠 HassLightSet Wohnzimmer')
     expect(
       toolEntryLine(
         entry({ title: 'ha_HassListAddItem', rawInput: { name: 'Einkaufsliste', item: 'Milch' } }),
       ),
-    ).toBe('• 🏠 ha_HassListAddItem Einkaufsliste')
+    ).toBe('• 🏠 HassListAddItem Einkaufsliste')
+    expect(
+      toolEntryLine(
+        entry({
+          title: 'ha_log_health_entry',
+          rawInput: { kategorie: 'medikament', beschreibung: 'Ibuprofen', dosis: '400 mg' },
+        }),
+      ),
+    ).toBe('• 🏠 log_health_entry Ibuprofen')
+    expect(
+      toolEntryLine(entry({ title: 'ha_todo_get_items', rawInput: { todo_list: 'Einkaufsliste' } })),
+    ).toBe('• 🏠 todo_get_items Einkaufsliste')
   })
 
   it('names the zooid room or thread', () => {
@@ -1263,10 +1341,15 @@ describe('family subjects', () => {
           rawInput: { room: '!r:mariocake.de', text: 'hi' },
         }),
       ),
-    ).toBe('• 💬 zooid-context_zooid_send_message !r:mariocake.de')
+    ).toBe('• 💬 send_message !r:mariocake.de')
+    expect(
+      toolEntryLine(
+        entry({ title: 'zooid-context_zooid_get_thread_history', rawInput: { thread_id: '$e' } }),
+      ),
+    ).toBe('• 💬 get_thread_history $e')
   })
 
-  it('names the ssh path or session when no command is present', () => {
+  it('names the ssh path, signal+pid or session when no command is present', () => {
     expect(
       toolEntryLine(
         entry({
@@ -1275,7 +1358,19 @@ describe('family subjects', () => {
           machine: 'coolify',
         }),
       ),
-    ).toBe('• >_ ssh_sftp-list /etc/nginx @coolify')
+    ).toBe('• >_ sftp-list /etc/nginx @coolify')
+    expect(
+      toolEntryLine(
+        entry({
+          title: 'ssh_signal-process',
+          rawInput: { pid: 4242, signal: 'TERM' },
+          machine: 'coolify',
+        }),
+      ),
+    ).toBe('• >_ signal-process TERM 4242 @coolify')
+    expect(
+      toolEntryLine(entry({ title: 'ssh_list-sessions', machine: 'coolify' })),
+    ).toBe('• >_ list-sessions @coolify')
   })
 
   it('shows a grep/glob pattern, a todo count, a task description and a skill name', () => {
@@ -1288,17 +1383,17 @@ describe('family subjects', () => {
     expect(toolEntryLine(entry({ title: 'todowrite', rawInput: { todos: [{}, {}, {}] } }))).toBe(
       '• 📝 3 todos',
     )
-    expect(toolEntryLine(entry({ title: 'task', rawInput: { description: 'audit the fleet' } }))).toBe(
-      '• 🤖 task audit the fleet',
-    )
+    expect(
+      toolEntryLine(entry({ title: 'task', rawInput: { description: 'audit the fleet' } })),
+    ).toBe('• 🤖 task audit the fleet')
     expect(toolEntryLine(entry({ title: 'skill', rawInput: { name: 'research' } }))).toBe(
       '• 🤖 skill research',
     )
   })
 
-  it('falls back to the bare title when a family rule finds nothing to name', () => {
-    expect(toolEntryLine(entry({ title: 'coolify_find_issues' }))).toBe('• ☁️ coolify_find_issues')
-    expect(toolEntryLine(entry({ title: 'github_get_me' }))).toBe('• 🐙 github_get_me')
+  it('falls back to the family-stripped verb when a rule finds nothing to name', () => {
+    expect(toolEntryLine(entry({ title: 'coolify_find_issues' }))).toBe('• ☁️ find_issues')
+    expect(toolEntryLine(entry({ title: 'github_get_me' }))).toBe('• 🐙 get_me')
     expect(toolEntryLine(entry({ title: 'grep' }))).toBe('• 🔍 grep')
   })
 })

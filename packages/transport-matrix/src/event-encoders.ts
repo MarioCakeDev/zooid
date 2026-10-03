@@ -554,21 +554,45 @@ function githubSubject(raw: Record<string, unknown>): string | undefined {
   }
   const branch = pickArg(raw, 'branch')
   if (repo) return branch ? `${repo}@${branch}` : repo
-  return branch ?? pickArg(raw, 'name')
+  if (branch) return branch
+  const org = pickArg(raw, 'org')
+  const team = pickArg(raw, 'team_slug')
+  if (org && team) return `${org}/${team}`
+  if (org) return org
+  return pickArg(raw, 'user', 'name', 'comment_id')
 }
 
-/** A Coolify call: the resource UUID (with the sub-container when logs name one), else id/query/name/key, else the control action. */
+/** A Coolify call: the resource UUID (with the sub-container when logs name one, or the tag names for a tag call), else id/query/name/key, else the action plus its resource/provider. */
 function coolifySubject(raw: Record<string, unknown>): string | undefined {
-  const uuid = pickArg(raw, 'tag_or_uuid', 'uuid')
+  const tags = Array.isArray(raw.tag_names)
+    ? raw.tag_names.filter((t): t is string => typeof t === 'string' && t.length > 0)
+    : []
+  if (tags.length > 0) return tags.join(',')
+  const uuid = pickArg(
+    raw,
+    'tag_or_uuid',
+    'uuid',
+    'database_uuid',
+    'backup_uuid',
+    'execution_uuid',
+    'storage_uuid',
+    'task_uuid',
+    'tag_uuid',
+    'application_uuid',
+    'project_uuid',
+  )
   if (uuid) {
     const container = pickArg(raw, 'container')
-    return container ? `${uuid}/${container}` : uuid
+    if (container) return `${uuid}/${container}`
+    const key = pickArg(raw, 'key')
+    if (key) return `${uuid}:${key}`
+    return uuid
   }
-  const direct = pickArg(raw, 'id', 'query', 'name', 'key')
+  const direct = pickArg(raw, 'id', 'query', 'name', 'key', 'mount_path', 'command')
   if (direct) return direct
   const action = pickArg(raw, 'action')
-  const resource = pickArg(raw, 'resource')
-  return action ? [action, resource].filter(Boolean).join(' ') : undefined
+  const detail = pickArg(raw, 'resource') ?? pickArg(raw, 'provider')
+  return action ? [action, detail].filter(Boolean).join(' ') : undefined
 }
 
 /** A TrueNAS call: the dataset/snapshot it names, else user, share, pool or id. */
@@ -582,6 +606,7 @@ function truenasSubject(raw: Record<string, unknown>): string | undefined {
     'share_name',
     'path',
     'pool',
+    'pool_name',
     'target',
     'id',
   )
@@ -600,12 +625,28 @@ function pocketidSubject(raw: Record<string, unknown>): string | undefined {
     'search',
     'userGroupId',
     'oidcClientId',
+    'userId',
+    'clientId',
+    'endpoint',
+    'appName',
   )
 }
 
-/** A Home Assistant call: the entity name, else area, list item, entity_id, floor, message or media query. */
+/** A Home Assistant call: the entity name, else area, list item, entity_id, floor, message, media query, reported health observation or todo list. */
 function haSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(raw, 'name', 'area', 'item', 'entity_id', 'floor', 'message', 'search_query')
+  return pickArg(
+    raw,
+    'name',
+    'area',
+    'item',
+    'entity_id',
+    'floor',
+    'message',
+    'search_query',
+    'beschreibung',
+    'todo_list',
+    'kategorie',
+  )
 }
 
 /** A zooid/Matrix call: the room or thread it targets, else a name or the message text. */
@@ -613,9 +654,14 @@ function zooidSubject(raw: Record<string, unknown>): string | undefined {
   return pickArg(raw, 'room', 'thread_id', 'name', 'text')
 }
 
-/** An ssh-mcp call with no command: the path, session name or pid it acts on. */
+/** An ssh-mcp call with no command: the signal+pid, path, session name or profile it acts on. */
 function sshSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(raw, 'remotePath', 'localPath', 'path', 'name', 'pid')
+  const pid = pickArg(raw, 'pid')
+  if (pid) {
+    const signal = pickArg(raw, 'signal')
+    return signal ? `${signal} ${pid}` : pid
+  }
+  return pickArg(raw, 'remotePath', 'localPath', 'path', 'name')
 }
 
 /** A grep/glob pattern. */
@@ -641,11 +687,37 @@ function skillSubject(raw: Record<string, unknown>): string | undefined {
 }
 
 /**
+ * Family prefixes stripped from a tool title before its verb is shown, longest
+ * first so `zooid-context_zooid_` wins over the shorter forms. The icon already
+ * names the family, so `github_get_file_contents` reads as `get_file_contents`.
+ */
+const TOOL_NAME_FAMILIES: readonly string[] = [
+  'zooid-context_zooid_',
+  'zooid-context_',
+  'github_',
+  'coolify_',
+  'truenas_',
+  'pocketid_',
+  'ssh_',
+  'ha_',
+]
+
+/** A tool title with its family prefix removed (`github_deploy` → `deploy`). */
+function toolShortName(title: string): string {
+  const lower = title.toLowerCase()
+  for (const prefix of TOOL_NAME_FAMILIES) {
+    if (lower.startsWith(prefix)) return title.slice(prefix.length)
+  }
+  return title
+}
+
+/**
  * Per-family subject extraction, keyed by the tool title's first word. `verb`
- * keeps the full tool title before the extracted argument: the github/coolify/…
- * icons cover dozens of verbs, so `deploy <uuid>` must still say `deploy`. The
- * search/todo rules show the extracted fact alone, because `🔍 <pattern>` and
- * `📝 3 todos` already read as the action.
+ * keeps the tool's specific verb before the extracted argument (family prefix
+ * stripped): the github/coolify/… icons cover dozens of verbs, so
+ * `deploy <uuid>` must still say `deploy`. The search/todo rules show the
+ * extracted fact alone, because `🔍 <pattern>` and `📝 3 todos` already read as
+ * the action.
  */
 interface ToolSubjectRule {
   heads: readonly string[]
@@ -675,8 +747,9 @@ function toolRuleSubject(entry: TurnToolEntry): string | undefined {
   if (!rule) return undefined
   const raw = rawObject(entry.rawInput)
   const detail = raw ? rule.pick(raw) : undefined
-  if (!detail) return undefined
-  return rule.verb ? `${entry.title} ${detail}` : detail
+  if (!rule.verb) return detail
+  const verb = toolShortName(entry.title)
+  return detail ? `${verb} ${detail}` : verb
 }
 
 /**
