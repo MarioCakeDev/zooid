@@ -128,6 +128,10 @@ Modules:
   on send failures so callers can tell actionable errors from transient ones.
 - `packages/transport-matrix/src/transport.ts` — `resolveThreadRoot` relation-chain
   walk (never root a thread on an event that itself carries a relation).
+- `.github/workflows/` — upstream's CI workflow updates are **intentionally not
+  carried**. The fork's CI is external (built/deployed via Coolify), and pulling
+  upstream `.github/workflows/*` would require a `workflow`-scoped token to push.
+  Revisit when upstreaming. Re-apply the same exclusion on future upstream merges.
 
 ## 6. Reconciliation note — our @mention handoff was removed
 
