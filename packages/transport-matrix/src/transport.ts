@@ -2191,8 +2191,14 @@ agents.onEvent = async (name, event: AgentEvent) => {
       taskRegistry.adopt(startField.attempt_id, evt.event_id)
     if (evt.content?.[THREAD_RESULT_FIELD] !== undefined) return
     const taskRec = promotedRoot ? taskRegistry.taskForRoot(promotedRoot) : undefined
+    // Only an *open* task makes this a task thread. A closed task's root stays
+    // in the registry (trust checks), but its thread must route — and return —
+    // like an ordinary one ([[ZOD092]] / #100). Treating it as a task here
+    // suppressed both the call edge's `returns.open` and `isReturnRoute`, so an
+    // in-thread handoff from a closed task's thread woke its callee but never
+    // returned.
     const taskCtx =
-      taskRec && taskRec.phase !== 'reserved'
+      taskRec && taskRec.phase === 'open'
         ? {
             assignee: taskRec.assignee,
             isRoot: !inboundRel && evt.event_id === taskRec.threadRoot,

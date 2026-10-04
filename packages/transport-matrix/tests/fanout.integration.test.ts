@@ -248,6 +248,62 @@ describe('thread fan-out', () => {
     expect(prompts.filter((p) => p.name === 'coder')).toHaveLength(1)
   })
 
+  it('a handoff from a closed task thread returns to the caller at the callee turn end', async () => {
+    const { transport, sent, prompts, deliver } = setup()
+    await transport.taskActions.startTasks(
+      { agentName: 'supervisor', channelId: roomId, threadRoot: '$parent', sessionKey: '$parent' },
+      { tasks: [{ agent: 'worker', prompt: 'audit' }] },
+    )
+    const root = sent[0]!
+    await deliver({
+      type: root.type,
+      event_id: root.event_id,
+      sender: '@supervisor:hs',
+      content: root.input.content as Record<string, unknown>,
+    })
+    await settle()
+    // The worker's turn ended, so its task is closed; the thread now routes
+    // like an ordinary one ([[ZOD092]] / #100), and its returns must too.
+    expect(sent.some((e) => e.type === 'dev.zooid.thread_result')).toBe(true)
+
+    // Woken later in the same thread, the worker hands off to coder.
+    const out = await transport.taskActions.handoff(
+      { agentName: 'worker', channelId: roomId, threadRoot: root.event_id, sessionKey: root.event_id },
+      { agent: 'coder', prompt: 'open the PR' },
+    )
+    expect(out).toMatchObject({ status: 'started' })
+    const call = sent.at(-1)!
+    const thread = { rel_type: 'm.thread', event_id: root.event_id }
+    await deliver({
+      type: 'm.room.message',
+      event_id: call.event_id,
+      sender: '@worker:hs',
+      content: { ...(call.input.content as Record<string, unknown>), 'm.relates_to': thread },
+    })
+    await settle()
+    expect(prompts.filter((p) => p.name === 'coder')).toHaveLength(1)
+
+    // The coder's turn: prose, then its boundary. The PONG is held, and the
+    // turn end releases it as a single `[handoff return]` to the worker.
+    await deliver({
+      type: 'm.room.message',
+      event_id: '$coder-reply',
+      sender: '@coder:hs',
+      content: { msgtype: 'm.notice', body: 'PR opened', 'm.relates_to': thread },
+    })
+    await deliver({
+      type: 'dev.zooid.turn.end',
+      event_id: '$coder-end',
+      sender: '@coder:hs',
+      content: { agent_id: 'coder', 'm.relates_to': thread },
+    })
+    await settle()
+
+    const returns = prompts.filter((p) => p.name === 'worker' && p.text.startsWith('[handoff return]'))
+    expect(returns).toHaveLength(1)
+    expect(returns[0]!.text).toContain('PR opened')
+  })
+
   it('a handoff inside an open task wakes the callee when its echo beats the send response', async () => {
     const { transport, sent, prompts, client, deliver, registry } = setup()
     // Hold the worker's turn open so its task stays open during the handoff.
