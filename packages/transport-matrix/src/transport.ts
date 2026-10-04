@@ -12,6 +12,8 @@ import {
 import {
   ElicitationEventType,
   parseElicitationResponse,
+  toElicitationNoticeBody,
+  toElicitationOutcomeBody,
   toElicitationRejectedBody,
   toElicitationRequestBody,
   toElicitationResolvedBody,
@@ -79,6 +81,13 @@ import {
   reactionCommand,
   type ApprovalCommand,
 } from './approval-commands.js'
+import {
+  contentFromAnswer,
+  isElicitationRequestId,
+  parseElicitationCommand,
+  reactionIndex,
+  singleEnumField,
+} from './elicitation-commands.js'
 import { classify } from '@zooid/acp-client'
 import { toMatrixHtml } from './markdown-to-matrix-html.js'
 import { PendingMediaStore, type PendingMediaItem } from './pending-media.js'
@@ -512,6 +521,38 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     for (const [eventId, id] of approvalByEvent) {
       if (id === approvalId) approvalByEvent.delete(eventId)
     }
+  }
+
+  // ── Element-compatible elicitation mirror + answer capture ──────────────
+  // A human answers an ACP form from a stock Matrix client with a reply command
+  // or a number-keycap reaction. `elicitationByEvent` maps the request's custom
+  // event and its mirrored notice to the request; `elicitationMeta` holds where
+  // the notice lives and what it says, so a command can be scope-checked and
+  // the notice edited to show its outcome.
+  interface ElicitationMeta {
+    roomId: string
+    threadRoot: string
+    asUserId: string
+    /** Original notice body, so an outcome/rejection edit keeps the question. */
+    baseBody: string
+    noticeEventId?: string
+    /** Set only for a single-enum form, enabling number-keycap answers. */
+    reaction?: { field: string; choices: string[] }
+  }
+  const elicitationByEvent = new Map<string, string>()
+  const elicitationMeta = new Map<string, ElicitationMeta>()
+
+  function forgetElicitation(requestId: string): void {
+    elicitationMeta.delete(requestId)
+    for (const [eventId, id] of elicitationByEvent) {
+      if (id === requestId) elicitationByEvent.delete(eventId)
+    }
+  }
+
+  function formatElicitationErrors(errors: Record<string, string>): string {
+    return Object.entries(errors)
+      .map(([key, msg]) => `${key}: ${msg}`)
+      .join('; ')
   }
 
   /**
@@ -1517,6 +1558,24 @@ agents.onEvent = async (name, event: AgentEvent) => {
             txnId: `elicit-req-${record.requestId}`,
           })
           elicitations.attachRequestEvent(record.requestId, event_id)
+          // Additive Element mirror: the custom event above is unchanged; the
+          // notice makes the form answerable from a stock client.
+          const baseBody = toElicitationNoticeBody(record, ctx.agent.name)
+          const single = singleEnumField(record.requestedSchema)
+          const meta: ElicitationMeta = {
+            roomId: ctx.roomId,
+            threadRoot: ctx.threadRoot,
+            asUserId: ctx.agent.userId,
+            baseBody,
+            ...(single ? { reaction: { field: single.name, choices: single.choices } } : {}),
+          }
+          elicitationMeta.set(record.requestId, meta)
+          elicitationByEvent.set(event_id, record.requestId)
+          const noticeEventId = await postElicitationNotice(ctx, baseBody)
+          if (noticeEventId) {
+            meta.noticeEventId = noticeEventId
+            elicitationByEvent.set(noticeEventId, record.requestId)
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           console.error(`[matrix:${name}] could not publish elicitation ${record.requestId}: ${msg}`)
@@ -1545,6 +1604,11 @@ agents.onEvent = async (name, event: AgentEvent) => {
           content: toElicitationResolvedBody({ ...res, record: current }),
           txnId: `elicit-res-${record.requestId}`,
         }).catch((err) => console.error(`[matrix] elicitation_resolved ${record.requestId} not sent:`, err))
+        // Show the outcome on the Element notice, then drop the correlation.
+        if (elicitationMeta.has(record.requestId)) {
+          await editElicitationNotice(record.requestId, toElicitationOutcomeBody(res))
+        }
+        forgetElicitation(record.requestId)
         // Answered mid-turn: show the agent working again right away.
         if (
           elicitations.countForSession(record.sessionId) === 0 &&
@@ -1630,6 +1694,209 @@ agents.onEvent = async (name, event: AgentEvent) => {
     if (!elicitations.settle(record.requestId, response, { respondedBy: sender, responseEventId: evt.event_id })) {
       sendElicitationRejected(record, evt.event_id, 'stale')
     }
+  }
+
+  /** Post the mirror-marked Element notice for an elicitation request. */
+  async function postElicitationNotice(
+    ctx: { roomId: string; threadRoot: string; agent: AgentBinding },
+    body: string,
+  ): Promise<string | undefined> {
+    try {
+      const { event_id } = await client.sendMessage({
+        roomId: ctx.roomId,
+        asUserId: ctx.agent.userId,
+        threadRoot: ctx.threadRoot,
+        // Mirror-marked so the router never treats the quoted question as a
+        // fresh mention and the Zooid client can hide it.
+        content: { msgtype: 'm.notice', body, [TURN_MIRROR_MARKER]: true },
+      })
+      return event_id
+    } catch (err) {
+      console.warn('[matrix] elicitation notice send failed:', err)
+      return undefined
+    }
+  }
+
+  /** Best-effort plain notice (unknown/out-of-scope command feedback). */
+  async function postElicitationInfo(
+    roomId: string | undefined,
+    threadRoot: string | undefined,
+    body: string,
+  ): Promise<void> {
+    if (!roomId) return
+    const sender = firstAgentUserIdForRoom(roomId)
+    if (!sender) return
+    await client
+      .sendMessage({
+        roomId,
+        asUserId: sender,
+        ...(threadRoot ? { threadRoot } : {}),
+        content: { msgtype: 'm.notice', body, [TURN_MIRROR_MARKER]: true },
+      })
+      .catch((e) => console.warn('[matrix] elicitation info notice send failed:', e))
+  }
+
+  /** Edit the request's notice, appending a line below the original question. */
+  async function editElicitationNotice(requestId: string, suffix: string): Promise<void> {
+    const meta = elicitationMeta.get(requestId)
+    if (!meta?.noticeEventId) return
+    try {
+      await client.sendMessage({
+        roomId: meta.roomId,
+        asUserId: meta.asUserId,
+        content: turnMirrorEditContent(
+          meta.noticeEventId,
+          `${meta.baseBody}\n\n${suffix}`,
+          meta.threadRoot,
+        ),
+      })
+    } catch (err) {
+      console.warn('[matrix] elicitation notice edit failed:', err)
+    }
+  }
+
+  /**
+   * Shared scope/membership guard for a stock-client answer, mirroring the
+   * custom-event path in `handleElicitationResponse`: agents never answer, the
+   * sender must be joined, and the request must live in this room.
+   */
+  async function guardElicitationAnswer(
+    evt: MatrixEvent,
+    requestId: string,
+  ): Promise<{ record: PendingElicitation; agent: AgentBinding; meta: ElicitationMeta } | null> {
+    if (!elicitations) return null
+    const sender = evt.sender
+    if (!sender) return null
+    if (ourBotUserIds.has(sender) || workforce.agentIds.has(sender)) {
+      console.warn(`[matrix] ignoring elicitation answer from agent ${sender}`)
+      return null
+    }
+    await elicitationPublishes.get(requestId)
+    const record = elicitations.get(requestId)
+    const meta = elicitationMeta.get(requestId)
+    if (!record || !meta) return null
+    if (record.roomId !== evt.room_id || meta.roomId !== evt.room_id) return null
+    const agent = bindingFor(record.agentName)
+    if (!agent) return null
+    try {
+      const { joined } = await client.getJoinedMembers(record.roomId, agent.userId)
+      if (!joined || !Object.hasOwn(joined, sender)) {
+        console.warn(`[matrix] elicitation answer from non-member ${sender}`)
+        return null
+      }
+    } catch (err) {
+      console.warn(`[matrix] membership check failed for ${sender}; answer ignored:`, err)
+      return null
+    }
+    return { record, agent, meta }
+  }
+
+  /**
+   * Settle a validated answer. `get()` and `settle()` run in the same
+   * synchronous tick, so two Element answers cannot both win — the loser sees
+   * `stale` and the question is left untouched.
+   */
+  async function finishElicitation(
+    evt: MatrixEvent,
+    requestId: string,
+    record: PendingElicitation,
+    response: ElicitationResponse,
+  ): Promise<void> {
+    if (!elicitations || !evt.event_id) return
+    if (elicitations.get(requestId)?.state !== 'pending') {
+      sendElicitationRejected(record, evt.event_id, 'stale')
+      await editElicitationNotice(requestId, 'This question is no longer open.')
+      return
+    }
+    if (!elicitations.settle(requestId, response, { respondedBy: evt.sender, responseEventId: evt.event_id })) {
+      sendElicitationRejected(record, evt.event_id, 'stale')
+      await editElicitationNotice(requestId, 'This question is no longer open.')
+    }
+  }
+
+  /** Returns true when the reaction was a number-keycap answer we handled. */
+  async function handleElicitationReaction(evt: MatrixEvent): Promise<boolean> {
+    if (!elicitations) return false
+    const rel = evt.content?.['m.relates_to'] as
+      | { rel_type?: string; event_id?: string; key?: string }
+      | undefined
+    if (!rel || rel.rel_type !== 'm.annotation' || !rel.event_id) return false
+    const index = reactionIndex(evt.content?.key ?? rel.key)
+    if (index === undefined) return false
+    if (evt.sender && (ourBotUserIds.has(evt.sender) || workforce.agentIds.has(evt.sender))) return false
+    const requestId = elicitationByEvent.get(rel.event_id)
+    if (!requestId) return false
+    const meta = elicitationMeta.get(requestId)
+    if (!meta?.reaction || meta.roomId !== evt.room_id || !evt.event_id) return false
+    const { field, choices } = meta.reaction
+    const choice = choices[index]
+    if (choice === undefined) return false
+    const guarded = await guardElicitationAnswer(evt, requestId)
+    if (!guarded) return true
+    const v = validateElicitationContent(guarded.record.requestedSchema, { [field]: choice })
+    if (!v.ok) {
+      sendElicitationRejected(guarded.record, evt.event_id, 'invalid', v.errors)
+      await editElicitationNotice(requestId, `⚠️ ${formatElicitationErrors(v.errors)}`)
+      return true
+    }
+    await finishElicitation(evt, requestId, guarded.record, { action: 'accept', content: v.content })
+    return true
+  }
+
+  /** Returns true when the message was an elicitation answer/decision command. */
+  async function maybeHandleElicitationMessage(evt: MatrixEvent): Promise<boolean> {
+    if (!elicitations || !evt.event_id) return false
+    const body = typeof evt.content?.body === 'string' ? evt.content.body : ''
+    const parsed = parseElicitationCommand(body)
+    if (!parsed) return false
+    // Only an id-shaped token is a command; prose like "answer the question"
+    // routes normally instead of being consumed.
+    if (!isElicitationRequestId(parsed.requestId)) return false
+    if (evt.sender && (ourBotUserIds.has(evt.sender) || workforce.agentIds.has(evt.sender))) return false
+
+    await elicitationPublishes.get(parsed.requestId)
+    const record = elicitations.get(parsed.requestId)
+    const meta = elicitationMeta.get(parsed.requestId)
+    const threadRoot = inboundThreadRoot(evt)
+    if (!record) {
+      await postElicitationInfo(evt.room_id, threadRoot, `No open question \`${parsed.requestId}\`.`)
+      return true
+    }
+    if (!meta) {
+      // A terminal record whose correlation was already cleaned up: a late
+      // answer. Tell the sender it is stale rather than silently dropping it.
+      sendElicitationRejected(record, evt.event_id, 'stale')
+      return true
+    }
+    if (meta.roomId !== evt.room_id || (threadRoot && meta.threadRoot !== threadRoot)) {
+      await postElicitationInfo(
+        evt.room_id,
+        threadRoot,
+        `Question \`${parsed.requestId}\` is not open in this thread.`,
+      )
+      return true
+    }
+    const guarded = await guardElicitationAnswer(evt, parsed.requestId)
+    if (!guarded) return true
+
+    if (parsed.action !== 'answer') {
+      await finishElicitation(evt, parsed.requestId, guarded.record, { action: parsed.action })
+      return true
+    }
+    const answer = contentFromAnswer(guarded.record.requestedSchema, parsed.value ?? '')
+    if (!answer.ok) {
+      sendElicitationRejected(guarded.record, evt.event_id, 'invalid', { _: answer.error })
+      await editElicitationNotice(parsed.requestId, `⚠️ ${answer.error}`)
+      return true
+    }
+    const v = validateElicitationContent(guarded.record.requestedSchema, answer.content)
+    if (!v.ok) {
+      sendElicitationRejected(guarded.record, evt.event_id, 'invalid', v.errors)
+      await editElicitationNotice(parsed.requestId, `⚠️ ${formatElicitationErrors(v.errors)}`)
+      return true
+    }
+    await finishElicitation(evt, parsed.requestId, guarded.record, { action: 'accept', content: v.content })
+    return true
   }
 
   agents.onApprovalRequest = async (name, req) => {
@@ -2103,6 +2370,15 @@ agents.onEvent = async (name, event: AgentEvent) => {
       return
     }
     if (evt.type === 'm.room.message' && (await maybeHandleApprovalMessage(evt))) {
+      return
+    }
+    // Interactive elicitation from a stock client: a number-keycap reaction on
+    // the question's notice, or an `answer/decline/cancel <id>` reply. Neither
+    // is a prompt, so they never reach the router.
+    if (evt.type === 'm.reaction' && (await handleElicitationReaction(evt))) {
+      return
+    }
+    if (evt.type === 'm.room.message' && (await maybeHandleElicitationMessage(evt))) {
       return
     }
     // A human typing `/interrupt` (or a bare `stop` / `stopp`) is a command,

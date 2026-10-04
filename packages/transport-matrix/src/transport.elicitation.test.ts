@@ -430,3 +430,223 @@ describe('response races', () => {
     s.finishTurn()
   })
 })
+
+describe('Element mirror + answer capture', () => {
+  const noticeCall = (s: Setup) =>
+    s.client.sendMessage.mock.calls
+      .map((c) => c[0] as { role?: string; content: { body: string } })
+      .find((i) => i.content.body.startsWith('❓'))
+
+  const answerMsg = (requestId: string, value: string, sender = ALICE, root = '$root') => ({
+    type: 'm.room.message',
+    event_id: `$ans-${++evn}`,
+    room_id: ROOM,
+    sender,
+    content: {
+      msgtype: 'm.text',
+      body: `answer ${requestId} ${value}`,
+      'm.relates_to': { rel_type: 'm.thread', event_id: root },
+    },
+  })
+
+  async function ready(s: Setup, schemaOverride?: unknown) {
+    await startTurn(s)
+    const a = ask(s, schemaOverride ? { schema: schemaOverride } : {})
+    await settle()
+    return { ...a, id: requestIdOf(s) }
+  }
+
+  it('posts a mirror-marked Element notice with the question, fields and answer hints', async () => {
+    const s = setup()
+    const { id } = await ready(s)
+    const notice = noticeCall(s)
+    expect(notice).toBeDefined()
+    expect(notice!.content.body).toContain('Which env?')
+    expect(notice!.content.body).toContain('env')
+    expect(notice!.content.body).toContain('staging')
+    expect(notice!.content.body).toContain(`answer ${id}`)
+    expect((notice as { content: Record<string, unknown> }).content['dev.zooid.mirror']).toBe(true)
+    expect((notice as { threadRoot?: string }).threadRoot).toBe('$root')
+  })
+
+  it('settles the correlator from an answer command and resumes the turn', async () => {
+    const s = setup()
+    const { id, response } = await ready(s)
+    await post(s, [answerMsg(id, 'prod')])
+    await settle()
+    await expect(response).resolves.toEqual({ action: 'accept', content: { env: 'prod' } })
+    expect(s.elicitations.get(id)?.state).toBe('accepted')
+    expect(sent(s, 'dev.zooid.elicitation_resolved')[0]).toMatchObject({
+      content: { request_id: id, status: 'accepted', responded_by: ALICE },
+    })
+  })
+
+  it('edits the notice with the accepted outcome on resolve', async () => {
+    const s = setup()
+    const { id } = await ready(s)
+    await post(s, [answerMsg(id, 'prod')])
+    await settle()
+    const edit = s.client.sendMessage.mock.calls
+      .map((c) => c[0] as { content: Record<string, unknown> })
+      .find((i) => {
+        const rel = i.content['m.relates_to'] as { rel_type?: string } | undefined
+        return rel?.rel_type === 'm.replace'
+      })
+    expect(edit).toBeDefined()
+    const newContent = edit!.content['m.new_content'] as { body: string }
+    expect(newContent.body).toContain('prod')
+  })
+
+  it('answers a single-enum question with a number reaction on the notice', async () => {
+    const s = setup()
+    await startTurn(s)
+    s.client.sendMessage.mockImplementation(async (arg: { content: { body: string } }) => ({
+      event_id: arg.content.body.startsWith('❓') ? '$elicit-notice' : '$prose',
+    }))
+    const a = ask(s)
+    await settle()
+    await post(s, [{
+      type: 'm.reaction', event_id: '$react-1', room_id: ROOM, sender: ALICE,
+      content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$elicit-notice' }, key: '1️⃣' },
+    }])
+    await settle()
+    await expect(a.response).resolves.toEqual({ action: 'accept', content: { env: 'staging' } })
+  })
+
+  it('keeps an invalid Element answer pending and reports the field error', async () => {
+    const s = setup()
+    const { id, response } = await ready(s)
+    await post(s, [answerMsg(id, 'dev')])
+    await settle()
+    expect(s.elicitations.get(id)?.state).toBe('pending')
+    expect(sent(s, 'dev.zooid.elicitation_rejected')[0]).toMatchObject({
+      content: { request_id: id, reason: 'invalid', errors: { env: 'must be one of: staging, prod' } },
+    })
+    await post(s, [answerMsg(id, 'prod')])
+    await settle()
+    await expect(response).resolves.toEqual({ action: 'accept', content: { env: 'prod' } })
+  })
+
+  it('accepts a JSON command for a multi-field form', async () => {
+    const s = setup()
+    const schema = {
+      type: 'object' as const,
+      properties: { name: { type: 'string' as const }, count: { type: 'number' as const } },
+      required: ['name', 'count'],
+    }
+    const { id, response } = await ready(s, schema)
+    await post(s, [answerMsg(id, '{"name":"x","count":2}')])
+    await settle()
+    await expect(response).resolves.toEqual({ action: 'accept', content: { name: 'x', count: 2 } })
+  })
+
+  it('refuses a bare value for a multi-field form', async () => {
+    const s = setup()
+    const schema = {
+      type: 'object' as const,
+      properties: { name: { type: 'string' as const }, count: { type: 'number' as const } },
+      required: ['name', 'count'],
+    }
+    const { id } = await ready(s, schema)
+    await post(s, [answerMsg(id, 'hello')])
+    await settle()
+    expect(s.elicitations.get(id)?.state).toBe('pending')
+    expect(sent(s, 'dev.zooid.elicitation_rejected')[0]).toMatchObject({ content: { reason: 'invalid' } })
+  })
+
+  it('declines and cancels via command', async () => {
+    const s = setup()
+    const a = await ready(s)
+    await post(s, [{
+      type: 'm.room.message', event_id: '$dec', room_id: ROOM, sender: ALICE,
+      content: { msgtype: 'm.text', body: `decline ${a.id}`, 'm.relates_to': { rel_type: 'm.thread', event_id: '$root' } },
+    }])
+    await expect(a.response).resolves.toEqual({ action: 'decline' })
+
+    const b = ask(s, { toolCallId: 'b' })
+    await settle()
+    const bid = requestIdOf(s, 1)
+    await post(s, [{
+      type: 'm.room.message', event_id: '$can', room_id: ROOM, sender: BOB,
+      content: { msgtype: 'm.text', body: `cancel ${bid}`, 'm.relates_to': { rel_type: 'm.thread', event_id: '$root' } },
+    }])
+    await expect(b.response).resolves.toEqual({ action: 'cancel' })
+    await settle()
+    expect(sent(s, 'dev.zooid.elicitation_resolved').map((e) => e.content.status)).toEqual(['declined', 'cancelled'])
+  })
+
+  it('ignores an answer command or reaction from an agent', async () => {
+    const s = setup()
+    const { id } = await ready(s)
+    await post(s, [answerMsg(id, 'prod', AGENT)])
+    await post(s, [{
+      type: 'm.reaction', event_id: '$react-agent', room_id: ROOM, sender: CODER,
+      content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$ereq' }, key: '1️⃣' },
+    }])
+    await settle()
+    expect(s.elicitations.get(id)?.state).toBe('pending')
+    expect(sent(s, 'dev.zooid.elicitation_resolved')).toHaveLength(0)
+  })
+
+  it('ignores an answer from a non-member', async () => {
+    const s = setup({ members: [AGENT, ALICE] })
+    const { id } = await ready(s)
+    await post(s, [answerMsg(id, 'prod', '@eve:example.com')])
+    await settle()
+    expect(s.elicitations.get(id)?.state).toBe('pending')
+    expect(sent(s, 'dev.zooid.elicitation_resolved')).toHaveLength(0)
+  })
+
+  it('refuses an answer command sent from a different thread', async () => {
+    const s = setup()
+    const { id } = await ready(s)
+    await post(s, [answerMsg(id, 'prod', ALICE, '$elsewhere')])
+    await settle()
+    expect(s.elicitations.get(id)?.state).toBe('pending')
+    expect(
+      s.client.sendMessage.mock.calls.some((c) =>
+        (c[0] as { content: { body: string } }).content.body.includes('not open in this thread'),
+      ),
+    ).toBe(true)
+  })
+
+  it('answers an unknown request id with a notice instead of routing', async () => {
+    const s = setup()
+    await startTurn(s)
+    const ensureBefore = s.reg.ensureSession.mock.calls.length
+    await post(s, [{
+      type: 'm.room.message', event_id: '$unknown', room_id: ROOM, sender: ALICE,
+      content: { msgtype: 'm.text', body: 'answer 00000000-0000-4000-8000-000000000000 prod', 'm.relates_to': { rel_type: 'm.thread', event_id: '$root' } },
+    }])
+    await settle()
+    expect(
+      s.client.sendMessage.mock.calls.some((c) => (c[0] as { content: { body: string } }).content.body.includes('No open question')),
+    ).toBe(true)
+    expect(s.reg.ensureSession.mock.calls.length).toBe(ensureBefore)
+  })
+
+  it('first Element answer wins; a later one is stale', async () => {
+    const s = setup()
+    const { id, response } = await ready(s)
+    await post(s, [answerMsg(id, 'prod', ALICE)])
+    await post(s, [answerMsg(id, 'staging', BOB)])
+    await settle()
+    await expect(response).resolves.toEqual({ action: 'accept', content: { env: 'prod' } })
+    expect(sent(s, 'dev.zooid.elicitation_resolved')).toHaveLength(1)
+    expect(sent(s, 'dev.zooid.elicitation_rejected')[0]).toMatchObject({ content: { reason: 'stale' } })
+  })
+
+  it('does not swallow prose that merely starts with "answer"', async () => {
+    const s = setup()
+    await startTurn(s)
+    s.finishTurn()
+    await settle()
+    const ensureBefore = s.reg.ensureSession.mock.calls.length
+    await post(s, [{
+      type: 'm.room.message', event_id: '$prose', room_id: ROOM, sender: ALICE,
+      content: { msgtype: 'm.text', body: 'answer the question', 'm.relates_to': { rel_type: 'm.thread', event_id: '$root' } },
+    }])
+    await settle()
+    expect(s.reg.ensureSession.mock.calls.length).toBeGreaterThan(ensureBefore)
+  })
+})

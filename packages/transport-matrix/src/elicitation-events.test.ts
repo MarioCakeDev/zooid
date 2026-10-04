@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   ElicitationEventType,
   parseElicitationResponse,
+  toElicitationNoticeBody,
+  toElicitationOutcomeBody,
   toElicitationRejectedBody,
   toElicitationRequestBody,
   toElicitationResolvedBody,
@@ -125,5 +127,43 @@ describe('parseElicitationResponse', () => {
     expect(
       parseElicitationResponse(evt({ request_id: 'e1', request_event_id: '$ereq', action: 'accept' })),
     ).toMatchObject({ action: 'accept', content: {} })
+  })
+})
+
+describe('Element notice rendering', () => {
+  it('renders the question, fields, choices and reply/reaction hints', () => {
+    const body = toElicitationNoticeBody(record, 'architect')
+    expect(body).toContain('❓ architect asks: Which env?')
+    expect(body).toContain('question_0')
+    expect(body).toContain('A')
+    expect(body).toContain('`answer e1 <value>`')
+    expect(body).toContain('react 1️⃣')
+    expect(body).toContain('`decline e1`')
+    expect(body).toContain('`cancel e1`')
+  })
+
+  it('marks required fields and documents the JSON form for multi-field schemas', () => {
+    const multi = {
+      ...record,
+      requestedSchema: {
+        type: 'object' as const,
+        properties: { a: { type: 'string' as const }, b: { type: 'number' as const } },
+        required: ['a'],
+      },
+    }
+    const body = toElicitationNoticeBody(multi, 'architect')
+    expect(body).toContain('a (required)')
+    expect(body).toContain('Multiple fields — use JSON')
+    // No single enum field, so no number reactions.
+    expect(body).not.toContain('react')
+  })
+
+  it('summarizes each terminal outcome', () => {
+    expect(toElicitationOutcomeBody({ record, status: 'accepted', content: { env: 'prod' }, respondedBy: '@alice:x' }))
+      .toContain('✅ Answered by @alice:x: env=prod')
+    expect(toElicitationOutcomeBody({ record, status: 'declined', respondedBy: '@alice:x' }))
+      .toContain('➖ Declined by @alice:x')
+    expect(toElicitationOutcomeBody({ record, status: 'cancelled', reason: 'clear' }))
+      .toContain('🚫 Cancelled (clear)')
   })
 })

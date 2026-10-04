@@ -45,7 +45,7 @@ export const DENY_REACTION = '👎'
 const PRESENTATION_MODIFIER_RE = /[\uFE0E\uFE0F\u200D\u{1F3FB}-\u{1F3FF}]/gu
 
 /** Drop the presentation modifiers above from a reaction key. Non-strings yield `''`. */
-function normaliseReactionKey(key: unknown): string {
+export function normaliseReactionKey(key: unknown): string {
   return typeof key === 'string' ? key.replace(PRESENTATION_MODIFIER_RE, '') : ''
 }
 
