@@ -465,6 +465,7 @@ describe('Element mirror + answer capture', () => {
     expect(notice!.content.body).toContain('env')
     expect(notice!.content.body).toContain('staging')
     expect(notice!.content.body).toContain(`answer ${id}`)
+    expect(notice!.content.body).toContain('Reply in this thread')
     expect((notice as { content: Record<string, unknown> }).content['dev.zooid.mirror']).toBe(true)
     expect((notice as { threadRoot?: string }).threadRoot).toBe('$root')
   })
@@ -608,6 +609,66 @@ describe('Element mirror + answer capture', () => {
         (c[0] as { content: { body: string } }).content.body.includes('not open in this thread'),
       ),
     ).toBe(true)
+  })
+
+  it('ignores a top-level answer — it must be in the question thread', async () => {
+    const s = setup()
+    const { id } = await ready(s)
+    await post(s, [{
+      type: 'm.room.message',
+      event_id: '$top-level',
+      room_id: ROOM,
+      sender: ALICE,
+      content: { msgtype: 'm.text', body: `answer ${id} prod` },
+    }])
+    await settle()
+    expect(s.elicitations.get(id)?.state).toBe('pending')
+    expect(sent(s, 'dev.zooid.elicitation_resolved')).toHaveLength(0)
+    expect(
+      s.client.sendMessage.mock.calls.some((c) =>
+        (c[0] as { content: { body: string } }).content.body.includes('reply in the question'),
+      ),
+    ).toBe(true)
+  })
+
+  it('threaded answer still settles', async () => {
+    const s = setup()
+    const { id, response } = await ready(s)
+    await post(s, [answerMsg(id, 'staging')])
+    await settle()
+    await expect(response).resolves.toEqual({ action: 'accept', content: { env: 'staging' } })
+  })
+
+  it('downgrades a losing invalid answer to stale when another wins during the membership check', async () => {
+    const s = setup()
+    const { id, response } = await ready(s)
+    const joined = { joined: { [AGENT]: {}, [CODER]: {}, [ALICE]: {}, [BOB]: {} } }
+    let releaseBob!: () => void
+    const bobGate = new Promise<void>((r) => (releaseBob = r))
+    let atGate!: () => void
+    const bobAtGate = new Promise<void>((r) => (atGate = r))
+    let first = true
+    s.client.getJoinedMembers.mockImplementation(async () => {
+      if (first) {
+        first = false
+        atGate()
+        await bobGate
+      }
+      return joined
+    })
+    // Bob's invalid answer reaches the membership gate first and is held there.
+    const bob = post(s, [answerMsg(id, 'dev', BOB)])
+    await bobAtGate
+    // Alice's valid answer wins while Bob is suspended.
+    await post(s, [answerMsg(id, 'prod', ALICE)])
+    await settle()
+    releaseBob()
+    await bob
+    await settle()
+    await expect(response).resolves.toEqual({ action: 'accept', content: { env: 'prod' } })
+    const rejected = sent(s, 'dev.zooid.elicitation_rejected')
+    expect(rejected.some((e) => e.content.reason === 'invalid')).toBe(false)
+    expect(rejected.some((e) => e.content.reason === 'stale')).toBe(true)
   })
 
   it('answers an unknown request id with a notice instead of routing', async () => {

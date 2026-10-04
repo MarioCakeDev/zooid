@@ -89,7 +89,7 @@ export function toElicitationNoticeBody(record: PendingElicitation, agentName?: 
   const reaction = single
     ? `  ·  react ${NUMBER_REACTIONS.slice(0, single.choices.length).join(' ')}`
     : ''
-  lines.push(`Answer: \`answer ${id} <value>\`${reaction}`)
+  lines.push(`Reply in this thread: \`answer ${id} <value>\`${reaction}`)
   if (fields.length > 1) {
     lines.push(`Multiple fields — use JSON: \`answer ${id} {"field":"value"}\``)
   }

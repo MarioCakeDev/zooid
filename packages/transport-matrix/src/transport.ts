@@ -1814,6 +1814,27 @@ agents.onEvent = async (name, event: AgentEvent) => {
     }
   }
 
+  /**
+   * Reject an Element answer as invalid, but re-check `pending` first: a
+   * concurrent winner during the awaited membership check must downgrade this
+   * to `stale`, not emit a spurious `invalid` for an already-resolved request
+   * (parity with the custom-event path in `handleElicitationResponse`).
+   */
+  async function rejectElicitationInvalid(
+    requestId: string,
+    record: PendingElicitation,
+    responseEventId: string,
+    errors: Record<string, string>,
+    suffix: string,
+  ): Promise<void> {
+    if (elicitations?.get(requestId)?.state === 'pending') {
+      sendElicitationRejected(record, responseEventId, 'invalid', errors)
+      await editElicitationNotice(requestId, suffix)
+    } else {
+      sendElicitationRejected(record, responseEventId, 'stale')
+    }
+  }
+
   /** Returns true when the reaction was a number-keycap answer we handled. */
   async function handleElicitationReaction(evt: MatrixEvent): Promise<boolean> {
     if (!elicitations) return false
@@ -1835,8 +1856,13 @@ agents.onEvent = async (name, event: AgentEvent) => {
     if (!guarded) return true
     const v = validateElicitationContent(guarded.record.requestedSchema, { [field]: choice })
     if (!v.ok) {
-      sendElicitationRejected(guarded.record, evt.event_id, 'invalid', v.errors)
-      await editElicitationNotice(requestId, `⚠️ ${formatElicitationErrors(v.errors)}`)
+      await rejectElicitationInvalid(
+        requestId,
+        guarded.record,
+        evt.event_id,
+        v.errors,
+        `⚠️ ${formatElicitationErrors(v.errors)}`,
+      )
       return true
     }
     await finishElicitation(evt, requestId, guarded.record, { action: 'accept', content: v.content })
@@ -1862,18 +1888,21 @@ agents.onEvent = async (name, event: AgentEvent) => {
       await postElicitationInfo(evt.room_id, threadRoot, `No open question \`${parsed.requestId}\`.`)
       return true
     }
+    // An Element answer must be in the request's own thread, exactly like the
+    // custom `dev.zooid.elicitation_response` path — a top-level reply from any
+    // room member must not settle a question asked in a thread.
+    if (record.roomId !== evt.room_id || record.threadRoot !== threadRoot) {
+      await postElicitationInfo(
+        evt.room_id,
+        threadRoot,
+        `Question \`${parsed.requestId}\` is not open in this thread — reply in the question's thread.`,
+      )
+      return true
+    }
     if (!meta) {
       // A terminal record whose correlation was already cleaned up: a late
       // answer. Tell the sender it is stale rather than silently dropping it.
       sendElicitationRejected(record, evt.event_id, 'stale')
-      return true
-    }
-    if (meta.roomId !== evt.room_id || (threadRoot && meta.threadRoot !== threadRoot)) {
-      await postElicitationInfo(
-        evt.room_id,
-        threadRoot,
-        `Question \`${parsed.requestId}\` is not open in this thread.`,
-      )
       return true
     }
     const guarded = await guardElicitationAnswer(evt, parsed.requestId)
@@ -1885,14 +1914,18 @@ agents.onEvent = async (name, event: AgentEvent) => {
     }
     const answer = contentFromAnswer(guarded.record.requestedSchema, parsed.value ?? '')
     if (!answer.ok) {
-      sendElicitationRejected(guarded.record, evt.event_id, 'invalid', { _: answer.error })
-      await editElicitationNotice(parsed.requestId, `⚠️ ${answer.error}`)
+      await rejectElicitationInvalid(parsed.requestId, guarded.record, evt.event_id, { _: answer.error }, `⚠️ ${answer.error}`)
       return true
     }
     const v = validateElicitationContent(guarded.record.requestedSchema, answer.content)
     if (!v.ok) {
-      sendElicitationRejected(guarded.record, evt.event_id, 'invalid', v.errors)
-      await editElicitationNotice(parsed.requestId, `⚠️ ${formatElicitationErrors(v.errors)}`)
+      await rejectElicitationInvalid(
+        parsed.requestId,
+        guarded.record,
+        evt.event_id,
+        v.errors,
+        `⚠️ ${formatElicitationErrors(v.errors)}`,
+      )
       return true
     }
     await finishElicitation(evt, parsed.requestId, guarded.record, { action: 'accept', content: v.content })
