@@ -390,12 +390,20 @@ const TOOL_ICON_PREFIX: [string, string][] = [
 const DEFAULT_TOOL_ICON = '🛠'
 
 /**
+ * First word of a tool title, lowercased and split on the separators tool names
+ * use (`github_get_file_contents` → `github`, `ha_GetDateTime` → `ha`,
+ * `Read file` → `read`). It is the key the icon and the subject rules match on.
+ */
+function toolHead(title: string): string {
+  return title.trim().toLowerCase().split(/[\s_./:-]+/)[0] ?? ''
+}
+
+/**
  * The identifying marker for a tool title: an emoji (one code point plus VS16
  * at most) or the literal two-character `>_` for shell tools.
  */
 export function toolIcon(title: string): string {
-  const words = title.trim().toLowerCase().split(/[\s_./:-]+/)
-  const head = words[0]
+  const head = toolHead(title)
   if (head && TOOL_ICON_BY_NAME[head]) return TOOL_ICON_BY_NAME[head]!
   for (const [prefix, icon] of TOOL_ICON_PREFIX) {
     if (head && head.startsWith(prefix)) return icon
@@ -415,9 +423,16 @@ const SHELL_TOOL_ICON = '>_'
 
 /**
  * Icon family whose tagline names the request URL (🌐 fetch/webfetch). A
- * websearch names a `query`, not a `url`, so it keeps its title.
+ * websearch shares the globe but names its `query` instead (see
+ * `WEB_SEARCH_HEADS`), so the globe alone reads as "went to the web" for both.
  */
 const WEB_TOOL_ICON = '🌐'
+
+/** Tool heads that are web searches: their subject is the query, not a URL. */
+const WEB_SEARCH_HEADS: ReadonlySet<string> = new Set(['websearch', 'web_search', 'web-search'])
+
+/** Raw-input keys that carry a web search query. */
+const RAW_INPUT_QUERY_KEYS = ['query', 'q', 'search_query', 'searchQuery']
 
 /**
  * Machine label for a shell call whose ACP event carries none: bash/ssh tools
@@ -483,6 +498,260 @@ export function toolEntryMachine(content: Record<string, unknown>): string | und
   return machine ? clamp(machine, MACHINE_MAX) : undefined
 }
 
+/** A raw input seen as a plain object; `undefined` for scalar, array or absent input. */
+function rawObject(raw: unknown): Record<string, unknown> | undefined {
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : undefined
+}
+
+/** A non-empty string, or a finite number rendered as one (a raw arg may be numeric). */
+function scalarString(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.length > 0 ? value : undefined
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return undefined
+}
+
+/** First non-empty string/number among `keys` of a raw input object. */
+function pickArg(raw: Record<string, unknown>, ...keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = scalarString(raw[key])
+    if (value) return value
+  }
+  return undefined
+}
+
+/** `owner/repo`, or whichever half the input names. */
+function repoOf(raw: Record<string, unknown>): string | undefined {
+  const owner = pickArg(raw, 'owner')
+  const repo = pickArg(raw, 'repo', 'repository')
+  return owner && repo ? `${owner}/${repo}` : (repo ?? owner)
+}
+
+// ── Family subject extractors ────────────────────────────────────────────────
+// A tool title says *what kind* of call it was (`github_get_file_contents`); the
+// icon already says which family (🐙). These pick the one argument from the ACP
+// `rawInput` that says *what it acted on*, so a tagline reads
+// `🐙 github_get_file_contents MarioCakeDev/zooid:src/x.ts` instead of stopping
+// at the bare tool name. Each returns `undefined` when the call carries nothing
+// to name, and the tagline then falls back to the title alone.
+
+/** A GitHub call: search query, `repo:path`, `repo#number`, `repo@ref`, a PR head→base, a branch, or just `owner/repo`. */
+function githubSubject(raw: Record<string, unknown>): string | undefined {
+  const query = pickArg(raw, 'query')
+  if (query) return query
+  const repo = repoOf(raw)
+  const path = pickArg(raw, 'path', 'filePath', 'file_path', 'filepath')
+  if (path) return repo ? `${repo}:${path}` : path
+  const number = pickArg(raw, 'issue_number', 'pullNumber', 'pull_number', 'number')
+  if (number) return repo ? `${repo}#${number}` : number
+  const ref = pickArg(raw, 'sha', 'tag', 'ref')
+  if (ref) return repo ? `${repo}@${ref.slice(0, 12)}` : ref
+  const head = pickArg(raw, 'head')
+  if (head) {
+    const base = pickArg(raw, 'base')
+    return repo ? `${repo} ${head}→${base ?? '?'}` : head
+  }
+  const branch = pickArg(raw, 'branch')
+  if (repo) return branch ? `${repo}@${branch}` : repo
+  if (branch) return branch
+  const org = pickArg(raw, 'org')
+  const team = pickArg(raw, 'team_slug')
+  if (org && team) return `${org}/${team}`
+  if (org) return org
+  return pickArg(raw, 'user', 'name', 'comment_id')
+}
+
+/** A Coolify call: the resource UUID (with the sub-container when logs name one, or the tag names for a tag call), else id/query/name/key, else the action plus its resource/provider. */
+function coolifySubject(raw: Record<string, unknown>): string | undefined {
+  const tags = Array.isArray(raw.tag_names)
+    ? raw.tag_names.filter((t): t is string => typeof t === 'string' && t.length > 0)
+    : []
+  if (tags.length > 0) return tags.join(',')
+  const uuid = pickArg(
+    raw,
+    'tag_or_uuid',
+    'uuid',
+    'database_uuid',
+    'backup_uuid',
+    'execution_uuid',
+    'storage_uuid',
+    'task_uuid',
+    'tag_uuid',
+    'application_uuid',
+    'project_uuid',
+  )
+  if (uuid) {
+    const container = pickArg(raw, 'container')
+    if (container) return `${uuid}/${container}`
+    const key = pickArg(raw, 'key')
+    if (key) return `${uuid}:${key}`
+    return uuid
+  }
+  const direct = pickArg(raw, 'id', 'query', 'name', 'key', 'mount_path', 'command')
+  if (direct) return direct
+  const action = pickArg(raw, 'action')
+  const detail = pickArg(raw, 'resource') ?? pickArg(raw, 'provider')
+  return action ? [action, detail].filter(Boolean).join(' ') : undefined
+}
+
+/** A TrueNAS call: the dataset/snapshot it names, else user, share, pool or id. */
+function truenasSubject(raw: Record<string, unknown>): string | undefined {
+  return pickArg(
+    raw,
+    'dataset',
+    'snapshot',
+    'username',
+    'name',
+    'share_name',
+    'path',
+    'pool',
+    'pool_name',
+    'target',
+    'id',
+  )
+}
+
+/** A Pocket ID call: the entity id/name/username it acts on. */
+function pocketidSubject(raw: Record<string, unknown>): string | undefined {
+  return pickArg(
+    raw,
+    'id',
+    'name',
+    'username',
+    'email',
+    'displayName',
+    'friendlyName',
+    'search',
+    'userGroupId',
+    'oidcClientId',
+    'userId',
+    'clientId',
+    'endpoint',
+    'appName',
+  )
+}
+
+/** A Home Assistant call: the entity name, else area, list item, entity_id, floor, message, media query, reported health observation or todo list. */
+function haSubject(raw: Record<string, unknown>): string | undefined {
+  return pickArg(
+    raw,
+    'name',
+    'area',
+    'item',
+    'entity_id',
+    'floor',
+    'message',
+    'search_query',
+    'beschreibung',
+    'todo_list',
+    'kategorie',
+  )
+}
+
+/** A zooid/Matrix call: the room or thread it targets, else a name or the message text. */
+function zooidSubject(raw: Record<string, unknown>): string | undefined {
+  return pickArg(raw, 'room', 'thread_id', 'name', 'text')
+}
+
+/** An ssh-mcp call with no command: the signal+pid, path, session name or profile it acts on. */
+function sshSubject(raw: Record<string, unknown>): string | undefined {
+  const pid = pickArg(raw, 'pid')
+  if (pid) {
+    const signal = pickArg(raw, 'signal')
+    return signal ? `${signal} ${pid}` : pid
+  }
+  return pickArg(raw, 'remotePath', 'localPath', 'path', 'name')
+}
+
+/** A grep/glob pattern. */
+function patternSubject(raw: Record<string, unknown>): string | undefined {
+  return pickArg(raw, 'pattern', 'query')
+}
+
+/** A todowrite list length (`3 todos`), when the input carries the list. */
+function todoSubject(raw: Record<string, unknown>): string | undefined {
+  const todos = raw.todos
+  if (!Array.isArray(todos)) return undefined
+  return `${todos.length} todo${todos.length === 1 ? '' : 's'}`
+}
+
+/** A task's description/prompt. */
+function descriptionSubject(raw: Record<string, unknown>): string | undefined {
+  return pickArg(raw, 'description', 'prompt')
+}
+
+/** A skill name. */
+function skillSubject(raw: Record<string, unknown>): string | undefined {
+  return pickArg(raw, 'name', 'skill')
+}
+
+/**
+ * Family prefixes stripped from a tool title before its verb is shown, longest
+ * first so `zooid-context_zooid_` wins over the shorter forms. The icon already
+ * names the family, so `github_get_file_contents` reads as `get_file_contents`.
+ */
+const TOOL_NAME_FAMILIES: readonly string[] = [
+  'zooid-context_zooid_',
+  'zooid-context_',
+  'github_',
+  'coolify_',
+  'truenas_',
+  'pocketid_',
+  'ssh_',
+  'ha_',
+]
+
+/** A tool title with its family prefix removed (`github_deploy` → `deploy`). */
+function toolShortName(title: string): string {
+  const lower = title.toLowerCase()
+  for (const prefix of TOOL_NAME_FAMILIES) {
+    if (lower.startsWith(prefix)) return title.slice(prefix.length)
+  }
+  return title
+}
+
+/**
+ * Per-family subject extraction, keyed by the tool title's first word. `verb`
+ * keeps the tool's specific verb before the extracted argument (family prefix
+ * stripped): the github/coolify/… icons cover dozens of verbs, so
+ * `deploy <uuid>` must still say `deploy`. The search/todo rules show the
+ * extracted fact alone, because `🔍 <pattern>` and `📝 3 todos` already read as
+ * the action.
+ */
+interface ToolSubjectRule {
+  heads: readonly string[]
+  pick: (raw: Record<string, unknown>) => string | undefined
+  verb: boolean
+}
+
+const TOOL_SUBJECT_RULES: readonly ToolSubjectRule[] = [
+  { heads: ['github'], pick: githubSubject, verb: true },
+  { heads: ['coolify'], pick: coolifySubject, verb: true },
+  { heads: ['truenas'], pick: truenasSubject, verb: true },
+  { heads: ['pocketid'], pick: pocketidSubject, verb: true },
+  { heads: ['ha'], pick: haSubject, verb: true },
+  { heads: ['zooid'], pick: zooidSubject, verb: true },
+  { heads: ['ssh'], pick: sshSubject, verb: true },
+  { heads: ['grep'], pick: patternSubject, verb: false },
+  { heads: ['glob'], pick: patternSubject, verb: false },
+  { heads: ['todowrite', 'todo'], pick: todoSubject, verb: false },
+  { heads: ['task'], pick: descriptionSubject, verb: true },
+  { heads: ['skill'], pick: skillSubject, verb: true },
+]
+
+/** The family rule for a tool title, if one matches its first word. */
+function toolRuleSubject(entry: TurnToolEntry): string | undefined {
+  const head = toolHead(entry.title)
+  const rule = TOOL_SUBJECT_RULES.find((r) => r.heads.includes(head))
+  if (!rule) return undefined
+  const raw = rawObject(entry.rawInput)
+  const detail = raw ? rule.pick(raw) : undefined
+  if (!rule.verb) return detail
+  const verb = toolShortName(entry.title)
+  return detail ? `${verb} ${detail}` : verb
+}
+
 /**
  * Overhead of a rendered line around its subject: the status glyph (≤ 2 UTF-16
  * units) plus the two spaces around the icon (≤ 2 units), padded so the subject
@@ -493,18 +762,20 @@ const SUBJECT_OVERHEAD = 6
 /**
  * What a tagline talks about — `icon + named + @machine`:
  * `>_ @local pnpm -r build`, `📖 /workspace/AGENTS.md`,
- * `✏️ /workspace/src/x.ts`, `🌐 https://example.com`. The *named* part is the file
- * path for a read/write tool that named one (the path says more than the word
- * "read"), the request URL for a 🌐 web call that named one (the URL says more
- * than "webfetch"), the executed command for a shell call that named one (the
- * command says more than "bash"), the title otherwise. A machine
- * ` @<profile|host>` rides along whenever the call names one, and shell tools
- * that name none get ` @local`, so every bash/ssh line says where it ran. For a
- * shell call that carries a command the machine sits right after the icon, before
- * the command (`>_ @local pnpm test`); a shell call with no command keeps the
- * title and a trailing machine (`>_ bash @local`). Read/write and web tools
- * normally carry no suffix — they run in the agent container, so the path or URL
- * is the useful half of the line.
+ * `✏️ /workspace/src/x.ts`, `🌐 https://example.com`,
+ * `🌐 zooid websocket docs`, `🐙 github_get_file_contents owner/repo:src/x.ts`.
+ * The *named* part is tried in this order: the search query for a web search
+ * (the globe says it was a search, so the keywords say the rest), the request
+ * URL for a 🌐 web fetch, a family subject for a GitHub/Coolify/TrueNAS/Pocket
+ * ID/HA/zooid/ssh/grep/glob/todo/task/skill call (see `toolRuleSubject`), the
+ * file path for a read/write tool, the executed command for a shell call, the
+ * title otherwise. A machine ` @<profile|host>` rides along whenever the call
+ * names one, and shell tools that name none get ` @local`, so every bash/ssh
+ * line says where it ran. For a shell call that carries a command the machine
+ * sits right after the icon, before the command (`>_ @local pnpm test`); a shell
+ * call with no command keeps the title and a trailing machine
+ * (`>_ bash @local`). Read/write and web tools normally carry no suffix — they
+ * run in the agent container, so the path or URL is the useful half of the line.
  *
  * `lineMax` is what the whole line may use; the head is clamped to what is left
  * after the icon and the suffix, so a long path or command can never push the
@@ -515,8 +786,20 @@ function toolSubject(entry: TurnToolEntry, lineMax = TOOL_LINE_MAX): string {
   const isShell = icon === SHELL_TOOL_ICON
   const machine = entry.machine ?? (isShell ? LOCAL_MACHINE : undefined)
   const suffix = machine ? ` @${machine}` : ''
-  const url = icon === WEB_TOOL_ICON ? firstString(entry.rawInput, RAW_INPUT_URL_KEYS) : undefined
-  const named = url ?? (PATH_TOOL_ICONS.has(icon) && entry.path ? entry.path : entry.title)
+  const isWebSearch = WEB_SEARCH_HEADS.has(toolHead(entry.title))
+  // A web search names keywords, a web fetch a URL. Only the fetch reads the
+  // `url` key, so a stray `url` on a search can never win over its query.
+  const url =
+    icon === WEB_TOOL_ICON && !isWebSearch
+      ? firstString(entry.rawInput, RAW_INPUT_URL_KEYS)
+      : undefined
+  const query = isWebSearch ? firstString(entry.rawInput, RAW_INPUT_QUERY_KEYS) : undefined
+  const rule = isWebSearch ? undefined : toolRuleSubject(entry)
+  const named =
+    query ??
+    url ??
+    rule ??
+    (PATH_TOOL_ICONS.has(icon) && entry.path ? entry.path : entry.title)
   const budget = lineMax - icon.length - suffix.length - SUBJECT_OVERHEAD
   const command = isShell ? firstString(entry.rawInput, RAW_INPUT_COMMAND_KEYS) : undefined
   // A command can be multi-line; collapse it so the tagline stays one line. A
