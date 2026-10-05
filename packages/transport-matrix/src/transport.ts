@@ -73,6 +73,9 @@ import {
   toolEntryMachine,
   toolSubjectParamKeys,
   TURN_MIRROR_MARKER,
+  threadCompletionContent,
+  completionSummary,
+  matrixEventPermalink,
   type TurnToolEntry,
 } from './event-encoders.js'
 import {
@@ -132,6 +135,14 @@ export interface CreateMatrixTransportOptions {
   hsToken: string
   /** Admin Matrix user ID. When set, BotPool.bootstrap invites this user into rooms it creates. */
   adminUserId?: string
+  /**
+   * Full MXIDs a trigger posts as (`triggers.<name>.as`). A trigger-stamped
+   * root is never announced; these MXIDs are recorded explicitly because the
+   * trigger bot (`@agent.cron`) is not in the agent roster.
+   */
+  triggerUserIds?: string[]
+  /** Homeserver name used as the permalink `via`. Falls back to the room id's server. */
+  serverName?: string
   /** Post-turn drain: keep collecting trailing `agent_message_chunk`s until the
    *  buffer is quiet for this long before flushing. Defaults to `DRAIN_QUIET_MS`.
    *  Set to 0 to disable the drain (e.g. in tests). */
@@ -459,6 +470,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     botUserId,
     mode = 'appservice',
   } = opts
+  const triggerUserIds = new Set(opts.triggerUserIds ?? [])
+  const serverNameOpt = opts.serverName
   const drainQuietMs = opts.drainQuietMs ?? DRAIN_QUIET_MS
   const drainMaxMs = opts.drainMaxMs ?? DRAIN_MAX_MS
   const mirrorEditIntervalMs = opts.mirrorEditIntervalMs ?? MIRROR_EDIT_INTERVAL_MS
@@ -671,6 +684,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   }
 
   async function createMirrorLine(
+    sessionId: string,
     ctx: SessionContext,
     body: string,
     formattedBody?: string,
@@ -682,6 +696,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         threadRoot: ctx.threadRoot,
         content: turnMirrorNoticeContent(body, ctx.threadRoot, formattedBody),
       })
+      if (event_id) lastThreadEventId.set(sessionId, event_id)
       return event_id
     } catch (err) {
       console.warn('[matrix] mirror line create failed:', err)
@@ -690,6 +705,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   }
 
   async function editMirrorLine(
+    sessionId: string,
     ctx: SessionContext,
     line: MirrorLine,
     body: string,
@@ -706,7 +722,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       if (isMissingEventError(err)) {
         // The original was redacted or otherwise gone — recreate so the line is
         // not silently lost, and retarget later edits at the new event.
-        const eventId = await createMirrorLine(ctx, body, formattedBody)
+        const eventId = await createMirrorLine(sessionId, ctx, body, formattedBody)
         if (eventId) {
           line.eventId = eventId
           line.lastBody = body
@@ -765,7 +781,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       // it — otherwise an oldest no-op strands the rest of the tail.
       if (edit.body !== group.lastBody) {
         state.lastEditAt = Date.now()
-        await editMirrorLine(edit.ctx, group, edit.body, edit.formattedBody)
+        await editMirrorLine(sessionId, edit.ctx, group, edit.body, edit.formattedBody)
       }
       if (state.pendingEdits.size > 0) armMirrorEditTimer(sessionId, state, mirrorEditIntervalMs)
     })
@@ -790,7 +806,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const nextAllowed = (state.lastEditAt ?? Number.NEGATIVE_INFINITY) + mirrorEditIntervalMs
     if (state.pendingEdits.size === 0 && now >= nextAllowed) {
       state.lastEditAt = now
-      await editMirrorLine(ctx, group, body, formattedBody)
+      await editMirrorLine(sessionId, ctx, group, body, formattedBody)
       return
     }
     state.pendingEdits.set(group, { ctx, group, body, formattedBody })
@@ -928,7 +944,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const body = turnGroupBody(ctx.agent.name, group.entries, group.planDetail)
     const formattedBody = turnGroupHtml(ctx.agent.name, group.entries, group.planDetail)
     if (!group.eventId) {
-      const eventId = await createMirrorLine(ctx, body, formattedBody)
+      const eventId = await createMirrorLine(sessionId, ctx, body, formattedBody)
       if (eventId) {
         group.eventId = eventId
         group.lastBody = body
@@ -962,14 +978,14 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       for (const edit of pending) {
         // Skip a coalesced edit that reverted to the body already on the line.
         if (edit.body === edit.group.lastBody) continue
-        await editMirrorLine(edit.ctx, edit.group, edit.body, edit.formattedBody)
+        await editMirrorLine(sessionId, edit.ctx, edit.group, edit.body, edit.formattedBody)
       }
       const body = turnFinalBody(
         ctx.agent.name,
         { toolCount: state.toolIds.size, fileCount: state.files.size },
         failed,
       )
-      await createMirrorLine(ctx, body)
+      await createMirrorLine(sessionId, ctx, body)
     }
     turnMirrors.delete(sessionId)
   }
@@ -1215,6 +1231,17 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   // so a chunk for the *next* message that arrives during the send starts
   // fresh. Returns true when a message was enqueued.
   const lastFlushed = new Map<string, string>()
+  // Event id of the last message posted *into the thread* for a session. The
+  // completion announcement links here; flushBuffer/createMirrorLine/media
+  // sends record it. Falls back to the thread root when nothing was captured.
+  const lastThreadEventId = new Map<string, string>()
+
+  /** Homeserver name for a permalink `via`: explicit option, else the room id's server. */
+  const permalinkServer = (roomId: string): string => {
+    if (serverNameOpt) return serverNameOpt
+    const idx = roomId.indexOf(':')
+    return idx >= 0 ? roomId.slice(idx + 1) : roomId
+  }
 
   const flushBuffer = (sessionId: string): boolean => {
     const ctx = sessions.get(sessionId)
@@ -1232,12 +1259,13 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     const content = buildTextContent(text)
     const tail = (sendQueue.get(sessionId) ?? Promise.resolve()).then(async () => {
       try {
-        await client.sendMessage({
+        const { event_id } = await client.sendMessage({
           roomId: ctx.roomId,
           asUserId: ctx.agent.userId,
           content,
           threadRoot: ctx.threadRoot,
         })
+        if (event_id) lastThreadEventId.set(sessionId, event_id)
       } catch (err) {
         console.warn(`[matrix:${ctx.agent.name}] sendMessage flush failed:`, err)
       }
@@ -1376,8 +1404,8 @@ agents.onEvent = async (name, event: AgentEvent) => {
               filename,
               asUserId: ctx.agent.userId,
             })
-            .then(({ content_uri }) =>
-              client.sendMessage({
+            .then(async ({ content_uri }) => {
+              const { event_id } = await client.sendMessage({
                 roomId: ctx.roomId,
                 asUserId: ctx.agent.userId,
                 threadRoot: ctx.threadRoot,
@@ -1387,8 +1415,9 @@ agents.onEvent = async (name, event: AgentEvent) => {
                   url: content_uri,
                   info: { mimetype: block.mimeType, size: bytes.length },
                 },
-              }),
-            )
+              })
+              if (event_id) lastThreadEventId.set(event.sessionId, event_id)
+            })
             .catch((err) => {
               console.warn(`[matrix:${name}] outbound image upload failed:`, err)
               void sendMediaError(ctx, err, 'agent image upload failed', client)
@@ -1466,6 +1495,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
     flushedCounts.set(next, 0)
     pendingCommands.delete(prev)
     lastFlushed.delete(prev)
+    lastThreadEventId.delete(prev)
     // The send queue is a per-session serialization tail; keep ordering by
     // handing the old tail to the new session so nothing already in flight
     // interleaves with the replay.
@@ -2602,6 +2632,13 @@ agents.onEvent = async (name, event: AgentEvent) => {
       let st = threadStates.get(promotedRoot)
       if (!st) {
         st = { participants: [], rootMentions: [], callers: {}, handoffs: {} }
+        // Record who rooted the thread, but only when this event *is* the
+        // root (a top-level trigger). An in-thread reply that promotes a new
+        // state has its root recovered by rebuildThreadState instead.
+        if (evt.event_id === promotedRoot) {
+          if (evt.sender) st.rootSender = evt.sender
+          if (evt.content?.['dev.zooid.trigger'] !== undefined) st.rootIsTrigger = true
+        }
         threadStates.set(promotedRoot, st)
       }
       if (taskCtx?.isRoot) {
@@ -2699,6 +2736,62 @@ agents.onEvent = async (name, event: AgentEvent) => {
     return c.json({})
   })
   app.get('/healthz', (c) => c.text('ok'))
+
+  /**
+   * Opt-in top-level completion notice for a directly-addressed agent. Fires
+   * only when *all* hold: the agent opted in, the turn is the thread master
+   * (`sessionKey === threadRoot`), the thread is not a delegated task, the
+   * thread has a resolvable mention target, the turn genuinely finished (no
+   * outstanding invocation, pending human input or open handoff), it produced
+   * output, and it did not fail. A failed turn stays silent rather than posting
+   * a `⚠️` notice — the in-thread mirror line already marks the failure.
+   *
+   * The mention target is the thread root's author, whoever that is (a human,
+   * or an agent that opened the thread). It is suppressed for trigger-stamped
+   * roots (cron/brief/sweep), for the daemon/appservice bot itself, and for
+   * configured trigger MXIDs; an unknown root author means silence.
+   */
+  async function announceThreadCompletion(input: {
+    sessionId: string
+    agent: AgentBinding
+    roomId: string
+    threadRoot: string
+    sessionKey: string
+    producedOutput: boolean
+    failed: boolean
+  }): Promise<void> {
+    const { sessionId, agent, roomId, threadRoot, sessionKey, producedOutput, failed } = input
+    if (!agent.announceThreadCompletion) return
+    if (failed || !producedOutput) return
+    if (sessionKey !== threadRoot) return
+    if (taskRegistry.taskForRoot(threadRoot)) return
+    const st = threadStates.get(threadRoot)
+    if (!st) return
+    const mentionUserId = st.rootSender
+    if (!mentionUserId) return
+    if (st.rootIsTrigger) return
+    if (botUserId && mentionUserId === botUserId) return
+    if (triggerUserIds.has(mentionUserId)) return
+    if (invocations.outstandingFor(sessionKey).length > 0) return
+    if (pendingInput.countFor(sessionKey) > 0) return
+    if (openHandoffs.has(openKey(agent.userId, threadRoot))) return
+    const eventId = lastThreadEventId.get(sessionId) ?? threadRoot
+    try {
+      await client.sendMessage({
+        roomId,
+        asUserId: agent.userId,
+        content: threadCompletionContent({
+          agentId: agent.name,
+          summary: completionSummary(lastFlushed.get(sessionId)),
+          permalink: matrixEventPermalink(roomId, eventId, permalinkServer(roomId)),
+          mentionUserId,
+          failed: false,
+        }),
+      })
+    } catch (err) {
+      console.warn(`[matrix:${agent.name}] completion notice send failed:`, err)
+    }
+  }
 
   async function runTurnBody(agent: AgentBinding, input: TurnInput): Promise<void> {
     const { roomId, threadRoot, sessionKey } = input
@@ -2888,10 +2981,25 @@ agents.onEvent = async (name, event: AgentEvent) => {
           else if (invocation) returnInvocation(invocation, decision.completion, task)
         }
       }
+      // Opt-in: a thread-master turn posts one top-level notice mentioning the
+      // thread root's author and linking to the thread's latest message. Runs
+      // after the task/evaluateCompletion block so a turn that just *became* a
+      // task thread is excluded; before the map cleanup so it can still read
+      // them.
+      await announceThreadCompletion({
+        sessionId,
+        agent,
+        roomId,
+        threadRoot,
+        sessionKey,
+        producedOutput,
+        failed: turnError !== undefined,
+      })
       buffers.delete(sessionId)
       bufferMessageIds.delete(sessionId)
       flushedCounts.delete(sessionId)
       lastFlushed.delete(sessionId)
+      lastThreadEventId.delete(sessionId)
       sendQueue.delete(sessionId)
       turnMirrors.delete(sessionId)
     }
@@ -3326,6 +3434,14 @@ export async function rebuildThreadState(
     asUserId: asUser,
   })
   const root = await client.fetchEvent(roomId, rootEventId, asUser)
+  // Recover the root author so the thread completion mention target survives a
+  // daemon restart (the live path sets these at thread promotion).
+  if (root) {
+    const rootSender = (root as { sender?: string }).sender
+    if (rootSender) state.rootSender = rootSender
+    const rootContent = (root as { content?: Record<string, unknown> }).content
+    if (rootContent?.['dev.zooid.trigger'] !== undefined) state.rootIsTrigger = true
+  }
   const events = [...(root ? [root] : []), ...thread]
   for (const ev of events) {
     // The transport's own display mirror is not content: it echoes tool output

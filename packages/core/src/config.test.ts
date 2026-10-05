@@ -347,6 +347,14 @@ describe('mergeCliFlags', () => {
     expect(merged.agents.qa!.workdir).toBe('./qa')
   })
 
+  it('preserves the workforce announce block through merge', () => {
+    const base = baseConfig({ announce: { thread_completion: true } })
+    const merged = mergeCliFlags(base, {})
+    expect(merged.announce).toEqual({ thread_completion: true })
+    // A copy, not the same object reference — the merge never mutates base.
+    expect(merged.announce).not.toBe(base.announce)
+  })
+
   it('accepts --runtime docker from CLI flags (no auto-default image)', () => {
     const merged = mergeCliFlags(baseConfig(), { runtime: 'docker' })
     expect(merged.runtime).toBe('docker')

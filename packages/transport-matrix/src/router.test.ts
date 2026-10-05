@@ -65,6 +65,16 @@ describe('route', () => {
     expect(matches.map((m) => m.name)).toEqual([])
   })
 
+  it('drops the top-level completion notice so an `any` agent never wakes on it', () => {
+    // Sanity: the same event without the marker does match `monitor`.
+    expect(route(msg({ room: '!alerts:example.com' }), agents).map((m) => m.name)).toEqual([
+      'monitor',
+    ])
+    const markerEvt = msg({ room: '!alerts:example.com' })
+    Object.assign(markerEvt.content, { 'dev.zooid.completion_notice': true })
+    expect(route(markerEvt, agents)).toEqual([])
+  })
+
   it('skips events whose sender is the matched agent itself', () => {
     const matches = route(
       msg({
