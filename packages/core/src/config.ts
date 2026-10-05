@@ -78,6 +78,13 @@ function parseAcpBlock(name: string, raw: unknown): AcpAgentSpec {
       `agents.${name}.acp: must specify either preset or command`,
     )
   }
+  let mode: string | undefined
+  if (a.mode !== undefined) {
+    if (typeof a.mode !== 'string' || a.mode.trim().length === 0) {
+      throw new Error(`agents.${name}.acp.mode: must be a non-empty string`)
+    }
+    mode = a.mode.trim()
+  }
   if (hasPreset) {
     if (typeof a.preset !== 'string' || a.preset.length === 0) {
       throw new Error(`agents.${name}.acp.preset: must be a non-empty string`)
@@ -87,13 +94,14 @@ function parseAcpBlock(name: string, raw: unknown): AcpAgentSpec {
         `agents.${name}.acp.preset: unknown preset "${a.preset}"`,
       )
     }
-    const out: { preset: string; model?: string } = { preset: a.preset }
+    const out: { preset: string; model?: string; mode?: string } = { preset: a.preset }
     if (a.model !== undefined) {
       if (typeof a.model !== 'string' || a.model.trim().length === 0) {
         throw new Error(`agents.${name}.acp.model: must be a non-empty string`)
       }
       out.model = a.model.trim()
     }
+    if (mode !== undefined) out.mode = mode
     return out as AcpAgentSpec
   }
   if (typeof a.command !== 'string' || a.command.length === 0) {
@@ -111,7 +119,7 @@ function parseAcpBlock(name: string, raw: unknown): AcpAgentSpec {
       args.push(v)
     }
   }
-  return { command: a.command, args } as AcpAgentSpec
+  return (mode === undefined ? { command: a.command, args } : { command: a.command, args, mode }) as AcpAgentSpec
 }
 
 function parseApprovalTimeout(name: string, raw: unknown): number {
@@ -178,6 +186,18 @@ function parseAgentDurationMs(
       return n * 60 * 60_000
   }
   throw new Error('unreachable')
+}
+
+function parseSessionIdleTimeout(name: string, raw: unknown): number {
+  if (raw === undefined) return 600_000
+  if (raw === 0 || raw === '0') return 0
+  const match = typeof raw === 'string' ? /^(\d+)(s|m|h)$/.exec(raw) : null
+  const multiplier = match?.[2] === 's' ? 1000 : match?.[2] === 'm' ? 60_000 : 3_600_000
+  const milliseconds = match ? Number(match[1]) * multiplier : NaN
+  if (!Number.isSafeInteger(milliseconds)) {
+    throw new Error(`agents.${name}.session_idle_timeout: expected a duration like "30s", "15m", "2h", or 0`)
+  }
+  return milliseconds
 }
 
 function parseAgentContainer(
@@ -758,6 +778,7 @@ function parseAgents(
     const acp = parseAcpBlock(name, entry.acp)
     const approval_timeout_ms = parseApprovalTimeout(name, entry.approval_timeout)
     const first_response_timeout_ms = parseFirstResponseTimeout(name, entry.first_response_timeout)
+    const session_idle_timeout_ms = parseSessionIdleTimeout(name, entry.session_idle_timeout)
 
     // Reject legacy fields up front with pointers to [ZOD043].
     if (entry.docker !== undefined) {
@@ -835,6 +856,7 @@ function parseAgents(
       hooks: agentHooks,
       acp,
       approval_timeout_ms,
+      session_idle_timeout_ms,
     }
     // Undefined means "use the AcpClient default" — the per-agent override is
     // an override, not a second source of truth for the same number.

@@ -1,5 +1,25 @@
+import {
+  ElicitationUnsupportedError,
+  type ElicitationResponse,
+} from '@zooid/acp-client'
+import {
+  unsupportedSchemaReasons,
+  validateElicitationContent,
+  type ElicitationCorrelator,
+  type ElicitationResolution,
+  type PendingElicitation,
+} from '@zooid/core'
+import {
+  ElicitationEventType,
+  parseElicitationResponse,
+  toElicitationNoticeBody,
+  toElicitationOutcomeBody,
+  toElicitationRejectedBody,
+  toElicitationRequestBody,
+  toElicitationResolvedBody,
+} from './elicitation-events.js'
 import { Hono } from 'hono'
-import { timingSafeEqual } from 'node:crypto'
+import { timingSafeEqual, randomUUID } from 'node:crypto'
 import type {
   AcpRegistry,
   ApprovalCorrelator,
@@ -10,6 +30,8 @@ import type {
   StartTaskSpec,
   ThreadCompletion,
   ThreadStartContent,
+  HandoffInput,
+  HandoffOutput,
 } from '@zooid/core'
 import { THREAD_RESULT_FIELD, THREAD_START_FIELD } from '@zooid/core'
 import type { AgentEvent, ContentBlock } from '@zooid/acp-client'
@@ -25,7 +47,10 @@ import {
   type ThreadState,
 } from './router.js'
 import { sessionKeyFor, composeHandoffKey } from './session-keys.js'
+import { PendingReturns, type ReleasedReturn } from './pending-returns.js'
 import { stripMention, extractMentions } from './mentions.js'
+import { WorkforceDirectory } from './workforce-publisher.js'
+import { buildHandoffContent, readHandoff, resolveHandoffTarget, type HandoffCandidate } from './handoff.js'
 import {
   toToolCallBody,
   toUpdateBody,
@@ -56,10 +81,17 @@ import {
   reactionCommand,
   type ApprovalCommand,
 } from './approval-commands.js'
+import {
+  contentFromAnswer,
+  isElicitationRequestId,
+  parseElicitationCommand,
+  reactionIndex,
+  singleEnumField,
+} from './elicitation-commands.js'
 import { classify } from '@zooid/acp-client'
 import { toMatrixHtml } from './markdown-to-matrix-html.js'
 import { PendingMediaStore, type PendingMediaItem } from './pending-media.js'
-import { MediaClient, MAX_INLINE_IMAGE_BYTES, INLINE_IMAGE_MIMES } from './media-client.js'
+import { MAX_INLINE_IMAGE_BYTES, INLINE_IMAGE_MIMES } from './media-client.js'
 import { writeAttachment } from './attachments.js'
 import { SyncLoop } from './sync-loop.js'
 import { NO_PENDING_INPUT } from '@zooid/core'
@@ -73,6 +105,8 @@ import {
   renderInvocationReturn,
   renderAssigneeEnvelope,
   renderDelivery,
+  renderHandoffReturn,
+  renderHandoffDelivery,
 } from './task-dispatch.js'
 
 export interface MediaClientLike {
@@ -133,8 +167,12 @@ export interface CreateMatrixTransportOptions {
   taskJournal?: TaskJournal
   taskRunId?: string
   pendingInput?: PendingInputRegistry
+  elicitations?: ElicitationCorrelator
+  elicitationRetryDelayMs?: number
   /** Deferred-return fallback window. Defaults to `RETURN_GRACE_MS`. */
   returnGraceMs?: number
+  /** Fallback for a hold on a callee on another workstation ([[ZOD092]] §5). Defaults to `REMOTE_RETURN_GRACE_MS`. */
+  remoteReturnGraceMs?: number
 }
 
 interface SessionContext {
@@ -142,20 +180,10 @@ interface SessionContext {
   roomId: string
   /** Always set — every session is thread-scoped via agent-promotion. */
   threadRoot: string
+  /** This turn's session key ([[ZOD071]] arc, or the thread-level key). */
+  sessionKey: string
 }
 
-/** A callee's return to its caller, held until the callee's turn ends. */
-interface PendingReturn {
-  roomId: string
-  threadRoot: string
-  /** Last message of the turn so far; prompts the caller when released. */
-  event: MatrixEvent
-  /** Every chunk the callee posted this turn, in order. */
-  texts: string[]
-  /** Callers to wake, by agent name. */
-  targets: Map<string, AgentBinding>
-  timer?: ReturnType<typeof setTimeout>
-}
 interface TurnInput {
   roomId: string
   threadRoot: string
@@ -189,13 +217,21 @@ interface MatrixEvent {
 const STARTUP_GRACE_MS = 5_000
 
 /**
- * How long a deferred return waits for the sending agent's `dev.zooid.turn.end`
- * before firing anyway. The turn.end always follows the turn's messages on the
- * wire, so this only matters when there is no turn behind them at all — the
- * daemon restarted mid-turn, or a human posted as the agent's user from a
- * plain Matrix client. Without it such a return would strand forever.
+ * Fallback for a held return whose callee turn this process cannot account
+ * for: a restart mid-turn, a lost `dev.zooid.turn.end`, someone posting as
+ * the agent's user. Never a deadline on a running turn ([[ZOD088]]).
  */
 const RETURN_GRACE_MS = 90_000
+
+/**
+ * A remote callee's running turn is invisible here; one long tool call emits a
+ * single tool_call. The window exists only for a remote daemon that died
+ * mid-turn ([[ZOD092]] §5). A human interrupt releases immediately.
+ */
+const REMOTE_RETURN_GRACE_MS = 30 * 60_000
+
+/** Sender-attributable liveness that re-arms a timed return ([[ZOD088]]). */
+const ACTIVITY_EVENTS = new Set(['dev.zooid.tool_call', 'dev.zooid.tool_call_update', 'dev.zooid.plan'])
 
 interface MediaBlocksResult {
   blocks: ContentBlock[]
@@ -389,6 +425,28 @@ function inboundThreadRoot(evt: MatrixEvent): string | undefined {
   return r?.rel_type === 'm.thread' && r.event_id ? r.event_id : undefined
 }
 
+/**
+ * A stock Matrix client cannot send the `dev.zooid.interrupt` custom event, so
+ * the transport also accepts the command as prose: `/interrupt` or
+ * `/interrupt@<agent>` (the mention form clients append when the room has
+ * several agents), case-insensitively. Anchored so a sentence that merely
+ * mentions the word (`please /interrupt`) stays ordinary prose.
+ */
+const INTERRUPT_COMMAND_RE = /^\/interrupt(?:@[^\s]+)?$/i
+
+/**
+ * Alternative interrupt trigger: a bare "stop" or "stopp" (surrounding
+ * whitespace allowed), case-insensitively. Only the whole message counts, so
+ * ordinary prose that merely contains the word ("please stop the build")
+ * stays a prompt.
+ */
+const INTERRUPT_STOP_RE = /^\s*stopp?\s*$/i
+
+function isInterruptTrigger(body: unknown): boolean {
+  if (typeof body !== 'string') return false
+  return INTERRUPT_COMMAND_RE.test(body.trim()) || INTERRUPT_STOP_RE.test(body)
+}
+
 export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   const {
     agents,
@@ -404,6 +462,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   const drainMaxMs = opts.drainMaxMs ?? DRAIN_MAX_MS
   const mirrorEditIntervalMs = opts.mirrorEditIntervalMs ?? MIRROR_EDIT_INTERVAL_MS
   const returnGraceMs = opts.returnGraceMs ?? RETURN_GRACE_MS
+  const remoteReturnGraceMs = opts.remoteReturnGraceMs ?? REMOTE_RETURN_GRACE_MS
   const mediaClient = opts.media
   const writeAttachmentFn = opts.writeAttachmentFn ?? writeAttachment
   const pendingMedia = new PendingMediaStore()
@@ -429,18 +488,18 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   const taskRegistry = new TaskRegistry({ journal: opts.taskJournal, runId: opts.taskRunId })
   const interruptedTasks = taskRegistry.restore()
   const invocations = new InvocationRegistry()
-  const pendingInput = opts.pendingInput ?? NO_PENDING_INPUT
+  const pendingInput = opts.pendingInput ?? opts.elicitations ?? NO_PENDING_INPUT
   const bindingFor = (name: string) => bindings.find((b) => b.name === name)
   const turnQueues = new Map<string, Promise<void>>()
+  // Every workstation's agents, from the space's roster state events; the
+  // router uses it to tell another daemon's agent from a human.
+  const workforce = new WorkforceDirectory()
   /**
-   * Returns awaiting their sender's turn boundary, keyed `<agent>::<threadRoot>`.
-   * See `isReturnRoute`: an agent turn posts one message per buffered chunk, so
-   * a return must not fire per message or the caller wakes once per chunk (and
-   * its replies then read as the two agents re-triggering each other). We stash
-   * the callee's prose instead and hand the caller the whole turn at once.
+   * Ordinary-thread handoff returns, held until the callee's turn ends
+   * leaving no open call ([[ZOD088]]). Delegated task threads never reach
+   * this: [[ZOD072]] / [[ZOD079]] own their returns.
    */
-  const pendingReturns = new Map<string, PendingReturn>()
-  const returnKey = (agentName: string, threadRoot: string) => `${agentName}::${threadRoot}`
+  const returns = new PendingReturns({ graceMs: returnGraceMs, remoteGraceMs: remoteReturnGraceMs, onRelease: deliverReturn })
 
   // ── Element-compatible mirror + interactive approvals ───────────────────
   // Correlation for approvals answered from a stock Matrix client instead of a
@@ -462,6 +521,38 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     for (const [eventId, id] of approvalByEvent) {
       if (id === approvalId) approvalByEvent.delete(eventId)
     }
+  }
+
+  // ── Element-compatible elicitation mirror + answer capture ──────────────
+  // A human answers an ACP form from a stock Matrix client with a reply command
+  // or a number-keycap reaction. `elicitationByEvent` maps the request's custom
+  // event and its mirrored notice to the request; `elicitationMeta` holds where
+  // the notice lives and what it says, so a command can be scope-checked and
+  // the notice edited to show its outcome.
+  interface ElicitationMeta {
+    roomId: string
+    threadRoot: string
+    asUserId: string
+    /** Original notice body, so an outcome/rejection edit keeps the question. */
+    baseBody: string
+    noticeEventId?: string
+    /** Set only for a single-enum form, enabling number-keycap answers. */
+    reaction?: { field: string; choices: string[] }
+  }
+  const elicitationByEvent = new Map<string, string>()
+  const elicitationMeta = new Map<string, ElicitationMeta>()
+
+  function forgetElicitation(requestId: string): void {
+    elicitationMeta.delete(requestId)
+    for (const [eventId, id] of elicitationByEvent) {
+      if (id === requestId) elicitationByEvent.delete(eventId)
+    }
+  }
+
+  function formatElicitationErrors(errors: Record<string, string>): string {
+    return Object.entries(errors)
+      .map(([key, msg]) => `${key}: ${msg}`)
+      .join('; ')
   }
 
   /**
@@ -1032,73 +1123,37 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     return true
   }
 
-  function stashReturn(
-    sender: AgentBinding,
-    threadRoot: string,
-    roomId: string,
-    evt: MatrixEvent,
-    targets: AgentBinding[],
-  ): void {
-    const key = returnKey(sender.name, threadRoot)
-    let pending = pendingReturns.get(key)
-    if (!pending) {
-      pending = { roomId, threadRoot, event: evt, texts: [], targets: new Map() }
-      pendingReturns.set(key, pending)
-    }
-    // Prompt the caller with the last event of the turn but the text of all of
-    // it — mid-turn chunks carry content the caller would otherwise never see.
-    pending.event = evt
-    const body = evt.content?.body?.trim()
-    if (body) pending.texts.push(body)
-    for (const t of targets) pending.targets.set(t.name, t)
-    if (pending.timer) clearTimeout(pending.timer)
-    pending.timer = setTimeout(() => releaseReturn(key), returnGraceMs)
-    pending.timer.unref?.()
-    console.log(
-      `[matrix] holding return ${sender.name} → ${[...pending.targets.keys()].join(',')} ` +
-        `until turn end (thread=${threadRoot})`,
-    )
-  }
-
-  function releaseReturn(key: string): void {
-    const pending = pendingReturns.get(key)
-    if (!pending) return
-    pendingReturns.delete(key)
-    if (pending.timer) clearTimeout(pending.timer)
-    const promptText = pending.texts.join('\n\n')
-    for (const target of pending.targets.values()) {
-      console.log(`[matrix] → ${target.name} (${target.userId}) [return]`)
-      void enqueueTurn(target, {
-        roomId: pending.roomId,
-        threadRoot: pending.threadRoot,
-        sessionKey: sessionKeyFor(
-          target.name,
-          pending.threadRoot,
-          threadStates.get(pending.threadRoot),
-        ),
-        event: pending.event,
-        ...(promptText ? { promptText } : {}),
+  const isLocal = (userId: string) => bindings.some((b) => b.userId === userId)
+  const agentName = (userId: string) =>
+    bindings.find((b) => b.userId === userId)?.name ?? workforce.nameOf(userId) ?? userId
+  /** [[ZOD092]] One open handoff per caller per thread: `<callerMxid>::<threadRoot>` → callee MXID. */
+  const openHandoffs = new Map<string, string>()
+  const openKey = (caller: string, threadRoot: string) => `${caller}::${threadRoot}`
+  function handoffCandidates(): HandoffCandidate[] {
+    const byId = new Map<string, HandoffCandidate>()
+    for (const e of workforce.entries()) byId.set(e.userId, e)
+    for (const b of bindings)
+      byId.set(b.userId, {
+        userId: b.userId,
+        name: b.name,
+        workstation: byId.get(b.userId)?.workstation,
+        rooms: b.rooms.map((r) => r.alias),
       })
-    }
+    return [...byId.values()]
   }
 
-  /** Cancel a held return because its target is being woken by this event anyway. */
-  function dropPendingReturn(threadRoot: string, agentName: string): void {
-    for (const [key, pending] of pendingReturns) {
-      if (pending.threadRoot !== threadRoot) continue
-      if (!pending.targets.delete(agentName)) continue
-      if (pending.targets.size === 0) {
-        if (pending.timer) clearTimeout(pending.timer)
-        pendingReturns.delete(key)
-      }
-    }
-  }
-
-  function dropThreadReturns(threadRoot: string): void {
-    for (const [key, pending] of pendingReturns) {
-      if (pending.threadRoot !== threadRoot) continue
-      if (pending.timer) clearTimeout(pending.timer)
-      pendingReturns.delete(key)
+  // Release and queue are one transition: the caller's turn is enqueued on its
+  // session FIFO in the same tick the hold clears.
+  function deliverReturn(r: ReleasedReturn): void {
+    for (const target of r.targets) {
+      openHandoffs.delete(openKey(target.userId, r.threadRoot))
+      console.log(`[matrix] → ${target.name} (${target.userId}) [return from ${agentName(r.callee)}]`)
+      void enqueueTurn(target, {
+        roomId: r.roomId,
+        threadRoot: r.threadRoot,
+        sessionKey: sessionKeyFor(target.userId, r.threadRoot, threadStates.get(r.threadRoot)),
+        promptText: renderHandoffReturn({ callee: agentName(r.callee), text: r.text }),
+      })
     }
   }
   // Drop events older than this — in push (appservice) mode Tuwunel may replay
@@ -1171,54 +1226,20 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     lastFlushed.set(sessionId, text)
     flushedCounts.set(sessionId, (flushedCounts.get(sessionId) ?? 0) + 1)
     const content = buildTextContent(text)
-    const pendingInvocations = registerOutgoingHandoffs(sessionId, text)
     const tail = (sendQueue.get(sessionId) ?? Promise.resolve()).then(async () => {
       try {
-        const { event_id } = await client.sendMessage({
+        await client.sendMessage({
           roomId: ctx.roomId,
           asUserId: ctx.agent.userId,
           content,
           threadRoot: ctx.threadRoot,
         })
-        for (const invocation of pendingInvocations)
-          invocations.attachCallEvent(
-            invocation.invocationId,
-            event_id,
-            composeHandoffKey(ctx.threadRoot, event_id),
-          )
       } catch (err) {
         console.warn(`[matrix:${ctx.agent.name}] sendMessage flush failed:`, err)
       }
     })
     sendQueue.set(sessionId, tail)
     return true
-  }
-
-  function registerOutgoingHandoffs(sessionId: string, text: string) {
-    const ctx = sessions.get(sessionId)
-    if (!ctx) return []
-    const task = taskRegistry.taskForRoot(ctx.threadRoot)
-    if (!task || task.phase !== 'open') return []
-    const sessionKey = sessionKeyFor(ctx.agent.name, ctx.threadRoot, threadStates.get(ctx.threadRoot))
-    const opened = []
-    for (const userId of extractMentions({ content: { body: text } })) {
-      const callee = bindings.find((binding) => binding.userId === userId)
-      if (!callee || callee.name === ctx.agent.name) continue
-      if (invocations.isOutstandingAncestor(sessionKey, callee.name)) {
-        const content = { body: `⚠ [handoff_circular] Cannot hand off to ${callee.name}: it is waiting on ${ctx.agent.name}`, code: 'handoff_circular', message: `Cannot hand off to ${callee.name}: it is waiting on ${ctx.agent.name}`, transient: false, 'm.relates_to': { rel_type: 'm.thread', event_id: ctx.threadRoot } }
-        void client.sendCustomEvent({
-          roomId: ctx.roomId, asUserId: ctx.agent.userId, eventType: 'dev.zooid.error', content,
-        })
-        void sendMirrorNotice(client, {
-          roomId: ctx.roomId, asUserId: ctx.agent.userId, threadRoot: ctx.threadRoot,
-          eventType: 'dev.zooid.error', content,
-        })
-        continue
-      }
-      opened.push(invocations.open({ taskId: task.taskId, callerAgent: ctx.agent.name, callerSessionKey: sessionKey, calleeAgent: callee.name }))
-      taskRegistry.clearSummary(task.taskId)
-    }
-    return opened
   }
 
   /**
@@ -1474,6 +1495,443 @@ agents.onEvent = async (name, event: AgentEvent) => {
     approvals.cancelSession(prev)
   }
 
+  const elicitations = opts.elicitations
+  const elicitationRetryDelayMs = opts.elicitationRetryDelayMs ?? 500
+  // Per request: the publish attempt, so 'resolved' never races the card.
+  const elicitationPublishes = new Map<string, Promise<void>>()
+
+  async function sendWithRetry(input: {
+    roomId: string
+    asUserId: string
+    eventType: string
+    content: Record<string, unknown>
+    txnId: string
+  }): Promise<{ event_id: string }> {
+    let last: unknown
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        // Same txnId every attempt: a lost ack cannot duplicate the event.
+        return await client.sendCustomEvent(input)
+      } catch (err) {
+        last = err
+        console.warn(`[matrix] ${input.eventType} attempt ${attempt} failed:`, err)
+        if (attempt < 3 && elicitationRetryDelayMs > 0) await delay(elicitationRetryDelayMs * attempt)
+      }
+    }
+    throw last
+  }
+
+  if (elicitations) {
+    agents.onElicitationRequest = async (name, req, signal) => {
+      const ctx = sessions.get(req.sessionId)
+      if (!ctx || ctx.agent.name !== name) {
+        console.warn(`[matrix:${name}] elicitation for ${req.sessionId} has no Matrix thread`)
+        throw new ElicitationUnsupportedError(`session ${req.sessionId} has no Matrix thread`)
+      }
+      const reasons = unsupportedSchemaReasons(req.requestedSchema)
+      if (reasons.length > 0) {
+        console.warn(`[matrix:${name}] unsupported elicitation schema: ${reasons.join('; ')}`)
+        throw new ElicitationUnsupportedError(reasons.join('; '))
+      }
+      const { record, response } = elicitations.register({
+        agentName: name,
+        sessionId: req.sessionId,
+        sessionKey: ctx.sessionKey,
+        roomId: ctx.roomId,
+        threadRoot: ctx.threadRoot,
+        request: req,
+        signal,
+      })
+      // Prose the agent wrote before asking lands above the card.
+      flushBuffer(req.sessionId)
+      void client
+        .setTyping({ roomId: ctx.roomId, asUserId: ctx.agent.userId, typing: false })
+        .catch(() => {})
+      const publish = (sendQueue.get(req.sessionId) ?? Promise.resolve()).then(async () => {
+        if (elicitations.get(record.requestId)?.state !== 'pending') return
+        try {
+          const { event_id } = await sendWithRetry({
+            roomId: ctx.roomId,
+            asUserId: ctx.agent.userId,
+            eventType: ElicitationEventType.Request,
+            content: toElicitationRequestBody(record),
+            txnId: `elicit-req-${record.requestId}`,
+          })
+          elicitations.attachRequestEvent(record.requestId, event_id)
+          // Additive Element mirror: the custom event above is unchanged; the
+          // notice makes the form answerable from a stock client.
+          const baseBody = toElicitationNoticeBody(record, ctx.agent.name)
+          const single = singleEnumField(record.requestedSchema)
+          const meta: ElicitationMeta = {
+            roomId: ctx.roomId,
+            threadRoot: ctx.threadRoot,
+            asUserId: ctx.agent.userId,
+            baseBody,
+            ...(single ? { reaction: { field: single.name, choices: single.choices } } : {}),
+          }
+          elicitationMeta.set(record.requestId, meta)
+          elicitationByEvent.set(event_id, record.requestId)
+          const noticeEventId = await postElicitationNotice(ctx, baseBody)
+          if (noticeEventId) {
+            meta.noticeEventId = noticeEventId
+            elicitationByEvent.set(noticeEventId, record.requestId)
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error(`[matrix:${name}] could not publish elicitation ${record.requestId}: ${msg}`)
+          elicitations.fail(record.requestId, new Error(`could not publish elicitation card: ${msg}`))
+        }
+      })
+      elicitationPublishes.set(record.requestId, publish)
+      // The send queue waits for the card, never for the answer — later
+      // sends and the turn's final drain must not block on a human.
+      sendQueue.set(req.sessionId, publish)
+      try { return await response } finally { elicitationPublishes.delete(record.requestId) }
+    }
+
+    elicitations.on('resolved', (res: ElicitationResolution) => {
+      const { record } = res
+      const agent = bindingFor(record.agentName)
+      if (!agent) return
+      void (elicitationPublishes.get(record.requestId) ?? Promise.resolve()).then(async () => {
+        elicitationPublishes.delete(record.requestId)
+        const current = elicitations.get(record.requestId)
+        if (!current?.requestEventId) return // never shown; nothing to close
+        await sendWithRetry({
+          roomId: record.roomId,
+          asUserId: agent.userId,
+          eventType: ElicitationEventType.Resolved,
+          content: toElicitationResolvedBody({ ...res, record: current }),
+          txnId: `elicit-res-${record.requestId}`,
+        }).catch((err) => console.error(`[matrix] elicitation_resolved ${record.requestId} not sent:`, err))
+        // Show the outcome on the Element notice, then drop the correlation.
+        if (elicitationMeta.has(record.requestId)) {
+          await editElicitationNotice(record.requestId, toElicitationOutcomeBody(res))
+        }
+        forgetElicitation(record.requestId)
+        // Answered mid-turn: show the agent working again right away.
+        if (
+          elicitations.countForSession(record.sessionId) === 0 &&
+          turnQueues.has(`${record.agentName}::${record.sessionKey}`)
+        ) {
+          void client
+            .setTyping({ roomId: record.roomId, asUserId: agent.userId, typing: true, timeoutMs: 30_000 })
+            .catch(() => {})
+        }
+      })
+    })
+  }
+
+  function sendElicitationRejected(
+    record: PendingElicitation,
+    responseEventId: string,
+    reason: 'invalid' | 'stale',
+    errors?: Record<string, string>,
+  ): void {
+    const agent = bindingFor(record.agentName)
+    if (!agent) return
+    void sendWithRetry({
+      roomId: record.roomId,
+      asUserId: agent.userId,
+      eventType: ElicitationEventType.Rejected,
+      content: toElicitationRejectedBody({ record, responseEventId, reason, errors }),
+      txnId: `elicit-rej-${responseEventId}`,
+    }).catch((err) => console.warn(`[matrix] elicitation_rejected not sent:`, err))
+  }
+
+  async function handleElicitationResponse(evt: MatrixEvent): Promise<void> {
+    if (!elicitations) return
+    const parsed = parseElicitationResponse(evt)
+    const sender = evt.sender
+    if (!parsed || !sender || !evt.event_id || !evt.room_id) return
+    // Agents and service identities never answer on a human's behalf.
+    if (ourBotUserIds.has(sender) || workforce.agentIds.has(sender)) {
+      console.warn(`[matrix] ignoring elicitation response from agent ${sender}`)
+      return
+    }
+    // A response can arrive while a lost publication acknowledgement is being retried.
+    await elicitationPublishes.get(parsed.requestId)
+    const record = elicitations.get(parsed.requestId)
+    // Unknown: another daemon's question, or one from before a restart.
+    if (!record) return
+    if (
+      record.roomId !== evt.room_id ||
+      record.threadRoot !== parsed.threadRoot ||
+      record.requestEventId !== parsed.requestEventId
+    ) {
+      console.warn(`[matrix] elicitation response ${evt.event_id} does not match request ${record.requestId}`)
+      return
+    }
+    const agent = bindingFor(record.agentName)
+    if (!agent) return
+    try {
+      const { joined } = await client.getJoinedMembers(record.roomId, agent.userId)
+      if (!Object.hasOwn(joined, sender)) {
+        console.warn(`[matrix] elicitation response from non-member ${sender}`)
+        return
+      }
+    } catch (err) {
+      console.warn(`[matrix] membership check failed for ${sender}; response ignored:`, err)
+      return
+    }
+    if (elicitations.get(record.requestId)?.state !== 'pending') return sendElicitationRejected(record, evt.event_id, 'stale')
+    let response: ElicitationResponse
+    if (parsed.action === 'accept') {
+      const v = validateElicitationContent(record.requestedSchema, parsed.content)
+      if (!v.ok) {
+        if (elicitations.get(record.requestId)?.state === 'pending') {
+          sendElicitationRejected(record, evt.event_id, 'invalid', v.errors)
+        } else {
+          sendElicitationRejected(record, evt.event_id, 'stale')
+        }
+        return
+      }
+      response = { action: 'accept', content: v.content }
+    } else {
+      response = { action: parsed.action }
+    }
+    // Atomic: the first eligible response wins; the rest are stale.
+    if (!elicitations.settle(record.requestId, response, { respondedBy: sender, responseEventId: evt.event_id })) {
+      sendElicitationRejected(record, evt.event_id, 'stale')
+    }
+  }
+
+  /** Post the mirror-marked Element notice for an elicitation request. */
+  async function postElicitationNotice(
+    ctx: { roomId: string; threadRoot: string; agent: AgentBinding },
+    body: string,
+  ): Promise<string | undefined> {
+    try {
+      const { event_id } = await client.sendMessage({
+        roomId: ctx.roomId,
+        asUserId: ctx.agent.userId,
+        threadRoot: ctx.threadRoot,
+        // Mirror-marked so the router never treats the quoted question as a
+        // fresh mention and the Zooid client can hide it.
+        content: { msgtype: 'm.notice', body, [TURN_MIRROR_MARKER]: true },
+      })
+      return event_id
+    } catch (err) {
+      console.warn('[matrix] elicitation notice send failed:', err)
+      return undefined
+    }
+  }
+
+  /** Best-effort plain notice (unknown/out-of-scope command feedback). */
+  async function postElicitationInfo(
+    roomId: string | undefined,
+    threadRoot: string | undefined,
+    body: string,
+  ): Promise<void> {
+    if (!roomId) return
+    const sender = firstAgentUserIdForRoom(roomId)
+    if (!sender) return
+    await client
+      .sendMessage({
+        roomId,
+        asUserId: sender,
+        ...(threadRoot ? { threadRoot } : {}),
+        content: { msgtype: 'm.notice', body, [TURN_MIRROR_MARKER]: true },
+      })
+      .catch((e) => console.warn('[matrix] elicitation info notice send failed:', e))
+  }
+
+  /** Edit the request's notice, appending a line below the original question. */
+  async function editElicitationNotice(requestId: string, suffix: string): Promise<void> {
+    const meta = elicitationMeta.get(requestId)
+    if (!meta?.noticeEventId) return
+    try {
+      await client.sendMessage({
+        roomId: meta.roomId,
+        asUserId: meta.asUserId,
+        content: turnMirrorEditContent(
+          meta.noticeEventId,
+          `${meta.baseBody}\n\n${suffix}`,
+          meta.threadRoot,
+        ),
+      })
+    } catch (err) {
+      console.warn('[matrix] elicitation notice edit failed:', err)
+    }
+  }
+
+  /**
+   * Shared scope/membership guard for a stock-client answer, mirroring the
+   * custom-event path in `handleElicitationResponse`: agents never answer, the
+   * sender must be joined, and the request must live in this room.
+   */
+  async function guardElicitationAnswer(
+    evt: MatrixEvent,
+    requestId: string,
+  ): Promise<{ record: PendingElicitation; agent: AgentBinding; meta: ElicitationMeta } | null> {
+    if (!elicitations) return null
+    const sender = evt.sender
+    if (!sender) return null
+    if (ourBotUserIds.has(sender) || workforce.agentIds.has(sender)) {
+      console.warn(`[matrix] ignoring elicitation answer from agent ${sender}`)
+      return null
+    }
+    await elicitationPublishes.get(requestId)
+    const record = elicitations.get(requestId)
+    const meta = elicitationMeta.get(requestId)
+    if (!record || !meta) return null
+    if (record.roomId !== evt.room_id || meta.roomId !== evt.room_id) return null
+    const agent = bindingFor(record.agentName)
+    if (!agent) return null
+    try {
+      const { joined } = await client.getJoinedMembers(record.roomId, agent.userId)
+      if (!joined || !Object.hasOwn(joined, sender)) {
+        console.warn(`[matrix] elicitation answer from non-member ${sender}`)
+        return null
+      }
+    } catch (err) {
+      console.warn(`[matrix] membership check failed for ${sender}; answer ignored:`, err)
+      return null
+    }
+    return { record, agent, meta }
+  }
+
+  /**
+   * Settle a validated answer. `get()` and `settle()` run in the same
+   * synchronous tick, so two Element answers cannot both win — the loser sees
+   * `stale` and the question is left untouched.
+   */
+  async function finishElicitation(
+    evt: MatrixEvent,
+    requestId: string,
+    record: PendingElicitation,
+    response: ElicitationResponse,
+  ): Promise<void> {
+    if (!elicitations || !evt.event_id) return
+    if (elicitations.get(requestId)?.state !== 'pending') {
+      sendElicitationRejected(record, evt.event_id, 'stale')
+      await editElicitationNotice(requestId, 'This question is no longer open.')
+      return
+    }
+    if (!elicitations.settle(requestId, response, { respondedBy: evt.sender, responseEventId: evt.event_id })) {
+      sendElicitationRejected(record, evt.event_id, 'stale')
+      await editElicitationNotice(requestId, 'This question is no longer open.')
+    }
+  }
+
+  /**
+   * Reject an Element answer as invalid, but re-check `pending` first: a
+   * concurrent winner during the awaited membership check must downgrade this
+   * to `stale`, not emit a spurious `invalid` for an already-resolved request
+   * (parity with the custom-event path in `handleElicitationResponse`).
+   */
+  async function rejectElicitationInvalid(
+    requestId: string,
+    record: PendingElicitation,
+    responseEventId: string,
+    errors: Record<string, string>,
+    suffix: string,
+  ): Promise<void> {
+    if (elicitations?.get(requestId)?.state === 'pending') {
+      sendElicitationRejected(record, responseEventId, 'invalid', errors)
+      await editElicitationNotice(requestId, suffix)
+    } else {
+      sendElicitationRejected(record, responseEventId, 'stale')
+    }
+  }
+
+  /** Returns true when the reaction was a number-keycap answer we handled. */
+  async function handleElicitationReaction(evt: MatrixEvent): Promise<boolean> {
+    if (!elicitations) return false
+    const rel = evt.content?.['m.relates_to'] as
+      | { rel_type?: string; event_id?: string; key?: string }
+      | undefined
+    if (!rel || rel.rel_type !== 'm.annotation' || !rel.event_id) return false
+    const index = reactionIndex(evt.content?.key ?? rel.key)
+    if (index === undefined) return false
+    if (evt.sender && (ourBotUserIds.has(evt.sender) || workforce.agentIds.has(evt.sender))) return false
+    const requestId = elicitationByEvent.get(rel.event_id)
+    if (!requestId) return false
+    const meta = elicitationMeta.get(requestId)
+    if (!meta?.reaction || meta.roomId !== evt.room_id || !evt.event_id) return false
+    const { field, choices } = meta.reaction
+    const choice = choices[index]
+    if (choice === undefined) return false
+    const guarded = await guardElicitationAnswer(evt, requestId)
+    if (!guarded) return true
+    const v = validateElicitationContent(guarded.record.requestedSchema, { [field]: choice })
+    if (!v.ok) {
+      await rejectElicitationInvalid(
+        requestId,
+        guarded.record,
+        evt.event_id,
+        v.errors,
+        `⚠️ ${formatElicitationErrors(v.errors)}`,
+      )
+      return true
+    }
+    await finishElicitation(evt, requestId, guarded.record, { action: 'accept', content: v.content })
+    return true
+  }
+
+  /** Returns true when the message was an elicitation answer/decision command. */
+  async function maybeHandleElicitationMessage(evt: MatrixEvent): Promise<boolean> {
+    if (!elicitations || !evt.event_id) return false
+    const body = typeof evt.content?.body === 'string' ? evt.content.body : ''
+    const parsed = parseElicitationCommand(body)
+    if (!parsed) return false
+    // Only an id-shaped token is a command; prose like "answer the question"
+    // routes normally instead of being consumed.
+    if (!isElicitationRequestId(parsed.requestId)) return false
+    if (evt.sender && (ourBotUserIds.has(evt.sender) || workforce.agentIds.has(evt.sender))) return false
+
+    await elicitationPublishes.get(parsed.requestId)
+    const record = elicitations.get(parsed.requestId)
+    const meta = elicitationMeta.get(parsed.requestId)
+    const threadRoot = inboundThreadRoot(evt)
+    if (!record) {
+      await postElicitationInfo(evt.room_id, threadRoot, `No open question \`${parsed.requestId}\`.`)
+      return true
+    }
+    // An Element answer must be in the request's own thread, exactly like the
+    // custom `dev.zooid.elicitation_response` path — a top-level reply from any
+    // room member must not settle a question asked in a thread.
+    if (record.roomId !== evt.room_id || record.threadRoot !== threadRoot) {
+      await postElicitationInfo(
+        evt.room_id,
+        threadRoot,
+        `Question \`${parsed.requestId}\` is not open in this thread — reply in the question's thread.`,
+      )
+      return true
+    }
+    if (!meta) {
+      // A terminal record whose correlation was already cleaned up: a late
+      // answer. Tell the sender it is stale rather than silently dropping it.
+      sendElicitationRejected(record, evt.event_id, 'stale')
+      return true
+    }
+    const guarded = await guardElicitationAnswer(evt, parsed.requestId)
+    if (!guarded) return true
+
+    if (parsed.action !== 'answer') {
+      await finishElicitation(evt, parsed.requestId, guarded.record, { action: parsed.action })
+      return true
+    }
+    const answer = contentFromAnswer(guarded.record.requestedSchema, parsed.value ?? '')
+    if (!answer.ok) {
+      await rejectElicitationInvalid(parsed.requestId, guarded.record, evt.event_id, { _: answer.error }, `⚠️ ${answer.error}`)
+      return true
+    }
+    const v = validateElicitationContent(guarded.record.requestedSchema, answer.content)
+    if (!v.ok) {
+      await rejectElicitationInvalid(
+        parsed.requestId,
+        guarded.record,
+        evt.event_id,
+        v.errors,
+        `⚠️ ${formatElicitationErrors(v.errors)}`,
+      )
+      return true
+    }
+    await finishElicitation(evt, parsed.requestId, guarded.record, { action: 'accept', content: v.content })
+    return true
+  }
+
   agents.onApprovalRequest = async (name, req) => {
     const handle = approvals.register(name, (req as { sessionId: string }).sessionId, req, {
       timeoutMs: agents.getApprovalTimeoutMs(name),
@@ -1635,6 +2093,115 @@ agents.onEvent = async (name, event: AgentEvent) => {
     return rootId
   }
 
+  /**
+   * Cancel every live session bound to a thread and close its open task.
+   * Shared by the `dev.zooid.interrupt` custom event and the typed `/interrupt`
+   * command. A live session is cancelled through the agent registry and reports
+   * ACP's `cancelled` stop reason at its turn boundary; a restored/no-session
+   * task has no such boundary, so it is closed here. Returns the agent user ids
+   * that were targeted, for the confirmation notice.
+   */
+  async function interruptThread(input: {
+    threadRoot: string
+    reason?: string
+    roomId?: string
+  }): Promise<{ agentUserIds: string[] }> {
+    const { threadRoot, reason, roomId } = input
+    // Release any deferred return the interrupt supersedes, whichever entry
+    // point fired (custom `dev.zooid.interrupt` event or typed `/interrupt`).
+    returns.interrupt(threadRoot)
+    const targets: Array<{ sessionId: string; agent: string }> = []
+    for (const [sessionId, ctx] of sessions) {
+      if (ctx.threadRoot === threadRoot) {
+        targets.push({ sessionId, agent: ctx.agent.name })
+      }
+    }
+    for (const t of targets) {
+      console.log(
+        `[matrix] interrupt session=${t.sessionId} agent=${t.agent} thread=${threadRoot}` +
+          ` room=${roomId ?? '?'}` +
+          (reason ? ` reason=${reason}` : ''),
+      )
+      await agents.cancelSession(t.agent, t.sessionId).catch((err) => {
+        console.error(`[matrix] cancelSession(${t.agent}, ${t.sessionId}) failed:`, err)
+      })
+    }
+    // A live session will report ACP's `cancelled` stop reason and finish in
+    // its turn boundary, preserving any prose it already emitted. A
+    // restored/no-session task has no such boundary, so close it here.
+    const task = taskRegistry.taskForRoot(threadRoot)
+    if (task?.phase === 'open' && !targets.some((t) => t.agent === task.assignee)) {
+      const assignee = bindingFor(task.assignee)
+      if (assignee) {
+        await finishTask(task, {
+          agent: assignee,
+          completion: { agent: assignee.name, thread_id: threadRoot, status: 'cancelled' },
+        })
+      }
+    }
+    return {
+      agentUserIds: targets
+        .map((t) => bindingFor(t.agent)?.userId)
+        .filter((id): id is string => Boolean(id)),
+    }
+  }
+
+  /**
+   * Post the in-thread `/interrupt` acknowledgement. Sent as a mirror notice
+   * (`TURN_MIRROR_MARKER`) so `route()` never treats the confirmation itself as
+   * content and wakes an agent again.
+   */
+  async function postInterruptNotice(
+    roomId: string,
+    threadRoot: string,
+    asUserId: string | undefined,
+    actor: string | undefined,
+  ): Promise<void> {
+    const sender = asUserId ?? firstAgentUserIdForRoom(roomId)
+    if (!sender) return
+    const who = actor?.replace(/^@/, '').split(':')[0] || 'user'
+    await client
+      .sendMessage({
+        roomId,
+        asUserId: sender,
+        threadRoot,
+        content: {
+          msgtype: 'm.notice',
+          body: `⏹ interrupted by ${who}`,
+          [TURN_MIRROR_MARKER]: true,
+        },
+      })
+      .catch((e) => console.warn('[matrix] interrupt notice send failed:', e))
+  }
+
+  /**
+   * A human typing `/interrupt` (or a bare `stop` / `stopp`) in a stock client.
+   * Returns true when the message was consumed as the command (so it is not
+   * routed as a prompt). Our own agents are ignored — an agent turn that emits
+   * the command as prose must not cancel a peer (or itself) and ripple into a
+   * loop.
+   */
+  async function maybeHandleInterruptMessage(evt: MatrixEvent): Promise<boolean> {
+    if (!isInterruptTrigger(evt.content?.body)) return false
+    if (evt.sender && ourBotUserIds.has(evt.sender)) return true
+    if (!evt.room_id) return true
+    // A top-level `/interrupt` carries no thread relation; under the same
+    // agent-promotion rule a top-level message uses, its own event id is the
+    // root.
+    const threadRoot = inboundThreadRoot(evt) ?? evt.event_id
+    if (!threadRoot) return true
+    console.log(`[matrix] inbound /interrupt in ${evt.room_id} thread=${threadRoot}`)
+    const { agentUserIds } = await interruptThread({
+      threadRoot,
+      reason: 'user_initiated',
+      roomId: evt.room_id,
+    })
+    await postInterruptNotice(evt.room_id, threadRoot, agentUserIds[0], evt.sender)
+    return true
+  }
+
+  let workforceSpaceId: string | undefined
+
   async function handleInboundEvent(evt: MatrixEvent): Promise<void> {
     if (evt.event_id) {
       if (seenEventIds.has(evt.event_id)) {
@@ -1655,6 +2222,11 @@ agents.onEvent = async (name, event: AgentEvent) => {
         `[matrix] dropping stale message event ${evt.event_id} ` +
           `(ts=${evt.origin_server_ts}, daemon started at ${cutoffTs + STARTUP_GRACE_MS})`,
       )
+      return
+    }
+    if (evt.type === 'dev.zooid.workforce') {
+      if (evt.room_id === workforceSpaceId && evt.state_key !== undefined)
+        workforce.apply(evt.state_key, evt.content)
       return
     }
     if (evt.type === 'm.room.member' && evt.content?.membership === 'invite') {
@@ -1693,7 +2265,21 @@ agents.onEvent = async (name, event: AgentEvent) => {
       console.log(`[matrix] inbound dev.zooid.session_reset in ${evt.room_id} thread=${threadRoot}`)
       // /clear must not allow a pre-reset deferred return to wake an agent up
       // later via either its old turn.end or the fallback timer.
-      dropThreadReturns(threadRoot)
+      returns.dropThread(threadRoot)
+      // Spec § Cancellation: clearing cancels a waiting turn's questions and the
+      // turn itself before its memory is replaced. Sessions without an open
+      // question are left alone (ZOD039 behaviour unchanged).
+      if (elicitations) {
+        for (const [sessionId, ctx] of [...sessions]) {
+          if (ctx.threadRoot !== threadRoot || elicitations.countForSession(sessionId) === 0) continue
+          elicitations.cancelSession(sessionId, 'clear')
+          await agents.cancelSession(ctx.agent.name, sessionId).catch((err) => {
+            console.error(`[matrix] cancelSession(${ctx.agent.name}, ${sessionId}) on clear failed:`, err)
+          })
+        }
+      }
+      // [[ZOD092]] No open handoff in this thread survives a reset.
+      for (const k of [...openHandoffs.keys()]) if (k.endsWith(`::${threadRoot}`)) openHandoffs.delete(k)
       // [[ZOD071]]: a thread's sessions are the thread-level one plus one per
       // handoff arc — end them all. Reset events aren't m.room.message, so
       // the self-heal rebuild above doesn't cover them; rebuild here if the
@@ -1702,22 +2288,37 @@ agents.onEvent = async (name, event: AgentEvent) => {
         try {
           threadStates.set(
             threadRoot,
-            await rebuildThreadState(client, evt.room_id, threadRoot, bindings),
+            await rebuildThreadState(client, evt.room_id, threadRoot, bindings, workforce.agentIds),
           )
         } catch (err) {
           console.warn(`[matrix] failed to rebuild threadState for reset ${threadRoot}:`, err)
         }
       }
       const st = threadStates.get(threadRoot)
+      const cleanup: Array<{ name: string; key: string; result: Promise<void> }> = []
       for (const a of bindings) {
-        agents.endSession(a.name, threadRoot)
+        cleanup.push({
+          name: a.name,
+          key: threadRoot,
+          result: Promise.resolve().then(() => agents.endSession(a.name, threadRoot)),
+        })
         taskRegistry.bumpGeneration(a.name, threadRoot)
-        for (const arc of st?.handoffs[a.name] ?? []) {
+        for (const arc of st?.handoffs[a.userId] ?? []) {
           const key = composeHandoffKey(threadRoot, arc)
-          agents.endSession(a.name, key)
+          cleanup.push({
+            name: a.name,
+            key,
+            result: Promise.resolve().then(() => agents.endSession(a.name, key)),
+          })
           taskRegistry.bumpGeneration(a.name, key)
         }
       }
+      const results = await Promise.allSettled(cleanup.map((item) => item.result))
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          console.warn(`[matrix] session reset cleanup failed for ${cleanup[index]!.name}/${cleanup[index]!.key}:`, result.reason)
+        }
+      })
       // NB: keep threadStates intact. Per ZOD039 § /clear, only the agent's
       // session memory is wiped — thread-routing state (participants /
       // root-mentions) must survive so the next bare reply still routes to
@@ -1738,33 +2339,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
       const threadRoot =
         relates?.rel_type === 'm.thread' && relates.event_id ? relates.event_id : undefined
       if (threadRoot) {
-        const targets: Array<{ sessionId: string; agent: string }> = []
-        for (const [sessionId, ctx] of sessions) {
-          if (ctx.threadRoot === threadRoot) {
-            targets.push({ sessionId, agent: ctx.agent.name })
-          }
-        }
-        for (const t of targets) {
-          console.log(
-            `[matrix] interrupt session=${t.sessionId} agent=${t.agent} thread=${threadRoot}` +
-              (content.reason ? ` reason=${content.reason}` : ''),
-          )
-          await agents.cancelSession(t.agent, t.sessionId).catch((err) => {
-            console.error(`[matrix] cancelSession(${t.agent}, ${t.sessionId}) failed:`, err)
-          })
-        }
-        // A live session will report ACP's `cancelled` stop reason and finish
-        // in its turn boundary, preserving any prose it already emitted. A
-        // restored/no-session task has no such boundary, so close it here.
-        const task = taskRegistry.taskForRoot(threadRoot)
-        if (task?.phase === 'open' && !targets.some((t) => t.agent === task.assignee)) {
-          const assignee = bindingFor(task.assignee)
-          if (assignee)
-            await finishTask(task, {
-              agent: assignee,
-              completion: { agent: assignee.name, thread_id: threadRoot, status: 'cancelled' },
-            })
-        }
+        await interruptThread({ threadRoot, reason: content.reason, roomId: evt.room_id })
         return
       }
       // Legacy form: explicit session_id in content.
@@ -1780,12 +2355,25 @@ agents.onEvent = async (name, event: AgentEvent) => {
         `[matrix] interrupt session=${content.session_id} agent=${ctx.agent.name}` +
           (content.reason ? ` reason=${content.reason}` : ''),
       )
+      returns.interrupt(ctx.threadRoot)
       await agents.cancelSession(ctx.agent.name, content.session_id).catch((err) => {
         console.error(
           `[matrix] cancelSession(${ctx.agent.name}, ${content.session_id}) failed:`,
           err,
         )
       })
+      return
+    }
+    if (evt.type === ElicitationEventType.Response) {
+      await handleElicitationResponse(evt)
+      return
+    }
+    // Our own request/resolved/rejected echoes are control events, never prompts.
+    if (
+      evt.type === ElicitationEventType.Request ||
+      evt.type === ElicitationEventType.Resolved ||
+      evt.type === ElicitationEventType.Rejected
+    ) {
       return
     }
     if (evt.type === 'dev.zooid.approval_response') {
@@ -1817,21 +2405,40 @@ agents.onEvent = async (name, event: AgentEvent) => {
     if (evt.type === 'm.room.message' && (await maybeHandleApprovalMessage(evt))) {
       return
     }
+    // Interactive elicitation from a stock client: a number-keycap reaction on
+    // the question's notice, or an `answer/decline/cancel <id>` reply. Neither
+    // is a prompt, so they never reach the router.
+    if (evt.type === 'm.reaction' && (await handleElicitationReaction(evt))) {
+      return
+    }
+    if (evt.type === 'm.room.message' && (await maybeHandleElicitationMessage(evt))) {
+      return
+    }
+    // A human typing `/interrupt` (or a bare `stop` / `stopp`) is a command,
+    // not a prompt: cancel the thread's sessions/task and never enqueue a turn.
+    // Agents' own command prose is swallowed so it cannot loop.
+    if (evt.type === 'm.room.message' && (await maybeHandleInterruptMessage(evt))) {
+      return
+    }
     logInbound(evt)
 
     // The callee's turn boundary: the daemon sends this only after that turn's
     // whole send queue has drained, so every message it produced has already
     // arrived above. Release the return it was holding.
     if (evt.type === 'dev.zooid.turn.end') {
-      const agentId = evt.content?.agent_id as string | undefined
       const endedRoot = inboundThreadRoot(evt)
-      const senderAgent = bindings.find((binding) => binding.userId === evt.sender)
-      // Bind the claimed agent_id to the Matrix sender. Besides rejecting a
-      // malformed boundary, this prevents another room member from releasing
-      // a held agent return early by forging custom-event content.
-      if (agentId && endedRoot && senderAgent?.name === agentId) {
-        releaseReturn(returnKey(agentId, endedRoot))
-      }
+      // [[ZOD092]] Keyed by the Matrix sender, which the homeserver
+      // authenticates: a forged turn.end from anyone else names a different
+      // MXID and releases nothing. Local and remote callees alike.
+      if (endedRoot && evt.sender) returns.turnEnded(evt.sender, endedRoot)
+      return
+    }
+
+    // [[ZOD088]] Tool activity is liveness: it re-arms a timed hold's fallback.
+    // These events never route, so nothing below applies to them.
+    if (ACTIVITY_EVENTS.has(evt.type ?? '')) {
+      const root = inboundThreadRoot(evt)
+      if (evt.sender && root) returns.activity(evt.sender, root)
       return
     }
 
@@ -1873,7 +2480,13 @@ agents.onEvent = async (name, event: AgentEvent) => {
       evt.room_id
     ) {
       try {
-        const rebuilt = await rebuildThreadState(client, evt.room_id, inboundRel, bindings)
+        const rebuilt = await rebuildThreadState(
+          client,
+          evt.room_id,
+          inboundRel,
+          bindings,
+          workforce.agentIds,
+        )
         threadStates.set(inboundRel, rebuilt)
         console.log(
           `[matrix] rebuilt threadState for ${inboundRel}: participants=${rebuilt.participants.join(',')} rootMentions=${rebuilt.rootMentions.join(',')}`,
@@ -1887,39 +2500,81 @@ agents.onEvent = async (name, event: AgentEvent) => {
       taskRegistry.adopt(startField.attempt_id, evt.event_id)
     if (evt.content?.[THREAD_RESULT_FIELD] !== undefined) return
     const taskRec = promotedRoot ? taskRegistry.taskForRoot(promotedRoot) : undefined
+    // Only an *open* task makes this a task thread. A closed task's root stays
+    // in the registry (trust checks), but its thread must route — and return —
+    // like an ordinary one ([[ZOD092]] / #100). Treating it as a task here
+    // suppressed both the call edge's `returns.open` and `isReturnRoute`, so an
+    // in-thread handoff from a closed task's thread woke its callee but never
+    // returned.
     const taskCtx =
-      taskRec && taskRec.phase !== 'reserved'
+      taskRec && taskRec.phase === 'open'
         ? {
             assignee: taskRec.assignee,
             isRoot: !inboundRel && evt.event_id === taskRec.threadRoot,
           }
         : undefined
-    let matches = route(evt, bindings, threadStates, taskCtx)
+    // Another workstation's agent posting makes it the thread's last poster,
+    // so a human's bare reply goes to it and not to our last local poster.
+    // Our own agents are recorded at their turn end (enqueueTurn).
+    const inboundState = inboundRel ? threadStates.get(inboundRel) : undefined
+    if (
+      inboundState &&
+      evt.type === 'm.room.message' &&
+      evt.sender &&
+      isRemoteAgent(evt.sender, evt.content?.msgtype, bindings, workforce.agentIds) &&
+      inboundState.participants.at(-1) !== evt.sender
+    )
+      inboundState.participants.push(evt.sender)
+    let matches = route(evt, bindings, threadStates, taskCtx, workforce.agentIds)
     // In a delegated task, agent-to-agent messages dispatch only when the
     // outgoing flush registered a matching invocation. This prevents a
     // circular handoff that was visibly refused from still waking its target.
-    if (taskCtx && !taskCtx.isRoot && evt.event_id && bindings.some((b) => b.userId === evt.sender)) {
-      const invocation = invocations.byCallEvent(evt.event_id)
-      matches = invocation ? matches.filter((match) => match.name === invocation.calleeAgent) : []
+    // Only while the task is open: handoff() registers invocations only then,
+    // so a closed task's thread routes like an ordinary thread.
+    if (
+      taskCtx &&
+      taskRec!.phase === 'open' &&
+      !taskCtx.isRoot &&
+      evt.event_id &&
+      bindings.some((b) => b.userId === evt.sender)
+    ) {
+      let invocation = invocations.byCallEvent(evt.event_id)
+      // The sync echo of a handoff can arrive before its send resolves, so
+      // handoff() hasn't attached the event id yet. Match on the call_id the
+      // event carries and attach it here instead.
+      const call = readHandoff(evt.content)
+      if (!invocation && call && call.caller === evt.sender) {
+        invocation = invocations.byCallId(call.call_id)
+        if (invocation && !invocation.callEventId)
+          invocations.attachCallEvent(
+            invocation.invocationId,
+            evt.event_id,
+            composeHandoffKey(inboundRel ?? evt.event_id, evt.event_id),
+          )
+      }
+      matches = invocation ? matches.filter((match) => match.name === invocation!.calleeAgent) : []
     }
     // [[ZOD039]] A return fires at the callee's turn boundary, not per message.
     // Every tool call forces a buffer flush, so one turn posts many
     // `m.room.message`s; routing each as a return woke the caller once per
     // chunk and the pair read as re-triggering each other. Hold them and let
     // the sender's `dev.zooid.turn.end` release the lot as a single wake.
-    if (evt.type === 'm.room.message' && promotedRoot && evt.room_id) {
-      const senderBinding = bindings.find((b) => b.userId === evt.sender)
-      if (senderBinding) {
+    if (evt.type === 'm.room.message' && promotedRoot && evt.room_id && evt.sender) {
+      const senderIsAgentId = isLocal(evt.sender) || workforce.agentIds.has(evt.sender)
+      if (senderIsAgentId) {
         const st = threadStates.get(promotedRoot)
-        const held = matches.filter((m) => isReturnRoute(evt, m, bindings, st))
+        const held = matches.filter((m) => isReturnRoute(evt, m, st))
         if (held.length > 0) {
           matches = matches.filter((m) => !held.includes(m))
-          stashReturn(senderBinding, promotedRoot, evt.room_id, evt, held)
+          returns.hold(evt.sender, promotedRoot, evt.room_id, held, evt.content?.body, {
+            remote: !isLocal(evt.sender),
+          })
+          console.log(
+            `[matrix] holding return ${agentName(evt.sender)} → ${held.map((m) => m.name).join(',')} ` +
+              `until turn end (thread=${promotedRoot})`,
+          )
         }
       }
-      // Anything we are waking now supersedes a return it was owed: an explicit
-      // @mention (rule 1) or a human follow-up already carries the thread on.
-      for (const m of matches) dropPendingReturn(promotedRoot, m.name)
     }
 
     // Suppress the no-match warning for events sent by our own bots.
@@ -1930,8 +2585,16 @@ agents.onEvent = async (name, event: AgentEvent) => {
           ` (bindings: ${bindings.map((b) => `${b.name}@${b.userId}[${b.trigger}]`).join(', ')})`,
       )
     }
-    // Seed thread state for any agent mentions in this event.
-    if (matches.length > 0 && promotedRoot) {
+    // [[ZOD092]] Call edges come only from structured handoffs, keyed by MXID,
+    // whichever workstations the two ends live on — so every daemon holds the
+    // whole call graph and acts on the edges where it hosts an end. Recorded
+    // BEFORE dispatch: the callee's session key is the arc minted here.
+    const handoff = readHandoff(evt.content)
+    const callEdge =
+      handoff && evt.type === 'm.room.message' && handoff.caller === evt.sender && promotedRoot
+        ? handoff
+        : undefined
+    if (promotedRoot && (matches.length > 0 || callEdge)) {
       let st = threadStates.get(promotedRoot)
       if (!st) {
         st = { participants: [], rootMentions: [], callers: {}, handoffs: {} }
@@ -1940,24 +2603,34 @@ agents.onEvent = async (name, event: AgentEvent) => {
       if (taskCtx?.isRoot) {
         if (!st.rootMentions.includes(taskRec!.assignee)) st.rootMentions.push(taskRec!.assignee)
       } else {
-        const msgMentions = new Set(extractMentions(evt as never))
-        const senderAgent = bindings.find((b) => b.userId === evt.sender)
-        for (const a of bindings) {
-          if (!msgMentions.has(a.userId)) continue
-          if (!st.rootMentions.includes(a.name)) st.rootMentions.push(a.name)
-          // A mention that would close a cycle is a return addressed by name,
-          // not a call: record no edge and mint no arc, or the pair bounces
-          // forever and the callee loses its session to a fresh arc.
-          if (
-            senderAgent &&
-            a.name !== senderAgent.name &&
-            !wouldCycleCallers(st.callers, a.name, senderAgent.name)
-          ) {
-            st.callers[a.name] = senderAgent.name
-            if (evt.event_id) {
-              const arcs = (st.handoffs[a.name] ??= [])
-              if (!arcs.includes(evt.event_id)) arcs.push(evt.event_id)
-            }
+        const senderIsAgentId =
+          !!evt.sender && (isLocal(evt.sender) || workforce.agentIds.has(evt.sender))
+        if (!senderIsAgentId) {
+          const msgMentions = new Set(extractMentions(evt as never))
+          for (const a of bindings)
+            if (msgMentions.has(a.userId) && !st.rootMentions.includes(a.name))
+              st.rootMentions.push(a.name)
+        }
+        if (
+          callEdge &&
+          callEdge.callee !== callEdge.caller &&
+          !wouldCycleCallers(st.callers, callEdge.callee, callEdge.caller)
+        ) {
+          st.callers[callEdge.callee] = callEdge.caller
+          if (evt.event_id) {
+            const arcs = (st.handoffs[callEdge.callee] ??= [])
+            if (!arcs.includes(evt.event_id)) arcs.push(evt.event_id)
+          }
+          // [[ZOD088]] The caller's daemon owns the return: open the callee's
+          // pending return here, and keep the caller's own return (if it is
+          // itself serving a call) pending on this one.
+          if (!taskCtx && evt.room_id) {
+            const callerBinding = bindings.find((b) => b.userId === callEdge.caller)
+            if (callerBinding?.trigger === 'mention')
+              returns.open(callEdge.callee, promotedRoot, evt.room_id, callerBinding, {
+                remote: !isLocal(callEdge.callee),
+              })
+            returns.markDelegated(callEdge.caller, promotedRoot)
           }
         }
       }
@@ -1965,7 +2638,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
     for (const a of matches) {
       console.log(`[matrix] → ${a.name} (${a.userId})`)
       if (!promotedRoot || !evt.room_id) continue
-      const sessionKey = sessionKeyFor(a.name, promotedRoot, threadStates.get(promotedRoot))
+      const sessionKey = sessionKeyFor(a.userId, promotedRoot, threadStates.get(promotedRoot))
       const taskEnvelope =
         taskCtx?.isRoot && a.name === taskRec!.assignee
           ? { parentAgent: taskRec!.parent.agent }
@@ -2023,7 +2696,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
   })
   app.get('/healthz', (c) => c.text('ok'))
 
-  async function runTurn(agent: AgentBinding, input: TurnInput): Promise<void> {
+  async function runTurnBody(agent: AgentBinding, input: TurnInput): Promise<void> {
     const { roomId, threadRoot, sessionKey } = input
     // Agent-promotion: top-level inbound becomes a thread root via the agent's
     // first reply.
@@ -2035,7 +2708,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
     // session (agents.onSessionRekey re-keys the per-session maps), so
     // everything after the prompt has to read the id the turn really ran on.
     let sessionId = await agents.ensureSession(agent.name, sessionKey, roomId, threadRoot)
-    sessions.set(sessionId, { agent, roomId, threadRoot })
+    sessions.set(sessionId, { agent, roomId, threadRoot, sessionKey })
     buffers.set(sessionId, '')
     bufferMessageIds.delete(sessionId)
     flushedCounts.set(sessionId, 0)
@@ -2069,6 +2742,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
     await safeTyping(true)
     await safePresence('unavailable')
     const refresh = setInterval(() => {
+      if (elicitations && elicitations.countForSession(sessionId) > 0) return
       void safeTyping(true)
     }, TYPING_REFRESH_MS)
 
@@ -2162,7 +2836,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
       // turn.end below so the boundary lands after the finalized line.
       await finalizeTurnMirror(
         sessionId,
-        { agent, roomId, threadRoot },
+        sessions.get(sessionId) ?? { agent, roomId, threadRoot, sessionKey },
         turnError !== undefined,
       )
       const producedOutput = (flushedCounts.get(sessionId) ?? 0) > 0
@@ -2219,6 +2893,18 @@ agents.onEvent = async (name, event: AgentEvent) => {
     }
   }
 
+  // [[ZOD088]] A turn running here is closed by its own turn end; the return
+  // fallback never races it. A turn blocked on an approval or a human answer
+  // is still inside agents.prompt, so it counts as running too.
+  async function runTurn(agent: AgentBinding, input: TurnInput): Promise<void> {
+    returns.turnStarted(agent.userId, input.threadRoot)
+    try {
+      await runTurnBody(agent, input)
+    } finally {
+      returns.turnFinished(agent.userId, input.threadRoot)
+    }
+  }
+
   async function finishTask(
     task: TaskRecord,
     ctx: { agent: AgentBinding; completion: ThreadCompletion },
@@ -2226,6 +2912,8 @@ agents.onEvent = async (name, event: AgentEvent) => {
     const threadId = task.threadRoot!
     const completion = ctx.completion
     if (!taskRegistry.close(task.taskId)) return
+    // [[ZOD092]] Any pre-task caller's open handoff into this task thread.
+    for (const k of [...openHandoffs.keys()]) if (k.endsWith(`::${threadId}`)) openHandoffs.delete(k)
     const cancelled = invocations.cancelForTask(task.taskId)
     pendingInput.cancelFor([threadId, ...cancelled.map((i) => i.calleeSessionKey).filter((x): x is string => Boolean(x))])
     await client.sendCustomEvent({
@@ -2308,7 +2996,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
             agent: spec.agent,
             status: 'refused',
             reason:
-              'depth_limit: this thread is itself a delegated task. Do the work here, or @mention another agent in this thread to hand off.',
+              'depth_limit: this thread is itself a delegated task. Do the work here, or call zooid_handoff to hand off in this thread.',
           }
           continue
         }
@@ -2427,6 +3115,93 @@ agents.onEvent = async (name, event: AgentEvent) => {
       return {
         is_task_assignee: openTask !== undefined && openTask.threadRoot === caller.sessionKey,
         can_start_task_threads: enclosing === undefined,
+        can_handoff: bindingFor(caller.agentName) !== undefined,
+      }
+    },
+    async handoff(caller, input: HandoffInput): Promise<HandoffOutput> {
+      const callerBinding = bindingFor(caller.agentName)
+      if (!callerBinding) return { status: 'refused', reason: 'unknown_caller' }
+      const prompt = input.prompt.trim()
+      if (!prompt) return { status: 'refused', reason: 'prompt must be non-empty' }
+      const resolved = resolveHandoffTarget(input.agent, caller.channelId, handoffCandidates())
+      if (!resolved.ok) return { status: 'refused', reason: resolved.reason }
+      const target = resolved.target
+      if (target.userId === callerBinding.userId)
+        return { status: 'refused', reason: 'self: you cannot hand off to yourself' }
+      const st = threadStates.get(caller.threadRoot)
+      if (st && wouldCycleCallers(st.callers, target.userId, callerBinding.userId))
+        return {
+          status: 'refused',
+          reason: `already_waiting_on_you: ${target.name} is waiting on your result. End your turn — your result returns to ${target.name} automatically.`,
+        }
+      const task = taskRegistry.taskForRoot(caller.threadRoot)
+      const inTask = task?.phase === 'open'
+      if (inTask && !isLocal(target.userId))
+        return {
+          status: 'refused',
+          reason: 'remote_in_task: a task thread hands off only to agents on this workstation',
+        }
+      const key = openKey(callerBinding.userId, caller.threadRoot)
+      const busy = inTask
+        ? invocations.outstandingFor(caller.sessionKey).length > 0
+        : openHandoffs.has(key)
+      if (busy)
+        return {
+          status: 'refused',
+          reason:
+            'already_open: you already have a handoff open in this thread. End your turn and wait for it, or use zooid_start_task_threads for parallel work.',
+        }
+      const callId = randomUUID()
+      const invocation = inTask
+        ? invocations.open({
+            taskId: task!.taskId,
+            callerAgent: callerBinding.name,
+            callerSessionKey: caller.sessionKey,
+            calleeAgent: target.name,
+            callId,
+          })
+        : undefined
+      if (invocation) taskRegistry.clearSummary(task!.taskId)
+      else openHandoffs.set(key, target.userId)
+
+      const content = buildHandoffContent({
+        callId,
+        caller: callerBinding.userId,
+        callee: target.userId,
+        prompt,
+      })
+      // Post through the caller's own send queue, after any prose it flushed
+      // before the tool call, so the thread reads in order.
+      const liveSession = [...sessions].find(
+        ([, c]) => c.agent.name === callerBinding.name && c.sessionKey === caller.sessionKey,
+      )?.[0]
+      if (liveSession) flushBuffer(liveSession)
+      let eventId: string | undefined
+      const send = async () => {
+        const { event_id } = await client.sendMessage({
+          roomId: caller.channelId,
+          asUserId: callerBinding.userId,
+          content,
+          threadRoot: caller.threadRoot,
+        })
+        eventId = event_id
+      }
+      const tail = (liveSession ? (sendQueue.get(liveSession) ?? Promise.resolve()) : Promise.resolve()).then(send)
+      if (liveSession) sendQueue.set(liveSession, tail.catch(() => {}))
+      try {
+        await tail
+      } catch (err) {
+        openHandoffs.delete(key)
+        if (invocation) invocations.resolve(invocation.invocationId)
+        return { status: 'refused', reason: `post_failed: ${String((err as Error).message)}` }
+      }
+      if (invocation && eventId)
+        invocations.attachCallEvent(invocation.invocationId, eventId, composeHandoffKey(caller.threadRoot, eventId))
+      return {
+        status: 'started',
+        call_id: callId,
+        callee: target.userId,
+        delivery: renderHandoffDelivery(target.name),
       }
     },
   }
@@ -2494,6 +3269,15 @@ agents.onEvent = async (name, event: AgentEvent) => {
       } = {},
     ) => {
       await pool.bootstrap({ adminUserId, ...bootstrapOpts })
+      const { spaceRoomId, asUserId } = bootstrapOpts
+      if (spaceRoomId && asUserId) {
+        workforceSpaceId = spaceRoomId
+        try {
+          workforce.load(await client.fetchRoomState(spaceRoomId, asUserId))
+        } catch (err) {
+          console.warn('[matrix] workforce roster load failed:', err)
+        }
+      }
       await Promise.allSettled(
         bindings.map((b) =>
           client.setPresence({ asUserId: b.userId, presence: 'online' }).catch((err) => {
@@ -2517,6 +3301,7 @@ export async function rebuildThreadState(
   roomId: string,
   rootEventId: string,
   bindings: AgentBinding[],
+  knownAgentIds?: ReadonlySet<string>,
 ): Promise<ThreadState> {
   const state: ThreadState = {
     participants: [],
@@ -2531,66 +3316,76 @@ export async function rebuildThreadState(
     ?.userId
   if (!asUser) return state
 
-  const root = await client.fetchEvent(roomId, rootEventId, asUser)
-  // A mirror notice quotes old `@agent`s; treat it as non-content here too, or
-  // the false mention is re-seeded on every restart / `/clear` rebuild.
-  if (root && !isMirrorNotice((root as { content?: Record<string, unknown> }).content)) {
-    const rootMentions = new Set(extractMentions(root as never))
-    const rootSender = (root as { sender?: string }).sender
-    const rootSenderAgent = rootSender ? bindings.find((b) => b.userId === rootSender) : undefined
-    for (const a of bindings) {
-      if (!rootMentions.has(a.userId)) continue
-      if (!state.rootMentions.includes(a.name)) state.rootMentions.push(a.name)
-      if (
-        rootSenderAgent &&
-        a.name !== rootSenderAgent.name &&
-        !wouldCycleCallers(state.callers, a.name, rootSenderAgent.name)
-      ) {
-        state.callers[a.name] = rootSenderAgent.name
-        const arcs = (state.handoffs[a.name] ??= [])
-        if (!arcs.includes(rootEventId)) arcs.push(rootEventId)
-      }
-    }
-  }
-
   const { chunk: thread } = await client.fetchThreadRelations({
     roomId,
     rootEventId,
     asUserId: asUser,
   })
-  // Also seed root-mentions from any subsequent agent @mentions in the thread.
-  for (const ev of thread) {
+  const root = await client.fetchEvent(roomId, rootEventId, asUser)
+  const events = [...(root ? [root] : []), ...thread]
+  for (const ev of events) {
     // The transport's own display mirror is not content: it echoes tool output
     // that can quote an `@agent`, so it must not seed a mention / call edge.
     // Without this, a daemon restart or `/clear` rebuild resurrects the exact
     // false trigger `route()` now drops on the live path.
     if (isMirrorNotice((ev as { content?: Record<string, unknown> }).content)) continue
-    const mentions = new Set(extractMentions(ev as never))
     const evSender = (ev as { sender?: string }).sender
-    const evSenderAgent = evSender ? bindings.find((b) => b.userId === evSender) : undefined
     const evId = (ev as { event_id?: string }).event_id
-    for (const a of bindings) {
-      if (!mentions.has(a.userId)) continue
-      if (!state.rootMentions.includes(a.name)) state.rootMentions.push(a.name)
-      if (
-        evSenderAgent &&
-        a.name !== evSenderAgent.name &&
-        !wouldCycleCallers(state.callers, a.name, evSenderAgent.name)
-      ) {
-        state.callers[a.name] = evSenderAgent.name
-        if (evId) {
-          const arcs = (state.handoffs[a.name] ??= [])
-          if (!arcs.includes(evId)) arcs.push(evId)
-        }
+    const content = (ev as { content?: unknown }).content
+    const senderIsAgentId =
+      !!evSender && (bindings.some((b) => b.userId === evSender) || knownAgentIds?.has(evSender) === true)
+    // Human mentions seed rootMentions (names, local agents only).
+    if (!senderIsAgentId) {
+      const mentions = new Set(extractMentions(ev as never))
+      for (const a of bindings)
+        if (mentions.has(a.userId) && !state.rootMentions.includes(a.name)) state.rootMentions.push(a.name)
+    }
+    // [[ZOD092]] Call edges only from structured handoffs whose caller is the sender.
+    const h = readHandoff(content)
+    if (h && h.caller === evSender && h.callee !== h.caller && !wouldCycleCallers(state.callers, h.callee, h.caller)) {
+      state.callers[h.callee] = h.caller
+      if (evId) {
+        const arcs = (state.handoffs[h.callee] ??= [])
+        if (!arcs.includes(evId)) arcs.push(evId)
       }
     }
+    // participants: unchanged logic (local name or remote MXID), for m.room.message only,
+    // and never for the root event (keep the existing behaviour: only thread events add participants).
+  }
+  for (const ev of thread) {
+    // The transport's own display mirror is not content: it echoes tool output
+    // that can quote an `@agent`, so it must not register the agent as a thread
+    // participant either.
+    if (isMirrorNotice((ev as { content?: Record<string, unknown> }).content)) continue
     const type = (ev as { type?: string }).type
+    const evSender = (ev as { sender?: string }).sender
     if (type === 'm.room.message' && evSender) {
       const a = bindings.find((b) => b.userId === evSender)
-      if (a && state.participants.at(-1) !== a.name) state.participants.push(a.name)
+      const msgtype = (ev as { content?: { msgtype?: string } }).content?.msgtype
+      const participant = a
+        ? a.name
+        : isRemoteAgent(evSender, msgtype, bindings, knownAgentIds)
+          ? evSender
+          : undefined
+      if (participant && state.participants.at(-1) !== participant)
+        state.participants.push(participant)
     }
   }
   return state
+}
+
+/**
+ * Another workstation's agent: not ours, but in the space's merged roster —
+ * or posting an m.notice, which Matrix bots do and clients never do.
+ */
+function isRemoteAgent(
+  sender: string,
+  msgtype: string | undefined,
+  bindings: AgentBinding[],
+  knownAgentIds: ReadonlySet<string> | undefined,
+): boolean {
+  if (bindings.some((b) => b.userId === sender)) return false
+  return knownAgentIds?.has(sender) === true || msgtype === 'm.notice'
 }
 
 function logInbound(evt: MatrixEvent): void {
