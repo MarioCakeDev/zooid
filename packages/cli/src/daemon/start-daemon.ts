@@ -265,6 +265,7 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
       hsToken: matrix.transport.hs_token,
       adminUserId: opts.adminUserId,
       triggerUserIds: Object.values(config.triggers).map((t) => t.as),
+      statusRoom: config.announce?.status_room,
       serverName,
       botUserId: asUserId,
       media: mediaClient,

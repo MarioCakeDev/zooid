@@ -181,19 +181,28 @@ Config (default **off**):
 ```yaml
 announce:
   thread_completion: true
-# per-agent override:
+  status_room: "#status"       # optional; alias / alias:server / display name / room id
+# per-agent override (boolean only):
 agents:
   infra:
     announce:
       thread_completion: false
 ```
 
+`announce.status_room` redirects the notice to another room (canonically
+`#status`); unset means the thread's own room. The mention target and the
+permalink are unchanged — both still refer to the thread. The room reference is
+resolved lazily via `MatrixClient.resolveAlias` (bare aliases expanded against
+the transport's `serverName`, display names matched over bound rooms) and
+cached; an unresolvable value logs a warning and falls back to the thread room
+(the notice is never dropped).
+
 Modules: `packages/core/src/{types,config}.ts` (`AnnounceConfig`, parse +
 `mergeCliFlags` preservation); `packages/transport-matrix/src/event-encoders.ts`
 (`matrixEventPermalink`, `threadCompletionContent`, `COMPLETION_NOTICE_MARKER`);
 `packages/transport-matrix/src/router.ts` (`ThreadState.rootSender` /
 `rootIsTrigger`, notice dropped by `route`); `packages/transport-matrix/src/transport.ts`
-(`lastThreadEventId` capture, `announceThreadCompletion`); CLI plumbing in
-`packages/cli/src/daemon/start-daemon.ts`.
+(`lastThreadEventId` capture, `announceThreadCompletion`, `resolveStatusRoom`);
+CLI plumbing in `packages/cli/src/daemon/start-daemon.ts`.
 
 
