@@ -1,3 +1,4 @@
+import type { ElicitationCorrelator } from '@zooid/core'
 import { isAbsolute, resolve as pathResolve } from 'node:path'
 import { LocalAcpRuntime } from '@zooid/runtime-local'
 import { DockerAcpRuntime } from '@zooid/runtime-docker'
@@ -10,6 +11,7 @@ import {
   type ContextSpawnFactory,
   type MountConfig,
   type TapEvent,
+  type SessionLifecycleEvent,
   type ZooidConfig,
   type TransportContextProvider,
 } from '@zooid/core'
@@ -27,8 +29,10 @@ export interface BuildAcpRegistryOptions {
   runtime?: AcpRuntime
   /** When set, the registry's approval handler routes through this correlator. */
   approvals?: ApprovalCorrelator
+  elicitations?: ElicitationCorrelator
   /** Observability tap forwarded to each AcpClient. */
   onTap?: (agentName: string, event: TapEvent) => void
+  onLifecycle?: (agentName: string, event: SessionLifecycleEvent) => void
   /**
    * Per-agent state root (`<dataRoot>/agents/`). When set, each AcpClient
    * persists its `(threadId → sessionId)` map under
@@ -313,7 +317,9 @@ export function buildAcpRegistry(
     mkdirOnSpawn: mkdirByAgent,
     cwd: cwdByAgent,
     approvals: opts.approvals,
+    elicitations: opts.elicitations,
     onTap: opts.onTap,
+    onLifecycle: opts.onLifecycle,
     agentsDir: opts.agentsDir,
     contextSpawns,
     onSessionEstablished: (agentName, sessionKey, sessionId) =>

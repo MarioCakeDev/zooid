@@ -1,5 +1,52 @@
 # @zooid/transport-matrix
 
+## 0.17.0
+
+### Minor Changes
+
+- 0198f5f: Agents can ask a question mid-turn through ACP form elicitation. Questions appear in their Matrix thread and answers return to the same tool call and turn. Upgrades the ACP SDK to 1.5.
+
+### Patch Changes
+
+- b8cf931: A `zooid_handoff` from a thread whose delegated task has already closed now wakes the callee. Before, the daemon reported `started` but dropped the handoff message, so the callee never ran.
+- 78c796b: A `zooid_handoff` inside an open delegated task now wakes the callee even when the homeserver's sync delivers the handoff message before the send call returns. Before, the daemon reported `started` but sometimes dropped the message, so the callee never ran and the caller waited forever.
+- Updated dependencies [0198f5f]
+- Updated dependencies [78c796b]
+  - @zooid/acp-client@0.17.0
+  - @zooid/core@0.17.0
+
+## 0.16.1
+
+### Patch Changes
+
+- @zooid/core@0.16.1
+- @zooid/acp-client@0.16.1
+
+## 0.16.0
+
+### Minor Changes
+
+- ac219ba: Idle ACP sessions are now closed and their adapter processes reclaimed, so a long-running daemon no longer grows by one resident agent process (~250 MB for Claude) per thread. Each agent takes `session_idle_timeout` (`"30s"`, `"15m"`, `"2h"`, or `0` to disable; default `10m`). The next message in a reclaimed thread resumes the same session with its context intact. Idle close only applies when the adapter supports `session/close` plus resume or load; otherwise sessions stay resident and the daemon warns once. `/clear` now closes the old session before starting fresh. `zooid start` logs one `[lifecycle]` line per close and recovery.
+- 1291a1b: Agents now hand off with the `zooid_handoff` tool instead of @mentioning each other. An agent's @mentions — in prose, relayed instructions, status reports or `zooid_send_message` — no longer wake other agents; human @mentions are unchanged. Handoff calls carry structured `dev.zooid.handoff` metadata keyed by Matrix ID, so a callee on another workstation now returns to its caller. **Upgrade every daemon in a workforce together:** an older daemon's agents still hand off by @mention, which newer daemons ignore. Update agent instructions that say "@mention the agent to hand off" to "call zooid_handoff".
+
+### Patch Changes
+
+- 1291a1b: Handoff returns wake the caller once, when the callee is actually done. A callee running tools for more than 90s no longer wakes its caller mid-turn; a turn that ends by @mentioning another agent waits for that agent's reply instead of returning; a human @mention of the caller no longer cancels a pending return; and the caller is woken with a `[handoff return] from <agent>` envelope carrying the callee's final message.
+- Updated dependencies [ac219ba]
+- Updated dependencies [1291a1b]
+  - @zooid/acp-client@0.16.0
+  - @zooid/core@0.16.0
+
+## 0.15.0
+
+### Patch Changes
+
+- 70a95b7: Agents on other workstations no longer read as humans. The `dev.zooid.workforce` roster is now keyed by workstation (one state event per daemon, so daemons sharing a space stop overwriting each other), each daemon merges every roster in the space, and the router treats a rostered agent — or any `m.notice` sender — as an agent: it continues a thread only by explicit @mention, never through the human follow-up rules. Fixes two daemons waking each other's agents in an endless loop.
+- f4879d1: A human @mention of another workstation's agent no longer also wakes this daemon's last poster in the thread, and another workstation's agent posting now counts as the thread's last poster — so a bare reply goes to it, not to a local agent that spoke earlier.
+- b9762b0: A human @mention of an agent inside a thread now switches the addressee instead of also triggering the thread's last-posting agent (or a task thread's assignee).
+  - @zooid/core@0.15.0
+  - @zooid/acp-client@0.15.0
+
 ## 0.14.1
 
 ### Patch Changes

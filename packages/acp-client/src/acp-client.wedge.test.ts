@@ -30,6 +30,7 @@ interface HarnessOpts {
   firstResponseMs?: number
   loadSessionCapable?: boolean
   persistedSessionId?: string
+  onElicitationRequest?: (req: unknown, signal: AbortSignal) => Promise<unknown>
 }
 
 function makeClient(opts: HarnessOpts = {}) {
@@ -45,6 +46,14 @@ function makeClient(opts: HarnessOpts = {}) {
     agent: { id: 'dev', command: 'opencode', args: ['acp'] },
     onEvent: () => {},
     onApprovalRequest: async () => ({ decision: 'cancel' }),
+    ...(opts.onElicitationRequest
+      ? {
+          onElicitationRequest: opts.onElicitationRequest as (
+            req: never,
+            signal: AbortSignal,
+          ) => Promise<never>,
+        }
+      : {}),
     runtime: rt,
     timeouts: { firstResponseMs: opts.firstResponseMs ?? 40 },
   })
@@ -144,6 +153,43 @@ describe('AcpClient first-response deadline', () => {
     })
     await new Promise((r) => setTimeout(r, 150))
     expect(client.isAlive()).toBe(true)
+  })
+
+  it('treats an elicitation question as a response (arms no false wedge)', async () => {
+    // An agent can open a turn by asking the human a question instead of
+    // emitting a chunk/tool call. The elicitation proves it is alive, so it
+    // must disarm the first-response deadline exactly like a permission ask.
+    let resolveElicitation!: (v: unknown) => void
+    const { client } = makeClient({
+      firstResponseMs: 60,
+      onElicitationRequest: () =>
+        new Promise((resolve) => {
+          resolveElicitation = resolve
+        }),
+    })
+    stubConnection(client, {
+      newSession: vi.fn(async () => ({ sessionId: 'ses-question' })),
+      prompt: vi.fn(() => new Promise(() => {})),
+    })
+    const pending = promptOnce(client).catch((e: unknown) => e)
+    await new Promise((r) => setTimeout(r, 5))
+    const onElicitation = (
+      client as unknown as {
+        onElicitation: (p: unknown, signal: AbortSignal) => Promise<unknown>
+      }
+    ).onElicitation.bind(client)
+    void onElicitation(
+      {
+        mode: 'form',
+        sessionId: 'ses-question',
+        message: 'which environment?',
+        requestedSchema: { type: 'object', properties: {} },
+      },
+      new AbortController().signal,
+    )
+    await new Promise((r) => setTimeout(r, 150))
+    expect(client.isAlive()).toBe(true)
+    resolveElicitation({ action: 'decline' })
   })
 
   it('is NOT disarmed by ambient session metadata alone', async () => {

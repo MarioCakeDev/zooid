@@ -212,6 +212,7 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
     registry.setTaskActions({
       startTasks: async () => ({ results: [], notify: 'caller', delivery: 'd' }),
       completeTask: async () => ({ status: 'recorded' }),
+      handoff: async () => ({ status: 'refused', reason: 'stub' }),
       describeRole: () => new Promise(() => {}),
     })
     const client = await startClientAgainst(registry, spawnId)
@@ -229,12 +230,19 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
       threadRef: { channelId: '!room:hs', threadId: '!room:hs' },
       provider: fakeProvider(),
     })
+    let handoffArgs: unknown
     registry.setTaskActions({
       startTasks: async () => ({ results: [], notify: 'caller', delivery: 'd' }),
       completeTask: async () => ({ status: 'recorded' }),
+      handoff: async (_caller, input) => {
+        handoffArgs = input
+        return { status: 'refused', reason: 'stub' }
+      },
       describeRole: async () => {
         await new Promise((resolve) => setTimeout(resolve, 150))
-        return { is_task_assignee: false, can_start_task_threads: true }
+        // can_handoff mirrors a real daemon role: production registers
+        // zooid_handoff only through registerTaskTools after this resolves.
+        return { is_task_assignee: false, can_start_task_threads: true, can_handoff: true }
       },
     })
     const client = await startClientAgainst(registry, spawnId)
@@ -242,10 +250,19 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
     let names: string[] = []
     for (let i = 0; i < 40; i++) {
       names = (await client.listTools()).tools.map((t) => t.name)
-      if (names.includes('zooid_start_task_threads')) break
+      if (names.includes('zooid_start_task_threads') && names.includes('zooid_handoff')) break
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
     expect(names).toContain('zooid_start_task_threads')
+    expect(names).toContain('zooid_handoff')
+
+    // The runtime registration path must route a call to the daemon-side
+    // handoff action, not just list the tool.
+    await client.callTool({
+      name: 'zooid_handoff',
+      arguments: { agent: 'product', prompt: 'write the spec' },
+    })
+    expect(handoffArgs).toEqual({ agent: 'product', prompt: 'write the spec' })
   })
 })
 

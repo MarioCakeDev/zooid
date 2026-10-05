@@ -3,11 +3,20 @@ import type { EventEmitter } from 'node:events'
 import { resolve as pathResolve } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import {
-  ClientSideConnection,
+  client as acpClientApp,
+  methods,
+  type ClientSideConnection,
+  type ClientConnection,
+  type ClientCapabilities,
+  type CreateElicitationRequest,
+  type CreateElicitationResponse,
   PROTOCOL_VERSION,
   ndJsonStream,
   type Client,
+  type SessionModeState,
+  type AgentCapabilities,
 } from '@agentclientprotocol/sdk'
+import { toElicitationRequest, toRpcError } from './elicitation.js'
 import { AgentProcess } from './agent-process.js'
 import { SessionMap } from './session-map.js'
 import { JsonFileSessionStore } from './session-store.js'
@@ -20,6 +29,8 @@ import type {
   AgentEvent,
   ApprovalDecision,
   ApprovalRequest,
+  ElicitationRequest,
+  ElicitationResponse,
   PromptInput,
   PromptResult,
 } from './types.js'
@@ -86,6 +97,9 @@ export interface AcpClientOptions {
   agentDataDir?: string
   onEvent: (event: AgentEvent) => void
   onApprovalRequest: (req: ApprovalRequest) => Promise<ApprovalDecision>
+  onElicitationRequest?: (req: ElicitationRequest, signal: AbortSignal) => Promise<ElicitationResponse>
+  sessionIdleTimeoutMs?: number
+  onLifecycle?: (event: SessionLifecycleEvent) => void
   /**
    * If set, the runtime is used to spawn the ACP shim process instead of
    * the built-in `AgentProcess` host-spawn path. Lets the daemon launch
@@ -119,14 +133,40 @@ export interface AcpClientOptions {
   timeouts?: AcpClientTimeouts
 }
 
+export interface SessionLifecycleEvent {
+  agentId: string
+  sessionKey: string
+  sessionId: string
+  reason?: 'idle' | 'clear'
+  outcome: 'closed' | 'failed' | 'unsupported' | 'recovered'
+  recoveryMethod?: 'cached' | 'resume' | 'load' | 'new'
+}
+
+interface KeyLifecycle {
+  tail: Promise<unknown>
+  timer?: ReturnType<typeof setTimeout>
+  prompts: number
+  activeTurns: Set<Promise<void>>
+  humans: number
+  resetting: boolean
+  closing: boolean
+}
+
 export class AcpClient {
   private process: AgentProcess | null = null
   private runtimeChild: ChildProcess | null = null
-  private connection: ClientSideConnection | null = null
+  private connection: Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'resumeSession' | 'closeSession' | 'setSessionMode' | 'prompt' | 'cancel'> | null = null
+  private rawConnection: ClientConnection | null = null
   private readonly sessions = new SessionMap()
   private store: JsonFileSessionStore | null = null
   private storeLoaded: Promise<void> | null = null
-  private agentCapabilities: { loadSession?: boolean } = {}
+  private agentCapabilities: AgentCapabilities = {}
+  private readonly lifecycle = new Map<string, KeyLifecycle>()
+  private readonly replay = new Set<string>()
+  private readonly permissionCancels = new Map<string, Set<() => void>>()
+  private readonly elicitationCancels = new Map<string, Set<AbortController>>()
+  private generation = 0
+  private warnedNoClose = false
   private warnedNoStore = false
   private initialized = false
   private readonly turns: TurnTracker | null
@@ -161,6 +201,9 @@ export class AcpClient {
   }
 
   async start(): Promise<void> {
+    this.generation++
+    this.clearTimers()
+    this.warnedNoClose = false
     const { command, args } = this.resolveSpawn()
     let stdout: Readable
     let stdin: Writable
@@ -203,16 +246,31 @@ export class AcpClient {
     const output = Writable.toWeb(stdin) as WritableStream<Uint8Array>
     const stream = ndJsonStream(output, input)
 
-    this.connection = new ClientSideConnection(() => this.buildClient(), stream)
+    const callbacks = this.buildClient()
+    const app = acpClientApp({ name: 'zooid' })
+      .onNotification(methods.client.session.update, (ctx) => callbacks.sessionUpdate(ctx.params))
+      .onRequest(methods.client.session.requestPermission, (ctx) => callbacks.requestPermission(ctx.params))
+    if (this.options.onElicitationRequest) {
+      app.onRequest(methods.client.elicitation.create, (ctx) => this.onElicitation(ctx.params, ctx.signal))
+    }
+    this.rawConnection = app.connect(stream)
+    const agent = this.rawConnection.agent
+    this.connection = {
+      initialize: (p) => agent.request(methods.agent.initialize, p),
+      newSession: (p) => agent.request(methods.agent.session.new, p),
+      loadSession: (p) => agent.request(methods.agent.session.load, p),
+      resumeSession: (p) => agent.request(methods.agent.session.resume, p),
+      closeSession: (p) => agent.request(methods.agent.session.close, p),
+      setSessionMode: (p) => agent.request(methods.agent.session.setMode, p),
+      prompt: (p) => agent.request(methods.agent.session.prompt, p),
+      cancel: (p) => agent.notify(methods.agent.session.cancel, p),
+    }
 
     const init = await this.withDeadline(
       'initialize',
       this.connection.initialize({
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false,
-        },
+        clientCapabilities: this.clientCapabilities(),
         clientInfo: { name: 'zooid', title: 'Zooid', version: '0.0.1' },
       }),
       this.timeouts.initializeMs,
@@ -223,6 +281,17 @@ export class AcpClient {
 
   async stop(): Promise<void> {
     this.markDead(new Error(`AcpClient(${this.options.agent.id}): stopped`))
+    this.rawConnection?.close()
+    this.rawConnection = null
+    for (const controllers of this.elicitationCancels.values()) for (const controller of controllers) controller.abort()
+    this.elicitationCancels.clear()
+    this.generation++
+    this.clearTimers()
+    for (const cancels of this.permissionCancels.values()) for (const cancel of cancels) cancel()
+    this.permissionCancels.clear()
+    this.replay.clear()
+    this.sessions.clear()
+    this.lifecycle.clear()
     this.process?.kill()
     this.runtimeChild?.kill('SIGTERM')
     this.process = null
@@ -239,18 +308,35 @@ export class AcpClient {
     if (this.dead) {
       throw this.deathReason ?? new Error(`AcpClient(${this.options.agent.id}): client is dead`)
     }
+    return this.enqueue(threadId, () =>
+      this.ensureSessionLocked(threadId, channelId, contextThreadId),
+    )
+  }
+
+  private async ensureSessionLocked(
+    threadId: string,
+    channelId?: string,
+    contextThreadId?: string,
+  ): Promise<string> {
     if (!this.connection || !this.initialized) {
       throw new Error('AcpClient.start() must be called before ensureSession()')
     }
+    const generation = this.generation
     await this.ensureStoreLoaded()
+    if (generation !== this.generation) throw new Error('ACP connection changed during session setup')
 
     const key = { threadId, agentId: this.options.agent.id }
     const cached = this.sessions.get(key)
-    if (cached) return cached.sessionId
+    if (cached) {
+      this.emitLifecycle(threadId, cached.sessionId, 'recovered', undefined, 'cached')
+      this.scheduleIdle(threadId)
+      return cached.sessionId
+    }
 
     const mcpServers = this.options.contextSpawn
       ? [await this.options.contextSpawn(contextThreadId ?? threadId, channelId, threadId)]
       : []
+    if (generation !== this.generation) throw new Error('ACP connection changed during session setup')
     process.stderr.write(
       `[acp-client:${this.options.agent.id}] ensureSession(${threadId}) mcpServers=${
         mcpServers.length === 0
@@ -266,31 +352,49 @@ export class AcpClient {
     )
 
     const persisted = this.store?.get(threadId)
-    if (persisted && this.agentCapabilities.loadSession) {
-      try {
-        await this.withDeadline(
-          `loadSession(${persisted})`,
-          this.connection.loadSession({
-            sessionId: persisted,
-            cwd: pathResolve(this.options.agent.cwd ?? process.cwd()),
-            mcpServers,
-          }),
-          this.timeouts.sessionMs,
-        )
-        this.sessions.set(key, { sessionId: persisted, startedAt: Date.now() })
-        return persisted
-      } catch (err) {
-        if (this.dead) throw err
-        console.warn(
-          `[acp-client:${this.options.agent.id}] loadSession(${persisted}) failed; ` +
-            `falling back to newSession:`,
-          err,
-        )
-        await this.store?.delete(threadId)
+    if (persisted) {
+      const request = {
+        sessionId: persisted,
+        cwd: pathResolve(this.options.agent.cwd ?? process.cwd()),
+        mcpServers,
+      }
+      for (const method of ['resume', 'load'] as const) {
+        if (method === 'resume' && !this.agentCapabilities.sessionCapabilities?.resume) continue
+        if (method === 'load' && !this.agentCapabilities.loadSession) continue
+        this.replay.add(`${generation}:${persisted}`)
+        try {
+          const recovered = await this.withDeadline(
+            `${method}Session(${persisted})`,
+            method === 'resume'
+              ? this.connection.resumeSession(request)
+              : this.connection.loadSession(request),
+            this.timeouts.sessionMs,
+          )
+          if (generation !== this.generation) {
+            throw new Error('ACP connection changed during recovery')
+          }
+          await this.applyMode(persisted, recovered.modes)
+          this.sessions.set(key, { sessionId: persisted, startedAt: Date.now() })
+          this.emitLifecycle(threadId, persisted, 'recovered', undefined, method)
+          this.scheduleIdle(threadId)
+          return persisted
+        } catch (err) {
+          // A dead client (child gone / handshake timed out) must surface, not
+          // silently fall through to a newSession on the same broken connection.
+          if (this.dead) throw err
+          if (generation !== this.generation) throw err
+          console.warn(
+            `[acp-client:${this.options.agent.id}] ${method}Session(${persisted}) failed for ${threadId}:`,
+            err,
+          )
+          this.emitLifecycle(threadId, persisted, 'failed', undefined, method)
+        } finally {
+          this.replay.delete(`${generation}:${persisted}`)
+        }
       }
     }
 
-    const { sessionId } = await this.withDeadline(
+    const { sessionId, modes } = await this.withDeadline(
       'newSession',
       this.connection.newSession({
         cwd: pathResolve(this.options.agent.cwd ?? process.cwd()),
@@ -298,8 +402,13 @@ export class AcpClient {
       }),
       this.timeouts.sessionMs,
     )
+    if (generation !== this.generation) throw new Error('ACP connection changed during session setup')
+    await this.applyMode(sessionId, modes)
+    if (generation !== this.generation) throw new Error('ACP connection changed during session setup')
     this.sessions.set(key, { sessionId, startedAt: Date.now() })
     await this.store?.set(threadId, sessionId)
+    this.emitLifecycle(threadId, sessionId, 'recovered', undefined, 'new')
+    this.scheduleIdle(threadId)
     return sessionId
   }
 
@@ -340,8 +449,13 @@ export class AcpClient {
         )
         // Forget the session *before* surfacing the failure, so no retry can
         // resume it, and drop the client so the next dispatch reconnects.
+        // Done synchronously (not via the async `endSession`, which enqueues)
+        // so the invalidation is observable before the rejection reaches the
+        // caller: this fence is what stops a fresh client re-resuming the
+        // corpse from the persisted store.
         armed.timer = undefined
-        this.endSession(threadId)
+        this.sessions.delete({ threadId, agentId: this.options.agent.id })
+        void this.store?.delete(threadId)
         this.markDead(err)
       }, timeoutMs)
       armed.timer = timer
@@ -456,6 +570,162 @@ export class AcpClient {
     this.deathWaiters.clear()
   }
 
+  private state(threadId: string): KeyLifecycle {
+    let state = this.lifecycle.get(threadId)
+    if (!state) {
+      state = {
+        tail: Promise.resolve(),
+        prompts: 0,
+        activeTurns: new Set(),
+        humans: 0,
+        resetting: false,
+        closing: false,
+      }
+      this.lifecycle.set(threadId, state)
+    }
+    return state
+  }
+
+  private enqueue<T>(threadId: string, work: () => Promise<T>): Promise<T> {
+    const state = this.state(threadId)
+    const result = state.tail.then(work, work)
+    state.tail = result.catch(() => {})
+    return result
+  }
+
+  private clearTimer(threadId: string): void {
+    const state = this.state(threadId)
+    if (state.timer) clearTimeout(state.timer)
+    state.timer = undefined
+  }
+
+  private clearTimers(): void {
+    for (const threadId of this.lifecycle.keys()) this.clearTimer(threadId)
+  }
+
+  private scheduleIdle(threadId: string): void {
+    const state = this.state(threadId)
+    this.clearTimer(threadId)
+    const timeout = this.options.sessionIdleTimeoutMs ?? 600_000
+    if (
+      !timeout ||
+      state.prompts ||
+      state.humans ||
+      state.resetting ||
+      state.closing ||
+      !this.initialized
+    ) return
+    if (!this.sessions.get({ threadId, agentId: this.options.agent.id })) return
+    const caps = this.agentCapabilities
+    if (!caps.sessionCapabilities?.close) {
+      this.warnNoIdleClose('session/close unsupported; adapter resources remain until process exit')
+      return
+    }
+    // Closing is only safe when the session can come back: without resume or
+    // load, the next message would silently start a fresh session.
+    if (!caps.sessionCapabilities.resume && !caps.loadSession) {
+      this.warnNoIdleClose('adapter cannot resume or load sessions; idle close disabled to keep context')
+      return
+    }
+    const generation = this.generation
+    state.timer = setTimeout(() => {
+      if (generation === this.generation) void this.closeIdleSession(threadId)
+    }, timeout)
+    state.timer.unref?.()
+  }
+
+  private warnNoIdleClose(reason: string): void {
+    if (this.warnedNoClose) return
+    console.warn(`[acp-client:${this.options.agent.id}] ${reason}`)
+    this.warnedNoClose = true
+  }
+
+  private emitLifecycle(
+    sessionKey: string,
+    sessionId: string,
+    outcome: SessionLifecycleEvent['outcome'],
+    reason?: SessionLifecycleEvent['reason'],
+    recoveryMethod?: SessionLifecycleEvent['recoveryMethod'],
+  ): void {
+    this.options.onLifecycle?.({
+      agentId: this.options.agent.id,
+      sessionKey,
+      sessionId,
+      reason,
+      outcome,
+      recoveryMethod,
+    })
+  }
+
+  setHumanRequestPending(threadId: string, pending: boolean): void {
+    const state = this.state(threadId)
+    state.humans = Math.max(0, state.humans + (pending ? 1 : -1))
+    if (pending) this.clearTimer(threadId)
+    else this.scheduleIdle(threadId)
+  }
+
+  async closeIdleSession(threadId: string): Promise<void> {
+    const claim = this.state(threadId)
+    if (claim.prompts || claim.humans || claim.resetting || claim.closing) return
+    claim.closing = true
+    return this.enqueue(threadId, async () => {
+      const state = this.state(threadId)
+      this.clearTimer(threadId)
+      try {
+        if (state.humans || state.resetting) return
+        const key = { threadId, agentId: this.options.agent.id }
+        const live = this.sessions.get(key)
+        if (!live || !this.connection || !this.initialized) return
+        if (!this.agentCapabilities.sessionCapabilities?.close) {
+          this.warnNoIdleClose('session/close unsupported; adapter resources remain until process exit')
+          this.emitLifecycle(threadId, live.sessionId, 'unsupported', 'idle')
+          return
+        }
+        const generation = this.generation
+        try {
+          await this.connection.closeSession({ sessionId: live.sessionId })
+          this.emitLifecycle(threadId, live.sessionId, 'closed', 'idle')
+        } catch (err) {
+          console.warn(
+            `[acp-client:${this.options.agent.id}] idle close failed for ${threadId}/${live.sessionId}:`,
+            err,
+          )
+          this.emitLifecycle(threadId, live.sessionId, 'failed', 'idle')
+        } finally {
+          if (generation === this.generation) this.sessions.delete(key)
+        }
+      } finally {
+        state.closing = false
+      }
+    })
+  }
+
+  /**
+   * Put a freshly created or loaded session into the agent's configured mode.
+   * Mode ids are adapter-defined, so an id the adapter doesn't list is a
+   * config error: fail the session rather than run it in a mode nobody chose.
+   */
+  private async applyMode(
+    sessionId: string,
+    modes: SessionModeState | null | undefined,
+  ): Promise<void> {
+    const wanted = this.options.agent.mode
+    if (!wanted || !this.connection) return
+    if (!modes) {
+      throw new Error(
+        `agents.${this.options.agent.id}.acp.mode "${wanted}": this agent does not offer session modes`,
+      )
+    }
+    if (!modes.availableModes.some((m) => m.id === wanted)) {
+      const offered = modes.availableModes.map((m) => m.id).join(', ')
+      throw new Error(
+        `agents.${this.options.agent.id}.acp.mode "${wanted}": not offered by this agent (offers: ${offered})`,
+      )
+    }
+    if (modes.currentModeId === wanted) return
+    await this.connection.setSessionMode({ sessionId, modeId: wanted })
+  }
+
   private async ensureStoreLoaded(): Promise<void> {
     if (!this.store) {
       if (!this.options.agentDataDir) {
@@ -487,42 +757,113 @@ export class AcpClient {
   }
 
   async cancel(sessionId: string): Promise<void> {
+    for (const controller of this.elicitationCancels.get(sessionId) ?? []) controller.abort()
     if (!this.connection || !this.initialized) return
     await this.connection.cancel({ sessionId })
   }
 
   /**
-   * Drop the session for the given thread so the next prompt starts fresh.
-   * No ACP-side cancellation — callers should ensure no prompt is in flight.
+   * Cancel outstanding work, close the live ACP session when supported, and
+   * forget the durable pointer so the next prompt starts fresh.
    */
-  endSession(threadId: string): void {
-    this.sessions.delete({ threadId, agentId: this.options.agent.id })
-    void this.store?.delete(threadId)
+  async endSession(threadId: string): Promise<void> {
+    const state = this.state(threadId)
+    state.resetting = true
+    this.clearTimer(threadId)
+    const key = { threadId, agentId: this.options.agent.id }
+    const live = this.sessions.get(key)
+    return this.enqueue(threadId, async () => {
+      try {
+        if (live) {
+          for (const cancel of this.permissionCancels.get(live.sessionId) ?? []) cancel()
+          for (const controller of this.elicitationCancels.get(live.sessionId) ?? []) controller.abort()
+          if (state.activeTurns.size) {
+            try {
+              await this.cancel(live.sessionId)
+            } catch (err) {
+              console.warn(
+                `[acp-client:${this.options.agent.id}] cancel failed for ${threadId}/${live.sessionId}:`,
+                err,
+              )
+            }
+            await Promise.allSettled([...state.activeTurns])
+          }
+        }
+        await this.ensureStoreLoaded()
+        const current = this.sessions.get(key)
+        if (
+          current &&
+          this.connection &&
+          this.initialized &&
+          this.agentCapabilities.sessionCapabilities?.close
+        ) {
+          try {
+            await this.connection.closeSession({ sessionId: current.sessionId })
+            this.emitLifecycle(threadId, current.sessionId, 'closed', 'clear')
+          } catch (err) {
+            console.warn(
+              `[acp-client:${this.options.agent.id}] clear close failed for ${threadId}/${current.sessionId}:`,
+              err,
+            )
+            this.emitLifecycle(threadId, current.sessionId, 'failed', 'clear')
+          }
+        } else if (current) {
+          this.warnNoIdleClose('session/close unsupported; adapter resources remain until process exit')
+          this.emitLifecycle(threadId, current.sessionId, 'unsupported', 'clear')
+        }
+        this.sessions.delete(key)
+        await this.store?.delete(threadId)
+      } finally {
+        state.humans = 0
+        state.resetting = false
+      }
+    })
   }
 
   async prompt(input: PromptInput): Promise<PromptResult> {
+    const generation = this.generation
+    const state = this.state(input.threadId)
+    state.prompts++
+    this.clearTimer(input.threadId)
     let sessionId: string | null = null
     let turnId: string | null = null
     try {
-      sessionId = await this.ensureSession(input.threadId, input.channelId, input.contextThreadId)
-      const promptText = stringifyPromptForLog(input.content)
-      turnId = this.turns?.startTurn({ sessionId, promptText }) ?? null
-      debugLog(this.options.agent.id, 'prompt →', {
-        sessionId,
-        content: input.content,
+      const launched = await this.enqueue(input.threadId, async () => {
+        const id = await this.ensureSessionLocked(
+          input.threadId,
+          input.channelId,
+          input.contextThreadId,
+        )
+        sessionId = id
+        const promptText = stringifyPromptForLog(input.content)
+        turnId = this.turns?.startTurn({ sessionId: id, promptText }) ?? null
+        debugLog(this.options.agent.id, 'prompt →', {
+          sessionId: id,
+          content: input.content,
+        })
+        let finish!: () => void
+        const completed = new Promise<void>((resolve) => { finish = resolve })
+        const raw = this.connection!.prompt({ sessionId: id, prompt: input.content })
+        const result = this.withFirstResponse(
+          id,
+          input.threadId,
+          raw,
+          this.timeouts.firstResponseMs,
+        )
+        state.activeTurns.add(completed)
+        void result.finally(() => {
+          state.activeTurns.delete(completed)
+          finish()
+        }).catch(() => {})
+        return { id, result }
       })
-      const result = await this.withFirstResponse(
-        sessionId,
-        input.threadId,
-        this.connection!.prompt({ sessionId, prompt: input.content }),
-        this.timeouts.firstResponseMs,
-      )
-      this.turns?.endTurn({ sessionId, stopReason: result.stopReason })
+      const result = await launched.result
+      this.turns?.endTurn({ sessionId: launched.id, stopReason: result.stopReason })
       debugLog(this.options.agent.id, 'prompt ←', {
-        sessionId,
+        sessionId: launched.id,
         stopReason: result.stopReason,
       })
-      return { stopReason: result.stopReason, sessionId }
+      return { stopReason: result.stopReason, sessionId: sessionId ?? undefined }
     } catch (err) {
       const c = classify(err)
       this.options.onTap?.({
@@ -538,6 +879,9 @@ export class AcpClient {
       })
       if (sessionId) this.turns?.endTurn({ sessionId, stopReason: 'error' })
       throw err
+    } finally {
+      state.prompts--
+      if (generation === this.generation) this.scheduleIdle(input.threadId)
     }
   }
 
@@ -559,10 +903,63 @@ export class AcpClient {
     throw new Error('AcpClient: agent must specify either `preset` or `command`')
   }
 
+  private clientCapabilities(): ClientCapabilities {
+    return {
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+      ...(this.options.onElicitationRequest ? { elicitation: { form: {} } } : {}),
+    }
+  }
+
+  private async onElicitation(
+    params: CreateElicitationRequest,
+    signal: AbortSignal,
+  ): Promise<CreateElicitationResponse> {
+    const agentId = this.options.agent.id
+    let request: ElicitationRequest
+    try { request = toElicitationRequest(params) } catch (err) { throw toRpcError(err) }
+    const threadId = [...this.lifecycle.keys()].find(
+      (key) => this.sessions.get({ threadId: key, agentId })?.sessionId === request.sessionId,
+    )
+    const controller = new AbortController()
+    const abort = () => controller.abort(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) abort()
+    const controllers = this.elicitationCancels.get(request.sessionId) ?? new Set<AbortController>()
+    controllers.add(controller)
+    this.elicitationCancels.set(request.sessionId, controllers)
+    if (threadId) this.setHumanRequestPending(threadId, true)
+    debugLog(agentId, 'createElicitation', { sessionId: request.sessionId, toolCallId: request.toolCallId })
+    // An elicitation request is the agent asking a question: it is alive and
+    // working, exactly like a permission request. Disarm the first-response
+    // wedge deadline before awaiting the human, or an agent that opens with a
+    // question would be declared wedged while it waits for the answer.
+    this.notifyActivity(request.sessionId)
+    try {
+      const response = await this.options.onElicitationRequest!(request, controller.signal)
+      if (signal.aborted) throw signal.reason
+      // A local session cancellation also settles the pending operation.
+      if (controller.signal.aborted) return { action: 'cancel' }
+      debugLog(agentId, 'createElicitation ←', { action: response.action })
+      return response
+    } catch (err) {
+      throw toRpcError(err)
+    } finally {
+      signal.removeEventListener('abort', abort)
+      controllers.delete(controller)
+      if (!controllers.size) this.elicitationCancels.delete(request.sessionId)
+      if (threadId) this.setHumanRequestPending(threadId, false)
+    }
+  }
+
   private buildClient(): Client {
     const agentId = this.options.agent.id
+    const generation = this.generation
     return {
       sessionUpdate: async (params) => {
+        if (generation !== this.generation || this.replay.has(`${generation}:${params.sessionId}`)) {
+          return
+        }
         // Any inbound update proves the agent is alive and processing — except
         // the ones a shim emits as ambient session metadata rather than turn
         // output. `available_commands_update` can arrive right after a prompt
@@ -579,6 +976,7 @@ export class AcpClient {
         else debugLog(agentId, 'sessionUpdate dropped (unmapped)', params)
       },
       requestPermission: async (params) => {
+        if (generation !== this.generation) return { outcome: { outcome: 'cancelled' } }
         debugLog(agentId, 'requestPermission', params)
         this.notifyActivity(params.sessionId)
         const tc = params.toolCall as {
@@ -587,20 +985,40 @@ export class AcpClient {
           title?: string
           rawInput?: unknown
         }
-        const decision = await this.options.onApprovalRequest({
-          sessionId: params.sessionId,
-          toolCallId: tc.toolCallId,
-          toolKind: tc.kind,
-          toolTitle: tc.title,
-          toolInput: tc.rawInput,
-          options: params.options.map((o) => ({
-            optionId: o.optionId,
-            name: o.name,
-            kind: o.kind,
-          })),
+        const threadId = [...this.lifecycle.keys()].find(
+          (key) => this.sessions.get({ threadId: key, agentId })?.sessionId === params.sessionId,
+        )
+        if (threadId) this.setHumanRequestPending(threadId, true)
+        let cancel!: () => void
+        const cancelled = new Promise<ApprovalDecision>((resolve) => {
+          cancel = () => resolve({ decision: 'cancel' })
         })
-        debugLog(agentId, 'requestPermission ←', decision)
-        return approvalDecisionToPermissionResponse(decision)
+        const pending = this.permissionCancels.get(params.sessionId) ?? new Set<() => void>()
+        pending.add(cancel)
+        this.permissionCancels.set(params.sessionId, pending)
+        try {
+          const decision = await Promise.race([
+            this.options.onApprovalRequest({
+              sessionId: params.sessionId,
+              toolCallId: tc.toolCallId,
+              toolKind: tc.kind,
+              toolTitle: tc.title,
+              toolInput: tc.rawInput,
+              options: params.options.map((o) => ({
+                optionId: o.optionId,
+                name: o.name,
+                kind: o.kind,
+              })),
+            }),
+            cancelled,
+          ])
+          debugLog(agentId, 'requestPermission ←', decision)
+          return approvalDecisionToPermissionResponse(decision)
+        } finally {
+          pending.delete(cancel)
+          if (!pending.size) this.permissionCancels.delete(params.sessionId)
+          if (threadId) this.setHumanRequestPending(threadId, false)
+        }
       },
     }
   }

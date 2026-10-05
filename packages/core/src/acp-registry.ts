@@ -1,3 +1,6 @@
+import type { ElicitationRequest, ElicitationResponse } from '@zooid/acp-client'
+import type { ElicitationCorrelator } from './elicitation-correlator.js'
+
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -11,10 +14,17 @@ import {
   type TapEvent,
   type AcpClientTimeouts,
   isSessionWedge,
+  type SessionLifecycleEvent,
 } from '@zooid/acp-client'
 import type { AcpAgentSpec, AcpMount, AcpRuntime } from './acp-types.js'
 import type { AgentConfig } from './types.js'
 import type { ApprovalCorrelator, RegisteredApproval } from './approval-correlator.js'
+
+export type AcpRegistryElicitationHandler = (
+  agentName: string,
+  req: ElicitationRequest,
+  signal: AbortSignal,
+) => Promise<ElicitationResponse>
 
 export type AcpRegistryEventHandler = (agentName: string, event: AgentEvent) => void
 export type AcpRegistryApprovalHandler = (
@@ -39,8 +49,8 @@ export interface AcpRegistry {
     channelId?: string,
     contextThreadId?: string,
   ): Promise<string>
-  /** Drop the in-memory session for (agent, threadId). Next prompt re-creates one. */
-  endSession(name: string, threadId: string): void
+  /** Close and forget the session for (agent, threadId); the next prompt starts fresh. */
+  endSession(name: string, threadId: string): Promise<void>
   prompt(name: string, input: PromptInput): Promise<PromptResult>
   /**
    * Cancel an in-flight prompt for (agent, sessionId). Sends `session/cancel`
@@ -64,6 +74,8 @@ export interface AcpRegistry {
     prevSessionId: string,
     nextSessionId: string,
   ) => void
+  /** Installed before startup by a transport with a human response surface. */
+  onElicitationRequest?: AcpRegistryElicitationHandler
 }
 
 export interface AcpAgentRegistryOptions {
@@ -85,6 +97,7 @@ export interface AcpAgentRegistryOptions {
    * + `'timeout'` events to drive the SSE wire and accept HTTP decisions.
    */
   approvals?: ApprovalCorrelator
+  elicitations?: Pick<ElicitationCorrelator, 'cancelSession'>
   /** Called whenever the correlator-backed handler registers an approval. */
   onApprovalRegistered?: (approval: RegisteredApproval) => void
   /**
@@ -93,6 +106,7 @@ export interface AcpAgentRegistryOptions {
    * the host (e.g. the dev CLI capturing them to disk).
    */
   onTap?: (agentName: string, event: TapEvent) => void
+  onLifecycle?: (agentName: string, event: SessionLifecycleEvent) => void
   /**
    * Root directory under which each agent gets a per-agent state dir
    * (`<agentsDir>/<agentName>/`). Used by the AcpClient session store to
@@ -184,6 +198,8 @@ export class AcpAgentRegistry implements AcpRegistry {
   onEvent: AcpRegistryEventHandler
   onApprovalRequest: AcpRegistryApprovalHandler
   onSessionRekey?: AcpAgentRegistryOptions['onSessionRekey']
+  /** Installed before startup by a transport with a human response surface. */
+  onElicitationRequest?: AcpRegistryElicitationHandler
 
   constructor(opts: AcpAgentRegistryOptions) {
     this.opts = opts
@@ -251,10 +267,10 @@ export class AcpAgentRegistry implements AcpRegistry {
     return sessionId
   }
 
-  endSession(name: string, threadId: string): void {
+  async endSession(name: string, threadId: string): Promise<void> {
     if (!this.hasAgent(name)) return
     const client = this.clients.get(name)
-    client?.endSession(threadId)
+    await client?.endSession(threadId)
   }
 
   async cancelSession(name: string, sessionId: string): Promise<void> {
@@ -263,6 +279,7 @@ export class AcpAgentRegistry implements AcpRegistry {
     // Always nudge the correlator first so any pending approvals resolve with
     // 'cancel' regardless of whether the client is alive or already stopped.
     this.opts.approvals?.cancelSession(sessionId)
+    this.opts.elicitations?.cancelSession(sessionId, 'interrupt')
     if (!client) return
     try {
       await client.cancel(sessionId)
@@ -405,6 +422,7 @@ export class AcpAgentRegistry implements AcpRegistry {
         id: name,
         command: spawn.command,
         args: spawn.args,
+        mode: cfg.acp.mode,
         env: this.opts.env?.[name],
         cwd: this.resolveSpawnCwd(name),
         image: this.opts.image?.[name],
@@ -414,7 +432,12 @@ export class AcpAgentRegistry implements AcpRegistry {
       runtime: this.opts.runtime,
       onEvent: (e) => this.onEvent(name, e),
       onApprovalRequest: (req) => this.onApprovalRequest(name, req),
+      onElicitationRequest: this.onElicitationRequest
+        ? (req, signal) => this.onElicitationRequest!(name, req, signal)
+        : undefined,
       onTap: this.opts.onTap ? (e) => this.opts.onTap!(name, e) : undefined,
+      onLifecycle: this.opts.onLifecycle ? (e) => this.opts.onLifecycle!(name, e) : undefined,
+      sessionIdleTimeoutMs: cfg.session_idle_timeout_ms,
       contextSpawn: this.opts.contextSpawns?.[name],
       timeouts: this.resolveTimeouts(name),
     })
