@@ -143,6 +143,14 @@ export interface CreateMatrixTransportOptions {
   triggerUserIds?: string[]
   /** Homeserver name used as the permalink `via`. Falls back to the room id's server. */
   serverName?: string
+  /**
+   * Optional destination for the thread completion notice: an alias, an alias
+   * with server, a display name, or a room id. When set the notice is posted
+   * here instead of the thread's room (the mention and permalink still refer to
+   * the thread). Unset = post to the thread's room. Resolved once and cached;
+   * a failed resolution falls back to the thread's room.
+   */
+  statusRoom?: string
   /** Post-turn drain: keep collecting trailing `agent_message_chunk`s until the
    *  buffer is quiet for this long before flushing. Defaults to `DRAIN_QUIET_MS`.
    *  Set to 0 to disable the drain (e.g. in tests). */
@@ -472,6 +480,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
   } = opts
   const triggerUserIds = new Set(opts.triggerUserIds ?? [])
   const serverNameOpt = opts.serverName
+  const statusRoomOpt = opts.statusRoom?.trim() || undefined
+  // alias/config-value → resolved room id (or null when unresolvable). Resolved
+  // lazily once, so a turn never triggers a directory round-trip more than once.
+  const statusRoomCache = new Map<string, string | null>()
   const drainQuietMs = opts.drainQuietMs ?? DRAIN_QUIET_MS
   const drainMaxMs = opts.drainMaxMs ?? DRAIN_MAX_MS
   const mirrorEditIntervalMs = opts.mirrorEditIntervalMs ?? MIRROR_EDIT_INTERVAL_MS
@@ -2738,6 +2750,62 @@ agents.onEvent = async (name, event: AgentEvent) => {
   app.get('/healthz', (c) => c.text('ok'))
 
   /**
+   * Resolve the configured `status_room` to a canonical room id, or null when
+   * unset or unresolvable. Accepts a room id (`!…`), an alias (`#x` /
+   * `#x:server`), or a display name (matched case-insensitively against the
+   * rooms any agent is bound to). Aliases are expanded against the transport's
+   * server name. Resolved once and cached; a null/throw logs a warning and the
+   * caller falls back to the thread's room (the notice is never dropped).
+   */
+  async function resolveStatusRoom(agent: AgentBinding): Promise<string | null> {
+    const raw = statusRoomOpt
+    if (!raw) return null
+    const cached = statusRoomCache.get(raw)
+    if (cached !== undefined) return cached
+    let resolved: string | null = null
+    try {
+      if (raw.startsWith('!')) {
+        resolved = raw
+      } else {
+        const bare = raw.replace(/^#/, '')
+        const localpart = bare.split(':')[0] ?? ''
+        const mxid = botUserId ?? bindings[0]?.userId
+        const server =
+          serverNameOpt ?? (mxid && mxid.includes(':') ? mxid.slice(mxid.indexOf(':') + 1) : undefined)
+        const aliases = new Set<string>()
+        if (bare.includes(':')) aliases.add(`#${bare}`)
+        if (localpart && server) aliases.add(`#${localpart}:${server}`)
+        for (const alias of aliases) {
+          const r = await client.resolveAlias(alias)
+          if (r) {
+            resolved = r
+            break
+          }
+        }
+        if (!resolved && localpart) {
+          const target = localpart.toLowerCase()
+          const roomIds = [...new Set(bindings.flatMap((b) => b.rooms.map((x) => x.alias)))]
+          for (const roomId of roomIds) {
+            const name = await client.fetchRoomName(roomId, agent.userId).catch(() => null)
+            if (name?.toLowerCase() === target) {
+              resolved = roomId
+              break
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[matrix] resolveStatusRoom(${raw}) failed:`, err)
+      resolved = null
+    }
+    if (!resolved) {
+      console.warn(`[matrix] status_room "${raw}" could not be resolved; using the thread room`)
+    }
+    statusRoomCache.set(raw, resolved)
+    return resolved
+  }
+
+  /**
    * Opt-in top-level completion notice for a directly-addressed agent. Fires
    * only when *all* hold: the agent opted in, the turn is the thread master
    * (`sessionKey === threadRoot`), the thread is not a delegated task, the
@@ -2776,9 +2844,12 @@ agents.onEvent = async (name, event: AgentEvent) => {
     if (pendingInput.countFor(sessionKey) > 0) return
     if (openHandoffs.has(openKey(agent.userId, threadRoot))) return
     const eventId = lastThreadEventId.get(sessionId) ?? threadRoot
+    // The notice may go to a dedicated status room; the mention and permalink
+    // still refer to the thread, which lives in `roomId`.
+    const targetRoomId = (await resolveStatusRoom(agent)) ?? roomId
     try {
       await client.sendMessage({
-        roomId,
+        roomId: targetRoomId,
         asUserId: agent.userId,
         content: threadCompletionContent({
           agentId: agent.name,

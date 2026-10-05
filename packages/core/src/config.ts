@@ -379,8 +379,14 @@ function parseDisableMounts(agentName: string, raw: unknown): string[] {
 /**
  * Parse the opt-in `announce` block. Returns undefined when nothing is set so
  * the key stays absent from the parsed config (and from downstream types).
+ * `allowStatusRoom` is true only at the workforce level — `status_room` is a
+ * deployment-wide destination, not a per-agent field.
  */
-function parseAnnounceConfig(raw: unknown, label: string): AnnounceConfig | undefined {
+function parseAnnounceConfig(
+  raw: unknown,
+  label: string,
+  allowStatusRoom: boolean,
+): AnnounceConfig | undefined {
   if (raw === undefined || raw === null) return undefined
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`${label} must be a mapping`)
@@ -392,6 +398,12 @@ function parseAnnounceConfig(raw: unknown, label: string): AnnounceConfig | unde
       throw new Error(`${label}.thread_completion must be a boolean`)
     }
     out.thread_completion = r.thread_completion
+  }
+  if (allowStatusRoom && r.status_room !== undefined) {
+    if (typeof r.status_room !== 'string' || r.status_room.trim().length === 0) {
+      throw new Error(`${label}.status_room must be a non-empty string`)
+    }
+    out.status_room = r.status_room.trim()
   }
   return Object.keys(out).length > 0 ? out : undefined
 }
@@ -870,7 +882,7 @@ function parseAgents(
     }
 
     const binding = parseTransportBinding(name, entry, transports)
-    const announce = parseAnnounceConfig(entry.announce, `agents.${name}.announce`)
+    const announce = parseAnnounceConfig(entry.announce, `agents.${name}.announce`, false)
 
     const agentCfg: AgentConfig = {
       name,
@@ -1345,7 +1357,7 @@ export function loadZooidConfig(
     triggers,
   }
   if (workstation !== undefined) cfg.workstation = workstation
-  const announce = parseAnnounceConfig(r.announce, 'announce')
+  const announce = parseAnnounceConfig(r.announce, 'announce', true)
   if (announce) cfg.announce = announce
   if (r.container !== undefined && r.container !== null) {
     if (runtime === 'local') {

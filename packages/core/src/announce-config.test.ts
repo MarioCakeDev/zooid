@@ -40,6 +40,27 @@ describe('workforce-level announce config', () => {
       loadZooidConfig(YAML('announce:\n  thread_completion: "yes"')),
     ).toThrow(/announce\.thread_completion must be a boolean/)
   })
+
+  it('parses status_room (trimmed)', () => {
+    const config = loadZooidConfig(YAML('announce:\n  status_room: "#status"'))
+    expect(config.announce).toEqual({ status_room: '#status' })
+    const spaced = loadZooidConfig(YAML('announce:\n  status_room: "  #status:example.org  "'))
+    expect(spaced.announce?.status_room).toBe('#status:example.org')
+  })
+
+  it('leaves status_room undefined when absent', () => {
+    const config = loadZooidConfig(YAML('announce:\n  thread_completion: true'))
+    expect(config.announce?.status_room).toBeUndefined()
+  })
+
+  it('rejects a non-string or empty status_room', () => {
+    expect(() => loadZooidConfig(YAML('announce:\n  status_room: 42'))).toThrow(
+      /announce\.status_room must be a non-empty string/,
+    )
+    expect(() => loadZooidConfig(YAML('announce:\n  status_room: "   "'))).toThrow(
+      /announce\.status_room must be a non-empty string/,
+    )
+  })
 })
 
 describe('per-agent announce override', () => {
@@ -57,5 +78,10 @@ describe('per-agent announce override', () => {
     expect(() =>
       loadZooidConfig(YAML('    announce:\n      thread_completion: 1')),
     ).toThrow(/agents\.qa\.announce\.thread_completion must be a boolean/)
+  })
+
+  it('ignores status_room at the agent level (workforce-only)', () => {
+    const config = loadZooidConfig(YAML('    announce:\n      status_room: "#status"'))
+    expect(config.agents.qa!.announce).toBeUndefined()
   })
 })

@@ -152,6 +152,14 @@ export interface AnnounceConfig {
    * root's author. Defaults false.
    */
   thread_completion?: boolean
+  /**
+   * Optional destination room for the completion notice: an alias (`#status`),
+   * an alias with server (`#status:example.org`), a display name, or a room id
+   * (`!abc:example.org`). When set the notice is posted here instead of the
+   * thread's own room; the mention and permalink still refer to the thread.
+   * Unset = post to the thread's room. Resolved once and cached at runtime.
+   */
+  status_room?: string
 }
 
 /** Per-agent override of announcer defaults. */

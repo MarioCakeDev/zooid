@@ -348,9 +348,11 @@ describe('mergeCliFlags', () => {
   })
 
   it('preserves the workforce announce block through merge', () => {
-    const base = baseConfig({ announce: { thread_completion: true } })
+    const base = baseConfig({
+      announce: { thread_completion: true, status_room: '#status' },
+    })
     const merged = mergeCliFlags(base, {})
-    expect(merged.announce).toEqual({ thread_completion: true })
+    expect(merged.announce).toEqual({ thread_completion: true, status_room: '#status' })
     // A copy, not the same object reference — the merge never mutates base.
     expect(merged.announce).not.toBe(base.announce)
   })

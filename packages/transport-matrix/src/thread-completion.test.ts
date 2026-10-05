@@ -45,7 +45,13 @@ function fakeApprovals() {
   })
 }
 
-function fakeClient(opts: { dropEventIds?: boolean; fetchEvent?: () => Promise<unknown> } = {}) {
+function fakeClient(
+  opts: {
+    dropEventIds?: boolean
+    fetchEvent?: () => Promise<unknown>
+    resolveAlias?: (alias: string) => Promise<string | null>
+  } = {},
+) {
   let n = 0
   return {
     registerBot: vi.fn(async () => undefined),
@@ -55,6 +61,8 @@ function fakeClient(opts: { dropEventIds?: boolean; fetchEvent?: () => Promise<u
     sendCustomEvent: vi.fn(async () => (opts.dropEventIds ? {} : { event_id: `$custom-${++n}` })),
     fetchEvent: vi.fn(opts.fetchEvent ?? (async () => null)),
     fetchThreadRelations: vi.fn(async () => ({ chunk: [] })),
+    resolveAlias: vi.fn(opts.resolveAlias ?? (async () => null)),
+    fetchRoomName: vi.fn(async () => null),
     setTyping: vi.fn(async () => {}),
     setPresence: vi.fn(async () => {}),
   }
@@ -93,11 +101,17 @@ function makeHarness(
     pendingInput?: PendingInput
     dropEventIds?: boolean
     fetchEvent?: () => Promise<unknown>
+    resolveAlias?: (alias: string) => Promise<string | null>
+    statusRoom?: string
   } = {},
 ) {
   const agents = fakeRegistry()
   const approvals = fakeApprovals()
-  const client = fakeClient({ dropEventIds: callbacks.dropEventIds, fetchEvent: callbacks.fetchEvent })
+  const client = fakeClient({
+    dropEventIds: callbacks.dropEventIds,
+    fetchEvent: callbacks.fetchEvent,
+    resolveAlias: callbacks.resolveAlias,
+  })
   if (callbacks.prompt) agents.prompt.mockImplementation(callbacks.prompt as never)
   const transport = createMatrixTransport({
     agents: agents as never,
@@ -107,6 +121,7 @@ function makeHarness(
     hsToken: 'hs-secret',
     botUserId: '@zooid:example.com',
     triggerUserIds: ['@cron:example.com'],
+    statusRoom: callbacks.statusRoom,
     serverName: 'example.com',
     drainQuietMs: 0,
     mirrorEditIntervalMs: 0,
@@ -457,6 +472,76 @@ describe('matrix transport / thread completion notice', () => {
     expect(found[0]!.content!.formatted_body).toContain(
       'https://matrix.to/#/!r%3Aexample.com/%24root?via=example.com',
     )
+  })
+
+  it('posts to the configured status_room, still mentioning the root author and linking to the thread', async () => {
+    const STATUS = '!status:example.com'
+    const h = makeHarness([architect], {
+      statusRoom: '#status',
+      resolveAlias: async (alias) => (alias === '#status:example.com' ? STATUS : null),
+    })
+    harnessRefs.agents = h.agents
+    h.agents.prompt.mockImplementation(prose('All done.') as never)
+
+    await post(h.transport, [humanRootEvent()])
+    await settle()
+
+    const found = notices(h.client)
+    expect(found).toHaveLength(1)
+    // Posted to the status room, not the thread room.
+    expect(found[0]!.roomId).toBe(STATUS)
+    // Resolved against the transport's server name.
+    expect(h.client.resolveAlias).toHaveBeenCalledWith('#status:example.com')
+    // Mention + permalink still refer to the thread.
+    expect(found[0]!.content!['m.mentions']).toEqual({ user_ids: [MARIO] })
+    expect(found[0]!.content!.formatted_body).toContain(
+      'https://matrix.to/#/!r%3Aexample.com/%24msg-1?via=example.com',
+    )
+  })
+
+  it('caches the status_room resolution across turns', async () => {
+    const STATUS = '!status:example.com'
+    const h = makeHarness([architect], {
+      statusRoom: '#status',
+      resolveAlias: async () => STATUS,
+    })
+    harnessRefs.agents = h.agents
+    h.agents.prompt.mockImplementation(prose('All done.') as never)
+
+    await post(h.transport, [humanRootEvent()])
+    await settle()
+    await post(h.transport, [{ ...humanRootEvent(), event_id: '$root2' }])
+    await settle()
+
+    expect(notices(h.client).length).toBeGreaterThanOrEqual(2)
+    expect(h.client.resolveAlias).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to the thread room when status_room cannot be resolved', async () => {
+    const h = makeHarness([architect], {
+      statusRoom: '#status',
+      resolveAlias: async () => null,
+    })
+    harnessRefs.agents = h.agents
+    h.agents.prompt.mockImplementation(prose('All done.') as never)
+
+    await post(h.transport, [humanRootEvent()])
+    await settle()
+    const found = notices(h.client)
+    expect(found).toHaveLength(1)
+    expect(found[0]!.roomId).toBe(ROOM)
+  })
+
+  it('posts to the thread room when status_room is unset', async () => {
+    const h = makeHarness([architect])
+    harnessRefs.agents = h.agents
+    h.agents.prompt.mockImplementation(prose('All done.') as never)
+
+    await post(h.transport, [humanRootEvent()])
+    await settle()
+    const found = notices(h.client)
+    expect(found).toHaveLength(1)
+    expect(found[0]!.roomId).toBe(ROOM)
   })
 })
 
