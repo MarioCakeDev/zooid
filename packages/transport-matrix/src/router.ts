@@ -24,11 +24,11 @@ export interface AgentBinding {
   /** Path prefix as the agent sees it: '/workspace' for containers, = workspaceDir for local. */
   agentWorkspacePath?: string
   /**
-   * Opt-in: when true, a *thread-master* turn on a human-rooted thread posts a
-   * top-level completion notice. Resolved at daemon start from
-   * `announce.human_thread_completion` (workforce default overridden per agent).
+   * Opt-in: when true, a *thread-master* turn posts a top-level completion
+   * notice mentioning the author of the thread root. Resolved at daemon start
+   * from `announce.thread_completion` (workforce default overridden per agent).
    */
-  announceHumanThreadCompletion?: boolean
+  announceThreadCompletion?: boolean
 }
 
 export const MEDIA_MSGTYPES = new Set(['m.image', 'm.file', 'm.video', 'm.audio'])
@@ -86,9 +86,8 @@ export interface ThreadState {
   handoffs: Record<string, string[]>
   /**
    * MXID of the event that rooted the thread. Set on promotion (top-level
-   * trigger) and on rebuild after a restart. Used by the opt-in human-thread
-   * completion announcement to tell a human root from an agent / trigger /
-   * brief root.
+   * trigger) and on rebuild after a restart. Used by the opt-in thread
+   * completion announcement to resolve the root author as its mention target.
    */
   rootSender?: string
   /** True when the thread root carried a `dev.zooid.trigger` stamp. */

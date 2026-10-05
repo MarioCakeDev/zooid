@@ -379,33 +379,19 @@ function parseDisableMounts(agentName: string, raw: unknown): string[] {
 /**
  * Parse the opt-in `announce` block. Returns undefined when nothing is set so
  * the key stays absent from the parsed config (and from downstream types).
- * `allowOwner` is true only at the workforce level — `owner_mxid` is a single
- * deployment-wide owner, not a per-agent field.
  */
-function parseAnnounceConfig(
-  raw: unknown,
-  label: string,
-  allowOwner: boolean,
-): AnnounceConfig | undefined {
+function parseAnnounceConfig(raw: unknown, label: string): AnnounceConfig | undefined {
   if (raw === undefined || raw === null) return undefined
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`${label} must be a mapping`)
   }
   const r = raw as Record<string, unknown>
   const out: AnnounceConfig = {}
-  if (r.human_thread_completion !== undefined) {
-    if (typeof r.human_thread_completion !== 'boolean') {
-      throw new Error(`${label}.human_thread_completion must be a boolean`)
+  if (r.thread_completion !== undefined) {
+    if (typeof r.thread_completion !== 'boolean') {
+      throw new Error(`${label}.thread_completion must be a boolean`)
     }
-    out.human_thread_completion = r.human_thread_completion
-  }
-  if (allowOwner && r.owner_mxid !== undefined) {
-    if (typeof r.owner_mxid !== 'string' || !MATRIX_USER_ID_RE.test(r.owner_mxid)) {
-      throw new Error(
-        `${label}.owner_mxid must be a full MXID (got ${JSON.stringify(r.owner_mxid)})`,
-      )
-    }
-    out.owner_mxid = r.owner_mxid
+    out.thread_completion = r.thread_completion
   }
   return Object.keys(out).length > 0 ? out : undefined
 }
@@ -884,7 +870,7 @@ function parseAgents(
     }
 
     const binding = parseTransportBinding(name, entry, transports)
-    const announce = parseAnnounceConfig(entry.announce, `agents.${name}.announce`, false)
+    const announce = parseAnnounceConfig(entry.announce, `agents.${name}.announce`)
 
     const agentCfg: AgentConfig = {
       name,
@@ -1359,7 +1345,7 @@ export function loadZooidConfig(
     triggers,
   }
   if (workstation !== undefined) cfg.workstation = workstation
-  const announce = parseAnnounceConfig(r.announce, 'announce', true)
+  const announce = parseAnnounceConfig(r.announce, 'announce')
   if (announce) cfg.announce = announce
   if (r.container !== undefined && r.container !== null) {
     if (runtime === 'local') {

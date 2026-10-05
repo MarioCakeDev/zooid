@@ -140,30 +140,24 @@ export interface HttpBinding {
 }
 
 /**
- * Opt-in human-thread completion announcements. When enabled and the
- * configured owner MXID roots a thread, the directly-addressed agent posts one
- * short top-level room notice when its turn finishes, linking to the thread's
- * latest message. Defaults off; see `announce` on `ZooidConfig`.
+ * Opt-in thread completion announcements. When enabled, the directly-addressed
+ * agent posts one short top-level room message when a *thread-master* turn
+ * finishes, mentioning the author of the thread root and linking to the
+ * thread's latest message. Defaults off; see `announce` on `ZooidConfig`.
  */
 export interface AnnounceConfig {
   /**
    * Master switch. When true, a *thread-master* turn (`sessionKey ===
-   * threadRoot`) on a thread rooted by the human owner posts a top-level
-   * completion notice. Defaults false.
+   * threadRoot`) posts a top-level completion notice mentioning the thread
+   * root's author. Defaults false.
    */
-  human_thread_completion?: boolean
-  /**
-   * Full MXID of the human owner, e.g. `@mario:mariocake.de`. The notice only
-   * fires for threads this user authored. When absent, the transport falls
-   * back to "any non-agent, non-trigger root".
-   */
-  owner_mxid?: string
+  thread_completion?: boolean
 }
 
 /** Per-agent override of announcer defaults. */
 export interface AgentAnnounceConfig {
-  /** Overrides `announce.human_thread_completion` for this agent. */
-  human_thread_completion?: boolean
+  /** Overrides `announce.thread_completion` for this agent. */
+  thread_completion?: boolean
 }
 
 /**

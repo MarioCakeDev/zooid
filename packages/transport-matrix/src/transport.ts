@@ -73,7 +73,7 @@ import {
   toolEntryMachine,
   toolSubjectParamKeys,
   TURN_MIRROR_MARKER,
-  humanThreadCompletionContent,
+  threadCompletionContent,
   completionSummary,
   matrixEventPermalink,
   type TurnToolEntry,
@@ -136,15 +136,9 @@ export interface CreateMatrixTransportOptions {
   /** Admin Matrix user ID. When set, BotPool.bootstrap invites this user into rooms it creates. */
   adminUserId?: string
   /**
-   * Human owner MXID (`@mario:mariocake.de`). When set, gates the opt-in
-   * human-thread completion announcement on `rootSender === ownerUserId`.
-   * When absent the transport falls back to "a non-agent, non-trigger root".
-   */
-  ownerUserId?: string
-  /**
-   * Full MXIDs a trigger posts as (`triggers.<name>.as`). A root authored by
-   * one of these is never announced. Recorded explicitly because the trigger
-   * bot (`@agent.cron`) is not in the agent roster.
+   * Full MXIDs a trigger posts as (`triggers.<name>.as`). A trigger-stamped
+   * root is never announced; these MXIDs are recorded explicitly because the
+   * trigger bot (`@agent.cron`) is not in the agent roster.
    */
   triggerUserIds?: string[]
   /** Homeserver name used as the permalink `via`. Falls back to the room id's server. */
@@ -476,7 +470,6 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
     botUserId,
     mode = 'appservice',
   } = opts
-  const ownerUserId = opts.ownerUserId
   const triggerUserIds = new Set(opts.triggerUserIds ?? [])
   const serverNameOpt = opts.serverName
   const drainQuietMs = opts.drainQuietMs ?? DRAIN_QUIET_MS
@@ -2745,33 +2738,20 @@ agents.onEvent = async (name, event: AgentEvent) => {
   app.get('/healthz', (c) => c.text('ok'))
 
   /**
-   * True when the thread root was authored by the human owner. Preferred gate:
-   * the explicit `ownerUserId` (from `announce.owner_mxid` or the `--admin-user`
-   * flag). Without one, any non-agent root counts — with the trigger stamp and
-   * the configured trigger MXIDs excluded explicitly, because the trigger bot
-   * (`@agent.cron`) is not in the agent roster.
-   */
-  function isHumanThreadRoot(st: ThreadState): boolean {
-    const sender = st.rootSender
-    if (!sender) return false
-    if (st.rootIsTrigger) return false
-    if (ownerUserId) return sender === ownerUserId
-    if (bindings.some((b) => b.userId === sender)) return false
-    if (workforce.agentIds.has(sender)) return false
-    if (triggerUserIds.has(sender)) return false
-    return true
-  }
-
-  /**
    * Opt-in top-level completion notice for a directly-addressed agent. Fires
    * only when *all* hold: the agent opted in, the turn is the thread master
-   * (`sessionKey === threadRoot`), the thread is not a delegated task, the root
-   * was human-authored, the turn genuinely finished (no outstanding
-   * invocation, pending human input or open handoff), it produced output, and
-   * it did not fail. A failed turn stays silent rather than posting a `⚠️`
-   * notice — the in-thread mirror line already marks the failure.
+   * (`sessionKey === threadRoot`), the thread is not a delegated task, the
+   * thread has a resolvable mention target, the turn genuinely finished (no
+   * outstanding invocation, pending human input or open handoff), it produced
+   * output, and it did not fail. A failed turn stays silent rather than posting
+   * a `⚠️` notice — the in-thread mirror line already marks the failure.
+   *
+   * The mention target is the thread root's author, whoever that is (a human,
+   * or an agent that opened the thread). It is suppressed for trigger-stamped
+   * roots (cron/brief/sweep), for the daemon/appservice bot itself, and for
+   * configured trigger MXIDs; an unknown root author means silence.
    */
-  async function announceHumanThreadCompletion(input: {
+  async function announceThreadCompletion(input: {
     sessionId: string
     agent: AgentBinding
     roomId: string
@@ -2781,12 +2761,17 @@ agents.onEvent = async (name, event: AgentEvent) => {
     failed: boolean
   }): Promise<void> {
     const { sessionId, agent, roomId, threadRoot, sessionKey, producedOutput, failed } = input
-    if (!agent.announceHumanThreadCompletion) return
+    if (!agent.announceThreadCompletion) return
     if (failed || !producedOutput) return
     if (sessionKey !== threadRoot) return
     if (taskRegistry.taskForRoot(threadRoot)) return
     const st = threadStates.get(threadRoot)
-    if (!st || !isHumanThreadRoot(st)) return
+    if (!st) return
+    const mentionUserId = st.rootSender
+    if (!mentionUserId) return
+    if (st.rootIsTrigger) return
+    if (botUserId && mentionUserId === botUserId) return
+    if (triggerUserIds.has(mentionUserId)) return
     if (invocations.outstandingFor(sessionKey).length > 0) return
     if (pendingInput.countFor(sessionKey) > 0) return
     if (openHandoffs.has(openKey(agent.userId, threadRoot))) return
@@ -2795,10 +2780,11 @@ agents.onEvent = async (name, event: AgentEvent) => {
       await client.sendMessage({
         roomId,
         asUserId: agent.userId,
-        content: humanThreadCompletionContent({
+        content: threadCompletionContent({
           agentId: agent.name,
           summary: completionSummary(lastFlushed.get(sessionId)),
           permalink: matrixEventPermalink(roomId, eventId, permalinkServer(roomId)),
+          mentionUserId,
           failed: false,
         }),
       })
@@ -2995,11 +2981,12 @@ agents.onEvent = async (name, event: AgentEvent) => {
           else if (invocation) returnInvocation(invocation, decision.completion, task)
         }
       }
-      // Opt-in: a thread-master turn on a human-rooted thread posts one
-      // top-level notice linking to the thread's latest message. Runs after
-      // the task/evaluateCompletion block so a turn that just *became* a task
-      // thread is excluded; before the map cleanup so it can still read them.
-      await announceHumanThreadCompletion({
+      // Opt-in: a thread-master turn posts one top-level notice mentioning the
+      // thread root's author and linking to the thread's latest message. Runs
+      // after the task/evaluateCompletion block so a turn that just *became* a
+      // task thread is excluded; before the map cleanup so it can still read
+      // them.
+      await announceThreadCompletion({
         sessionId,
         agent,
         roomId,
@@ -3447,7 +3434,7 @@ export async function rebuildThreadState(
     asUserId: asUser,
   })
   const root = await client.fetchEvent(roomId, rootEventId, asUser)
-  // Recover the root author so the human-thread completion gate survives a
+  // Recover the root author so the thread completion mention target survives a
   // daemon restart (the live path sets these at thread promotion).
   if (root) {
     const rootSender = (root as { sender?: string }).sender

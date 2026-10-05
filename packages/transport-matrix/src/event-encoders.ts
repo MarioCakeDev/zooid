@@ -1409,39 +1409,44 @@ export function matrixEventPermalink(
 }
 
 /**
- * Content of the opt-in top-level "human thread completion" notice: one short
- * line plus a link to the thread's latest message. `m.notice` (not `m.text`)
- * keeps it out of noisy push notifications — it matches the existing agent
- * prose convention — while remaining visible and tappable in the timeline. The
- * body carries `org.matrix.custom.html` so Element renders the link.
+ * Content of the opt-in top-level thread completion notice: one short line
+ * mentioning the author of the thread root, plus a link to the thread's latest
+ * message. `m.text` (not `m.notice`) so the mention actually notifies — the
+ * point is to tell the thread owner the thread ended. `m.mentions` carries the
+ * root author so Element renders the MXID pill; the raw MXID also rides in
+ * both `body` and `formatted_body`.
  *
  * The message is top-level rather than threaded (that is the whole point), so
- * it carries `COMPLETION_NOTICE_MARKER` for `route()` to drop: without it a
- * `trigger: any` agent would wake on the sibling agent's notice and loop.
+ * it carries `COMPLETION_NOTICE_MARKER` for `route()` to drop: without it the
+ * mention would wake an agent (or a `trigger: any` sibling) and loop.
  */
 export const COMPLETION_NOTICE_MARKER = 'dev.zooid.completion_notice'
 
-export function humanThreadCompletionContent(input: {
+export function threadCompletionContent(input: {
   agentId: string
   summary: string
   permalink: string
+  mentionUserId: string
   failed: boolean
 }): { msgtype: string; body: string; format: string; formatted_body: string; [k: string]: unknown } {
   const marker = input.failed ? '⚠️' : '✅'
   const outcome = input.failed ? 'failed' : 'finished'
   const summary = input.summary.trim()
-  const body = summary
-    ? `${marker} ${input.agentId} ${outcome} — ${summary}`
-    : `${marker} ${input.agentId} ${outcome}`
+  const body =
+    `${marker} ${input.agentId} ${outcome}` +
+    (summary ? ` — ${summary}` : '') +
+    `\n${input.mentionUserId}: ${input.permalink}`
   const formattedBody =
     `${marker} ${escapeHtml(input.agentId)} ${outcome}` +
     (summary ? ` — ${escapeHtml(summary)}` : '') +
-    `<br><a href="${escapeHtml(input.permalink)}">Open thread ↗</a>`
+    `<br>${escapeHtml(input.mentionUserId)}: ` +
+    `<a href="${escapeHtml(input.permalink)}">Open thread ↗</a>`
   return {
-    msgtype: 'm.notice',
+    msgtype: 'm.text',
     body,
     format: 'org.matrix.custom.html',
     formatted_body: formattedBody,
+    'm.mentions': { user_ids: [input.mentionUserId] },
     [COMPLETION_NOTICE_MARKER]: true,
   }
 }

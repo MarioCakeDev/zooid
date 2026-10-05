@@ -348,14 +348,9 @@ describe('mergeCliFlags', () => {
   })
 
   it('preserves the workforce announce block through merge', () => {
-    const base = baseConfig({
-      announce: { human_thread_completion: true, owner_mxid: '@mario:mariocake.de' },
-    })
+    const base = baseConfig({ announce: { thread_completion: true } })
     const merged = mergeCliFlags(base, {})
-    expect(merged.announce).toEqual({
-      human_thread_completion: true,
-      owner_mxid: '@mario:mariocake.de',
-    })
+    expect(merged.announce).toEqual({ thread_completion: true })
     // A copy, not the same object reference — the merge never mutates base.
     expect(merged.announce).not.toBe(base.announce)
   })

@@ -239,8 +239,8 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
       const workspaceDir = isAbsolute(a.workdir) ? a.workdir : resolve(configDir, a.workdir)
       binding.workspaceDir = workspaceDir
       binding.agentWorkspacePath = isContainerRuntime ? '/workspace' : workspaceDir
-      binding.announceHumanThreadCompletion =
-        a.announce?.human_thread_completion ?? config.announce?.human_thread_completion ?? false
+      binding.announceThreadCompletion =
+        a.announce?.thread_completion ?? config.announce?.thread_completion ?? false
       bindings.push(binding)
     }
     // user_namespace is a regex like `@.*:localhost`; the part after the last
@@ -264,7 +264,6 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
       bindings,
       hsToken: matrix.transport.hs_token,
       adminUserId: opts.adminUserId,
-      ownerUserId: config.announce?.owner_mxid ?? opts.adminUserId,
       triggerUserIds: Object.values(config.triggers).map((t) => t.as),
       serverName,
       botUserId: asUserId,

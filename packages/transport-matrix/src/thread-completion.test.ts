@@ -2,18 +2,19 @@ import { describe, it, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { createMatrixTransport } from './transport.js'
 import { matrixEventPermalink, completionSummary } from './event-encoders.js'
+import { COMPLETION_NOTICE_MARKER } from './event-encoders.js'
 import type { AgentBinding } from './router.js'
 
 /**
- * Opt-in human-thread completion notice. When an agent that opted in
- * (`announce.human_thread_completion`) finishes a thread-master turn on a
- * thread rooted by the human owner, it posts exactly one top-level room
- * message (no `threadRoot`, so no thread relation) linking to the thread's
- * latest message. Everything else is silence.
+ * Opt-in thread completion notice. When an agent that opted in
+ * (`announce.thread_completion`) finishes a thread-master turn, it posts
+ * exactly one top-level message (no `threadRoot`, so no thread relation), at
+ * `m.text`, mentioning the author of the thread root and linking to the
+ * thread's latest message. Everything else is silence.
  */
 
 const ROOM = '!r:example.com'
-const OWNER = '@mario:example.com'
+const MARIO = '@mario:example.com'
 
 function fakeRegistry() {
   const reg = {
@@ -44,7 +45,7 @@ function fakeApprovals() {
   })
 }
 
-function fakeClient(opts: { dropEventIds?: boolean } = {}) {
+function fakeClient(opts: { dropEventIds?: boolean; fetchEvent?: () => Promise<unknown> } = {}) {
   let n = 0
   return {
     registerBot: vi.fn(async () => undefined),
@@ -52,7 +53,7 @@ function fakeClient(opts: { dropEventIds?: boolean } = {}) {
     leaveRoom: vi.fn(async () => undefined),
     sendMessage: vi.fn(async () => (opts.dropEventIds ? {} : { event_id: `$msg-${++n}` })),
     sendCustomEvent: vi.fn(async () => (opts.dropEventIds ? {} : { event_id: `$custom-${++n}` })),
-    fetchEvent: vi.fn(async () => null),
+    fetchEvent: vi.fn(opts.fetchEvent ?? (async () => null)),
     fetchThreadRelations: vi.fn(async () => ({ chunk: [] })),
     setTyping: vi.fn(async () => {}),
     setPresence: vi.fn(async () => {}),
@@ -66,7 +67,7 @@ const architect: AgentBinding = {
   userId: '@architect:example.com',
   rooms: [{ alias: ROOM }],
   trigger: 'mention',
-  announceHumanThreadCompletion: true,
+  announceThreadCompletion: true,
 }
 
 const builder: AgentBinding = {
@@ -74,7 +75,7 @@ const builder: AgentBinding = {
   userId: '@builder:example.com',
   rooms: [{ alias: ROOM }],
   trigger: 'mention',
-  announceHumanThreadCompletion: true,
+  announceThreadCompletion: true,
 }
 
 /** A catch-all agent, for roots authored by a non-mentioning sender. */
@@ -91,12 +92,12 @@ function makeHarness(
     prompt?: (name: string, p: { threadId: string }) => Promise<{ stopReason: string }>
     pendingInput?: PendingInput
     dropEventIds?: boolean
-    ownerUserId?: string | undefined
+    fetchEvent?: () => Promise<unknown>
   } = {},
 ) {
   const agents = fakeRegistry()
   const approvals = fakeApprovals()
-  const client = fakeClient({ dropEventIds: callbacks.dropEventIds })
+  const client = fakeClient({ dropEventIds: callbacks.dropEventIds, fetchEvent: callbacks.fetchEvent })
   if (callbacks.prompt) agents.prompt.mockImplementation(callbacks.prompt as never)
   const transport = createMatrixTransport({
     agents: agents as never,
@@ -105,7 +106,6 @@ function makeHarness(
     bindings,
     hsToken: 'hs-secret',
     botUserId: '@zooid:example.com',
-    ownerUserId: callbacks.ownerUserId === undefined ? OWNER : callbacks.ownerUserId,
     triggerUserIds: ['@cron:example.com'],
     serverName: 'example.com',
     drainQuietMs: 0,
@@ -128,11 +128,23 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 25; i++) await new Promise((r) => setImmediate(r))
 }
 
-/** Top-level completion notices: no `threadRoot` and the HTML link marker. */
+/** Top-level completion notices: no `threadRoot` and the completion marker. */
 function notices(client: Client) {
   return client.sendMessage.mock.calls
-    .map((c) => c[0] as { threadRoot?: string; content?: { formatted_body?: string } })
-    .filter((a) => a?.content?.formatted_body?.includes('Open thread') === true)
+    .map(
+      (c) =>
+        c[0] as {
+          threadRoot?: string
+          content?: {
+            msgtype?: string
+            body?: string
+            'm.mentions'?: { user_ids?: string[] }
+            formatted_body?: string
+            [k: string]: unknown
+          }
+        },
+    )
+    .filter((a) => a?.content?.[COMPLETION_NOTICE_MARKER] === true)
 }
 
 function humanRootEvent(overrides: Record<string, unknown> = {}) {
@@ -140,7 +152,7 @@ function humanRootEvent(overrides: Record<string, unknown> = {}) {
     type: 'm.room.message',
     event_id: '$root',
     room_id: ROOM,
-    sender: OWNER,
+    sender: MARIO,
     content: {
       msgtype: 'm.text',
       body: 'architect please',
@@ -149,6 +161,9 @@ function humanRootEvent(overrides: Record<string, unknown> = {}) {
     },
   }
 }
+
+// `prose` reads the harness registry; tests set this before use.
+const harnessRefs: { agents: ReturnType<typeof fakeRegistry> } = { agents: fakeRegistry() }
 
 /** A prompt that emits one prose chunk so the turn produces output. */
 function prose(text: string) {
@@ -161,11 +176,9 @@ function prose(text: string) {
     return { stopReason: 'end_turn' }
   }
 }
-// `prose` needs the harness's registry; tests set this before use.
-const harnessRefs: { agents: ReturnType<typeof fakeRegistry> } = { agents: fakeRegistry() }
 
-describe('matrix transport / human-thread completion notice', () => {
-  it('posts exactly one top-level notice (no threadRoot) for a human-rooted finished turn', async () => {
+describe('matrix transport / thread completion notice', () => {
+  it('posts exactly one top-level m.text mentioning the human thread root', async () => {
     const h = makeHarness([architect])
     harnessRefs.agents = h.agents
     h.agents.prompt.mockImplementation(prose('All done.') as never)
@@ -177,15 +190,40 @@ describe('matrix transport / human-thread completion notice', () => {
     expect(found).toHaveLength(1)
     const call = found[0]!
     expect(call.threadRoot).toBeUndefined()
-    expect(call.content!.formatted_body).toContain(
+    expect(call.content!.msgtype).toBe('m.text')
+    expect(call.content!['m.mentions']).toEqual({ user_ids: [MARIO] })
+    expect(call.content!.body).toContain(`${MARIO}:`)
+    expect(call.content!.body).toContain(
       'https://matrix.to/#/!r%3Aexample.com/%24msg-1?via=example.com',
     )
-    expect(call.content!.formatted_body).toContain('<a href=')
+    expect(call.content!.formatted_body).toContain(MARIO)
     expect(call.content!.formatted_body).toContain('Open thread')
   })
 
+  it('mentions an agent thread root author (agent-rooted thread now announces)', async () => {
+    const h = makeHarness([builderAny])
+    harnessRefs.agents = h.agents
+    h.agents.prompt.mockImplementation(prose('output') as never)
+
+    await post(h.transport, [
+      {
+        type: 'm.room.message',
+        event_id: '$root',
+        room_id: ROOM,
+        sender: '@architect:example.com',
+        content: { msgtype: 'm.text', body: 'builder go' },
+      },
+    ])
+    await settle()
+
+    const found = notices(h.client)
+    expect(found).toHaveLength(1)
+    expect(found[0]!.content!['m.mentions']).toEqual({ user_ids: ['@architect:example.com'] })
+    expect(found[0]!.content!.formatted_body).toContain('@architect:example.com')
+  })
+
   it('stays silent when the feature flag is off for the agent', async () => {
-    const off: AgentBinding = { ...architect, announceHumanThreadCompletion: false }
+    const off: AgentBinding = { ...architect, announceThreadCompletion: false }
     const h = makeHarness([off])
     harnessRefs.agents = h.agents
     h.agents.prompt.mockImplementation(prose('All done.') as never)
@@ -267,28 +305,10 @@ describe('matrix transport / human-thread completion notice', () => {
     expect(notices(h.client)).toHaveLength(0)
   })
 
-  it('stays silent when the thread root was authored by an agent', async () => {
-    const h = makeHarness([builderAny])
-    harnessRefs.agents = h.agents
-    h.agents.prompt.mockImplementation(prose('output') as never)
-
-    await post(h.transport, [
-      {
-        type: 'm.room.message',
-        event_id: '$root',
-        room_id: ROOM,
-        sender: '@architect:example.com',
-        content: { msgtype: 'm.text', body: 'builder go' },
-      },
-    ])
-    await settle()
-    expect(notices(h.client)).toHaveLength(0)
-  })
-
   it('stays silent for a trigger-stamped root', async () => {
     const h = makeHarness([builderAny])
     harnessRefs.agents = h.agents
-    h.agents.prompt.mockImplementation(prose('brief body') as never)
+    h.agents.prompt.mockImplementation(prose('scheduled body') as never)
 
     await post(h.transport, [
       {
@@ -307,14 +327,14 @@ describe('matrix transport / human-thread completion notice', () => {
     expect(notices(h.client)).toHaveLength(0)
   })
 
-  it('stays silent for a #brief root authored by the brief agent', async () => {
+  it('stays silent for a trigger-stamped #brief root', async () => {
     const briefRoom = '!brief:example.com'
     const brief: AgentBinding = {
       name: 'builder',
       userId: '@builder:example.com',
       rooms: [{ alias: briefRoom }],
       trigger: 'any',
-      announceHumanThreadCompletion: true,
+      announceThreadCompletion: true,
     }
     const h = makeHarness([brief])
     harnessRefs.agents = h.agents
@@ -325,8 +345,55 @@ describe('matrix transport / human-thread completion notice', () => {
         type: 'm.room.message',
         event_id: '$root',
         room_id: briefRoom,
-        sender: '@brief:example.com',
-        content: { msgtype: 'm.text', body: 'daily brief' },
+        sender: '@cron:example.com',
+        content: {
+          msgtype: 'm.text',
+          body: 'daily brief',
+          'dev.zooid.trigger': { name: 'brief', fired_at: Date.now() },
+        },
+      },
+    ])
+    await settle()
+    expect(notices(h.client)).toHaveLength(0)
+  })
+
+  it('stays silent when the root author is the daemon/appservice bot itself', async () => {
+    const h = makeHarness([builderAny])
+    harnessRefs.agents = h.agents
+    h.agents.prompt.mockImplementation(prose('output') as never)
+
+    await post(h.transport, [
+      {
+        type: 'm.room.message',
+        event_id: '$root',
+        room_id: ROOM,
+        sender: '@zooid:example.com',
+        content: { msgtype: 'm.text', body: 'go' },
+      },
+    ])
+    await settle()
+    expect(notices(h.client)).toHaveLength(0)
+  })
+
+  it('stays silent when the root author cannot be resolved', async () => {
+    const h = makeHarness([builderAny])
+    harnessRefs.agents = h.agents
+    h.agents.prompt.mockImplementation(prose('output') as never)
+
+    // A thread reply whose root the homeserver cannot fetch: rebuild yields a
+    // state with no rootSender, so there is no mention target.
+    await post(h.transport, [
+      {
+        type: 'm.room.message',
+        event_id: '$reply',
+        room_id: ROOM,
+        sender: MARIO,
+        content: {
+          msgtype: 'm.text',
+          body: 'hello',
+          'm.mentions': { user_ids: ['@builder:example.com'] },
+          'm.relates_to': { rel_type: 'm.thread', event_id: '$missingroot' },
+        },
       },
     ])
     await settle()
@@ -366,7 +433,7 @@ describe('matrix transport / human-thread completion notice', () => {
         type: 'm.room.message',
         event_id: '$follow',
         room_id: ROOM,
-        sender: OWNER,
+        sender: MARIO,
         content: {
           msgtype: 'm.text',
           body: 'any update?',
