@@ -71,6 +71,7 @@ import {
   toolCallDiff,
   DIFF_PARAM_KEYS,
   toolEntryMachine,
+  toolSubjectParamKeys,
   TURN_MIRROR_MARKER,
   type TurnToolEntry,
 } from './event-encoders.js'
@@ -850,13 +851,16 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
 
   /**
    * The params line of a tool entry, derived from its stored `rawInput` with the
-   * diff's own keys filtered out when the entry renders a diff. Derived rather
-   * than accumulated, so a `tool_call_update` that carries the diff but no input
-   * still re-derives the params of the earlier `tool_call` without the keys the
-   * diff now shows.
+   * diff's own keys filtered out when the entry renders a diff, and with any
+   * argument the tagline already names filtered out too (an argument shown
+   * twice is noise). Derived rather than accumulated, so a `tool_call_update`
+   * that carries the diff but no input still re-derives the params of the
+   * earlier `tool_call` without the keys the diff now shows.
    */
   function entryParams(entry: TurnToolEntry): string | undefined {
-    return toolParamsText(entry.rawInput, entry.diff ? DIFF_PARAM_KEYS : undefined)
+    const omit = new Set<string>(entry.diff ? DIFF_PARAM_KEYS : [])
+    for (const key of toolSubjectParamKeys(entry)) omit.add(key)
+    return toolParamsText(entry.rawInput, omit.size > 0 ? omit : undefined)
   }
 
   async function updateTurnMirror(
