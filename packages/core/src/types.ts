@@ -140,6 +140,33 @@ export interface HttpBinding {
 }
 
 /**
+ * Opt-in human-thread completion announcements. When enabled and the
+ * configured owner MXID roots a thread, the directly-addressed agent posts one
+ * short top-level room notice when its turn finishes, linking to the thread's
+ * latest message. Defaults off; see `announce` on `ZooidConfig`.
+ */
+export interface AnnounceConfig {
+  /**
+   * Master switch. When true, a *thread-master* turn (`sessionKey ===
+   * threadRoot`) on a thread rooted by the human owner posts a top-level
+   * completion notice. Defaults false.
+   */
+  human_thread_completion?: boolean
+  /**
+   * Full MXID of the human owner, e.g. `@mario:mariocake.de`. The notice only
+   * fires for threads this user authored. When absent, the transport falls
+   * back to "any non-agent, non-trigger root".
+   */
+  owner_mxid?: string
+}
+
+/** Per-agent override of announcer defaults. */
+export interface AgentAnnounceConfig {
+  /** Overrides `announce.human_thread_completion` for this agent. */
+  human_thread_completion?: boolean
+}
+
+/**
  * Per-agent config inside a multi-agent zooid.yaml. Each agent has its
  * own workspace, hooks, an ACP block describing the shim to spawn, and
  * exactly one transport-kind block (`matrix` or `http`).
@@ -184,6 +211,8 @@ export interface AgentConfig {
   session_idle_timeout_ms: number
   /** Container config. Rejected at parse time when runtime: local. */
   container?: ContainerConfig
+  /** Per-agent override of the workforce-level `announce` defaults. */
+  announce?: AgentAnnounceConfig
   /** Exactly one of matrix / http is set per agent. */
   matrix?: MatrixBinding
   http?: HttpBinding
@@ -287,6 +316,8 @@ export interface ZooidConfig {
     pre_turn?: string
     post_turn?: string
   }
+  /** Opt-in Matrix announcements. Absent = everything off. */
+  announce?: AnnounceConfig
   /** Optional. Map of trigger name → trigger. Empty map when the block is absent. */
   triggers: Record<string, TriggerConfig>
 }

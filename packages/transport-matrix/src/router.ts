@@ -1,5 +1,5 @@
 import type { RoomBinding } from '@zooid/core'
-import { TURN_MIRROR_MARKER } from './event-encoders.js'
+import { TURN_MIRROR_MARKER, COMPLETION_NOTICE_MARKER } from './event-encoders.js'
 import { extractMentions } from './mentions.js'
 import { isExpiredTrigger } from './trigger-freshness.js'
 import { readHandoff } from './handoff.js'
@@ -23,6 +23,12 @@ export interface AgentBinding {
   workspaceDir?: string
   /** Path prefix as the agent sees it: '/workspace' for containers, = workspaceDir for local. */
   agentWorkspacePath?: string
+  /**
+   * Opt-in: when true, a *thread-master* turn on a human-rooted thread posts a
+   * top-level completion notice. Resolved at daemon start from
+   * `announce.human_thread_completion` (workforce default overridden per agent).
+   */
+  announceHumanThreadCompletion?: boolean
 }
 
 export const MEDIA_MSGTYPES = new Set(['m.image', 'm.file', 'm.video', 'm.audio'])
@@ -78,6 +84,15 @@ export interface ThreadState {
    * ([[ZOD071]]). Append-only; rebuilt from the timeline after a restart.
    */
   handoffs: Record<string, string[]>
+  /**
+   * MXID of the event that rooted the thread. Set on promotion (top-level
+   * trigger) and on rebuild after a restart. Used by the opt-in human-thread
+   * completion announcement to tell a human root from an agent / trigger /
+   * brief root.
+   */
+  rootSender?: string
+  /** True when the thread root carried a `dev.zooid.trigger` stamp. */
+  rootIsTrigger?: boolean
 }
 
 export interface TaskThreadContext {
@@ -119,6 +134,10 @@ export function route(
   if (!event.content?.msgtype) return []
   if (isMediaMsgtype(event.content.msgtype)) return []
   if (isMirrorNotice(event.content as Record<string, unknown> | undefined)) return []
+  // The opt-in top-level completion notice is a sibling agent's status signal,
+  // not content to route: a `trigger: any` agent would otherwise wake on it.
+  if ((event.content as Record<string, unknown> | undefined)?.[COMPLETION_NOTICE_MARKER] === true)
+    return []
   if (isExpiredTrigger(event, Date.now())) {
     const stamp = event.content['dev.zooid.trigger']
     const ageMs = stamp?.fired_at !== undefined ? Date.now() - stamp.fired_at : undefined

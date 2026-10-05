@@ -7,6 +7,7 @@ import { interpolateEnv, interpolateString } from './env-interpolation.js'
 import { compileMatch } from './match-expression.js'
 import type {
   AgentConfig,
+  AnnounceConfig,
   CliFlags,
   ContainerConfig,
   HttpBinding,
@@ -373,6 +374,40 @@ function parseDisableMounts(agentName: string, raw: unknown): string[] {
     out.push(v)
   }
   return out
+}
+
+/**
+ * Parse the opt-in `announce` block. Returns undefined when nothing is set so
+ * the key stays absent from the parsed config (and from downstream types).
+ * `allowOwner` is true only at the workforce level — `owner_mxid` is a single
+ * deployment-wide owner, not a per-agent field.
+ */
+function parseAnnounceConfig(
+  raw: unknown,
+  label: string,
+  allowOwner: boolean,
+): AnnounceConfig | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${label} must be a mapping`)
+  }
+  const r = raw as Record<string, unknown>
+  const out: AnnounceConfig = {}
+  if (r.human_thread_completion !== undefined) {
+    if (typeof r.human_thread_completion !== 'boolean') {
+      throw new Error(`${label}.human_thread_completion must be a boolean`)
+    }
+    out.human_thread_completion = r.human_thread_completion
+  }
+  if (allowOwner && r.owner_mxid !== undefined) {
+    if (typeof r.owner_mxid !== 'string' || !MATRIX_USER_ID_RE.test(r.owner_mxid)) {
+      throw new Error(
+        `${label}.owner_mxid must be a full MXID (got ${JSON.stringify(r.owner_mxid)})`,
+      )
+    }
+    out.owner_mxid = r.owner_mxid
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 function parseZooidContainer(raw: unknown): ZooidContainerConfig {
@@ -849,6 +884,7 @@ function parseAgents(
     }
 
     const binding = parseTransportBinding(name, entry, transports)
+    const announce = parseAnnounceConfig(entry.announce, `agents.${name}.announce`, false)
 
     const agentCfg: AgentConfig = {
       name,
@@ -864,6 +900,7 @@ function parseAgents(
       agentCfg.first_response_timeout_ms = first_response_timeout_ms
     }
     if (containerBlock) agentCfg.container = containerBlock
+    if (announce) agentCfg.announce = announce
     if (binding.matrix) agentCfg.matrix = binding.matrix
     if (binding.http) agentCfg.http = binding.http
     result[name] = agentCfg
@@ -1322,6 +1359,8 @@ export function loadZooidConfig(
     triggers,
   }
   if (workstation !== undefined) cfg.workstation = workstation
+  const announce = parseAnnounceConfig(r.announce, 'announce', true)
+  if (announce) cfg.announce = announce
   if (r.container !== undefined && r.container !== null) {
     if (runtime === 'local') {
       throw new Error(
@@ -1411,6 +1450,9 @@ export function mergeCliFlags(base: ZooidConfig, flags: CliFlags): ZooidConfig {
     hooks: { ...base.hooks },
     triggers: base.triggers,
   }
+  // Preserve the workforce-level announce block across the CLI merge — the
+  // daemon reads it to resolve the owner MXID and per-agent default.
+  if (base.announce !== undefined) merged.announce = { ...base.announce }
   if (runtime === 'docker' || runtime === 'podman') {
     const image = flags.image ?? base.container?.image
     if (image !== undefined) {

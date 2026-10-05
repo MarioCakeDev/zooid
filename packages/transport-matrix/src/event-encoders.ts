@@ -1364,7 +1364,6 @@ export interface TurnEnd {
   /** The turn's final assistant message, for the push notification's preview. */
   lastMessage?: string
 }
-
 /** Push payloads are size-capped, and a notification body is glanceable or useless. */
 const PREVIEW_MAX = 140
 
@@ -1391,4 +1390,72 @@ export function toTurnEndBody(evt: TurnEnd, threadRoot: string): Record<string, 
     produced_output: evt.producedOutput,
     'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
   }
+}
+
+/**
+ * A tappable Matrix permalink to one event. `serverName` rides as `via` so a
+ * federated client knows which server to ask. `encodeURIComponent` turns the
+ * sigil-heavy Matrix ids (`!`/`$`/`:`) into their percent-encoded form.
+ */
+export function matrixEventPermalink(
+  roomId: string,
+  eventId: string,
+  serverName: string,
+): string {
+  return (
+    `https://matrix.to/#/${encodeURIComponent(roomId)}/${encodeURIComponent(eventId)}` +
+    `?via=${encodeURIComponent(serverName)}`
+  )
+}
+
+/**
+ * Content of the opt-in top-level "human thread completion" notice: one short
+ * line plus a link to the thread's latest message. `m.notice` (not `m.text`)
+ * keeps it out of noisy push notifications — it matches the existing agent
+ * prose convention — while remaining visible and tappable in the timeline. The
+ * body carries `org.matrix.custom.html` so Element renders the link.
+ *
+ * The message is top-level rather than threaded (that is the whole point), so
+ * it carries `COMPLETION_NOTICE_MARKER` for `route()` to drop: without it a
+ * `trigger: any` agent would wake on the sibling agent's notice and loop.
+ */
+export const COMPLETION_NOTICE_MARKER = 'dev.zooid.completion_notice'
+
+export function humanThreadCompletionContent(input: {
+  agentId: string
+  summary: string
+  permalink: string
+  failed: boolean
+}): { msgtype: string; body: string; format: string; formatted_body: string; [k: string]: unknown } {
+  const marker = input.failed ? '⚠️' : '✅'
+  const outcome = input.failed ? 'failed' : 'finished'
+  const summary = input.summary.trim()
+  const body = summary
+    ? `${marker} ${input.agentId} ${outcome} — ${summary}`
+    : `${marker} ${input.agentId} ${outcome}`
+  const formattedBody =
+    `${marker} ${escapeHtml(input.agentId)} ${outcome}` +
+    (summary ? ` — ${escapeHtml(summary)}` : '') +
+    `<br><a href="${escapeHtml(input.permalink)}">Open thread ↗</a>`
+  return {
+    msgtype: 'm.notice',
+    body,
+    format: 'org.matrix.custom.html',
+    formatted_body: formattedBody,
+    [COMPLETION_NOTICE_MARKER]: true,
+  }
+}
+
+/**
+ * Collapse arbitrary turn prose into the one-line summary a completion notice
+ * carries: whitespace squeezed, length capped on a word boundary where one is
+ * available inside the cap.
+ */
+export function completionSummary(text: string | undefined, max = 140): string {
+  if (!text) return ''
+  const flat = text.replace(/\s+/g, ' ').trim()
+  if (flat.length <= max) return flat
+  const cut = flat.slice(0, max)
+  const lastSpace = cut.lastIndexOf(' ')
+  return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`
 }

@@ -155,3 +155,43 @@ that repo when the image is rebuilt:
 
 - **`inhibit_login`** — appservice registration patch.
 - **bootstrap retry** — retry daemon bootstrap on a transient failure.
+
+## 8. Human-thread completion notice (opt-in)
+
+Element X hides/lags threaded replies, so when a **directly-addressed** agent
+finishes a turn on a thread the human owner rooted, it posts exactly one
+**top-level** `m.notice` — no `threadRoot`, so no thread relation — with a
+one-line summary and a `matrix.to` permalink to the thread's latest message
+(HTML body so the link is tappable). Everything else is unchanged.
+
+Gated on **all** of: the feature is enabled for the agent; the turn is the
+thread master (`sessionKey === threadRoot`); the thread has no `TaskRecord`
+(not delegated); the root was authored by the configured owner MXID (fallback:
+any non-agent, non-trigger root); the turn genuinely finished (no outstanding
+invocation, no pending human input, no open handoff); it produced output; and it
+did not fail (a failed turn stays silent — the in-thread mirror line already
+marks it). A handoff-arc sub-session, task assignee, agent-authored root,
+trigger/sweep/brief root never announces.
+
+Config (default **off**):
+
+```yaml
+announce:
+  human_thread_completion: true
+  owner_mxid: "@mario:mariocake.de"   # optional; required in production where no --admin-user flag is passed
+# per-agent override:
+agents:
+  infra:
+    announce:
+      human_thread_completion: false
+```
+
+Modules: `packages/core/src/{types,config}.ts` (`AnnounceConfig`, parse +
+`mergeCliFlags` preservation); `packages/transport-matrix/src/event-encoders.ts`
+(`matrixEventPermalink`, `humanThreadCompletionContent`,
+`COMPLETION_NOTICE_MARKER`); `packages/transport-matrix/src/router.ts`
+(`ThreadState.rootSender` / `rootIsTrigger`, notice dropped by `route`);
+`packages/transport-matrix/src/transport.ts` (`lastThreadEventId` capture,
+`announceHumanThreadCompletion`, `isHumanThreadRoot`); CLI plumbing in
+`packages/cli/src/daemon/start-daemon.ts`.
+

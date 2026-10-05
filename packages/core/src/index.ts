@@ -28,6 +28,8 @@ export type { SessionLifecycleEvent } from '@zooid/acp-client'
 export type { AcpAgentSpec, AcpMount, AcpRuntime, AcpSpawnSpec } from './acp-types.js'
 export type {
   AgentConfig,
+  AnnounceConfig,
+  AgentAnnounceConfig,
   ContainerConfig,
   MountConfig,
   ZooidContainerConfig,
