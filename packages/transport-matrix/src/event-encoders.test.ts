@@ -19,6 +19,7 @@ import {
   toolEntryMachine,
   toolParamsText,
   toolOutputText,
+  toolSubjectParamKeys,
   turnGroupBody,
   turnGroupHtml,
   turnGroupSummary,
@@ -1395,6 +1396,97 @@ describe('family subjects', () => {
     expect(toolEntryLine(entry({ title: 'coolify_find_issues' }))).toBe('• ☁️ find_issues')
     expect(toolEntryLine(entry({ title: 'github_get_me' }))).toBe('• 🐙 get_me')
     expect(toolEntryLine(entry({ title: 'grep' }))).toBe('• 🔍 grep')
+  })
+})
+
+describe('toolSubjectParamKeys', () => {
+  const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
+    toolCallId: 'tc-1',
+    title: 'bash',
+    ...over,
+  })
+
+  it('names the keys a plain subject consumed', () => {
+    expect([...toolSubjectParamKeys(entry({ title: 'websearch', rawInput: { query: 'x' } }))]).toEqual([
+      'query',
+    ])
+    expect([...toolSubjectParamKeys(entry({ title: 'webfetch', rawInput: { url: 'u' } }))]).toEqual([
+      'url',
+    ])
+    expect([...toolSubjectParamKeys(entry({ title: 'read', rawInput: { filePath: '/a', limit: 5 } }))]).toEqual(
+      ['filePath'],
+    )
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'grep', rawInput: { pattern: 'p', path: '/a' } }))],
+    ).toEqual(['pattern'])
+    expect([...toolSubjectParamKeys(entry({ title: 'todowrite', rawInput: { todos: [1, 2] } }))]).toEqual([
+      'todos',
+    ])
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'task', rawInput: { description: 'd', prompt: 'p' } }))],
+    ).toEqual(['description'])
+    expect([...toolSubjectParamKeys(entry({ title: 'skill', rawInput: { name: 'n' } }))]).toEqual([
+      'name',
+    ])
+  })
+
+  it('names every key a composed family subject consumed', () => {
+    expect(
+      [
+        ...toolSubjectParamKeys(
+          entry({
+            title: 'github_get_file_contents',
+            rawInput: { owner: 'o', repo: 'r', path: 'p', ref: 'main' },
+          }),
+        ),
+      ],
+    ).toEqual(['owner', 'repo', 'path'])
+    expect(
+      [
+        ...toolSubjectParamKeys(
+          entry({ title: 'github_issue_read', rawInput: { owner: 'o', repo: 'r', issue_number: 7 } }),
+        ),
+      ],
+    ).toEqual(['owner', 'repo', 'issue_number'])
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'coolify_env_vars', rawInput: { uuid: 'u', key: 'K', value: 'v' } }))],
+    ).toEqual(['uuid', 'key'])
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'truenas_create_snapshot', rawInput: { dataset: 'tank/d', name: 'snap' } }))],
+    ).toEqual(['dataset'])
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'pocketid_user_create', rawInput: { id: 'i', username: 'u' } }))],
+    ).toEqual(['id'])
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'ha_HassTurnOn', rawInput: { name: 'Küche', domain: 'light' } }))],
+    ).toEqual(['name'])
+  })
+
+  it('includes the machine key when the tagline carries a @machine suffix', () => {
+    expect(
+      [
+        ...toolSubjectParamKeys(
+          entry({ title: 'ssh_run-command', rawInput: { command: 'uptime', profile: 'coolify' } }),
+        ),
+      ],
+    ).toEqual(['command', 'profile'])
+    // A local shell call names no machine key, so only the command is dropped.
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'bash', rawInput: { command: 'ls', cwd: '/w' } }))],
+    ).toEqual(['command'])
+    // The machine key is dropped for a non-shell rule too.
+    expect(
+      [
+        ...toolSubjectParamKeys(
+          entry({ title: 'truenas_list_datasets', rawInput: { host: 'nas' }, machine: 'nas' }),
+        ),
+      ],
+    ).toEqual(['host'])
+  })
+
+  it('names no keys when the tagline falls back to the tool name', () => {
+    expect([...toolSubjectParamKeys(entry({ title: 'coolify_find_issues' }))]).toEqual([])
+    expect([...toolSubjectParamKeys(entry({ title: 'bash', rawInput: { command: '   ' } }))]).toEqual([])
   })
 })
 

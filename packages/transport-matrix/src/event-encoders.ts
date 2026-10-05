@@ -512,20 +512,49 @@ function scalarString(value: unknown): string | undefined {
   return undefined
 }
 
-/** First non-empty string/number among `keys` of a raw input object. */
-function pickArg(raw: Record<string, unknown>, ...keys: readonly string[]): string | undefined {
+/**
+ * A picked value plus the raw-input key it came from. Carrying the key lets the
+ * params block drop an argument the tagline already names — see
+ * `toolSubjectParamKeys`.
+ */
+interface Picked {
+  text: string
+  keys: string[]
+}
+
+/** First non-empty string/number among `keys`, with the key that provided it. */
+function pickKey(raw: Record<string, unknown>, ...keys: readonly string[]): Picked | undefined {
   for (const key of keys) {
     const value = scalarString(raw[key])
-    if (value) return value
+    if (value) return { text: value, keys: [key] }
   }
   return undefined
 }
 
+/** The first raw-input key that carries a value, for params-dedup. */
+function firstKey(obj: unknown, keys: readonly string[]): string | undefined {
+  const raw = rawObject(obj)
+  if (!raw) return undefined
+  for (const key of keys) {
+    if (scalarString(raw[key])) return key
+  }
+  return undefined
+}
+
+/** The `raw_input` key a machine suffix came from (`profile`/`host`/`hostname`). */
+function machineKeys(rawInput: unknown): string[] {
+  const key = firstKey(rawInput, RAW_INPUT_MACHINE_KEYS)
+  return key ? [key] : []
+}
+
 /** `owner/repo`, or whichever half the input names. */
-function repoOf(raw: Record<string, unknown>): string | undefined {
-  const owner = pickArg(raw, 'owner')
-  const repo = pickArg(raw, 'repo', 'repository')
-  return owner && repo ? `${owner}/${repo}` : (repo ?? owner)
+function repoOf(raw: Record<string, unknown>): Picked | undefined {
+  const owner = pickKey(raw, 'owner')
+  const repo = pickKey(raw, 'repo', 'repository')
+  if (owner && repo) {
+    return { text: `${owner.text}/${repo.text}`, keys: [...owner.keys, ...repo.keys] }
+  }
+  return repo ?? owner
 }
 
 // ── Family subject extractors ────────────────────────────────────────────────
@@ -537,38 +566,53 @@ function repoOf(raw: Record<string, unknown>): string | undefined {
 // to name, and the tagline then falls back to the title alone.
 
 /** A GitHub call: search query, `repo:path`, `repo#number`, `repo@ref`, a PR head→base, a branch, or just `owner/repo`. */
-function githubSubject(raw: Record<string, unknown>): string | undefined {
-  const query = pickArg(raw, 'query')
+function githubSubject(raw: Record<string, unknown>): Picked | undefined {
+  const query = pickKey(raw, 'query')
   if (query) return query
   const repo = repoOf(raw)
-  const path = pickArg(raw, 'path', 'filePath', 'file_path', 'filepath')
-  if (path) return repo ? `${repo}:${path}` : path
-  const number = pickArg(raw, 'issue_number', 'pullNumber', 'pull_number', 'number')
-  if (number) return repo ? `${repo}#${number}` : number
-  const ref = pickArg(raw, 'sha', 'tag', 'ref')
-  if (ref) return repo ? `${repo}@${ref.slice(0, 12)}` : ref
-  const head = pickArg(raw, 'head')
-  if (head) {
-    const base = pickArg(raw, 'base')
-    return repo ? `${repo} ${head}→${base ?? '?'}` : head
+  const path = pickKey(raw, 'path', 'filePath', 'file_path', 'filepath')
+  if (path) {
+    return repo ? { text: `${repo.text}:${path.text}`, keys: [...repo.keys, ...path.keys] } : path
   }
-  const branch = pickArg(raw, 'branch')
-  if (repo) return branch ? `${repo}@${branch}` : repo
+  const number = pickKey(raw, 'issue_number', 'pullNumber', 'pull_number', 'number')
+  if (number) {
+    return repo
+      ? { text: `${repo.text}#${number.text}`, keys: [...repo.keys, ...number.keys] }
+      : number
+  }
+  const ref = pickKey(raw, 'sha', 'tag', 'ref')
+  if (ref) {
+    return repo
+      ? { text: `${repo.text}@${ref.text.slice(0, 12)}`, keys: [...repo.keys, ...ref.keys] }
+      : ref
+  }
+  const head = pickKey(raw, 'head')
+  if (head) {
+    const base = pickKey(raw, 'base')
+    const text = repo ? `${repo.text} ${head.text}→${base?.text ?? '?'}` : head.text
+    return { text, keys: [...(repo?.keys ?? []), ...head.keys, ...(base?.keys ?? [])] }
+  }
+  const branch = pickKey(raw, 'branch')
+  if (repo) {
+    return branch
+      ? { text: `${repo.text}@${branch.text}`, keys: [...repo.keys, ...branch.keys] }
+      : repo
+  }
   if (branch) return branch
-  const org = pickArg(raw, 'org')
-  const team = pickArg(raw, 'team_slug')
-  if (org && team) return `${org}/${team}`
+  const org = pickKey(raw, 'org')
+  const team = pickKey(raw, 'team_slug')
+  if (org && team) return { text: `${org.text}/${team.text}`, keys: [...org.keys, ...team.keys] }
   if (org) return org
-  return pickArg(raw, 'user', 'name', 'comment_id')
+  return pickKey(raw, 'user', 'name', 'comment_id')
 }
 
 /** A Coolify call: the resource UUID (with the sub-container when logs name one, or the tag names for a tag call), else id/query/name/key, else the action plus its resource/provider. */
-function coolifySubject(raw: Record<string, unknown>): string | undefined {
+function coolifySubject(raw: Record<string, unknown>): Picked | undefined {
   const tags = Array.isArray(raw.tag_names)
     ? raw.tag_names.filter((t): t is string => typeof t === 'string' && t.length > 0)
     : []
-  if (tags.length > 0) return tags.join(',')
-  const uuid = pickArg(
+  if (tags.length > 0) return { text: tags.join(','), keys: ['tag_names'] }
+  const uuid = pickKey(
     raw,
     'tag_or_uuid',
     'uuid',
@@ -582,22 +626,28 @@ function coolifySubject(raw: Record<string, unknown>): string | undefined {
     'project_uuid',
   )
   if (uuid) {
-    const container = pickArg(raw, 'container')
-    if (container) return `${uuid}/${container}`
-    const key = pickArg(raw, 'key')
-    if (key) return `${uuid}:${key}`
+    const container = pickKey(raw, 'container')
+    if (container) {
+      return { text: `${uuid.text}/${container.text}`, keys: [...uuid.keys, ...container.keys] }
+    }
+    const key = pickKey(raw, 'key')
+    if (key) return { text: `${uuid.text}:${key.text}`, keys: [...uuid.keys, ...key.keys] }
     return uuid
   }
-  const direct = pickArg(raw, 'id', 'query', 'name', 'key', 'mount_path', 'command')
+  const direct = pickKey(raw, 'id', 'query', 'name', 'key', 'mount_path', 'command')
   if (direct) return direct
-  const action = pickArg(raw, 'action')
-  const detail = pickArg(raw, 'resource') ?? pickArg(raw, 'provider')
-  return action ? [action, detail].filter(Boolean).join(' ') : undefined
+  const action = pickKey(raw, 'action')
+  const detail = pickKey(raw, 'resource') ?? pickKey(raw, 'provider')
+  if (!action) return undefined
+  return {
+    text: [action.text, detail?.text].filter(Boolean).join(' '),
+    keys: [...action.keys, ...(detail?.keys ?? [])],
+  }
 }
 
 /** A TrueNAS call: the dataset/snapshot it names, else user, share, pool or id. */
-function truenasSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(
+function truenasSubject(raw: Record<string, unknown>): Picked | undefined {
+  return pickKey(
     raw,
     'dataset',
     'snapshot',
@@ -613,8 +663,8 @@ function truenasSubject(raw: Record<string, unknown>): string | undefined {
 }
 
 /** A Pocket ID call: the entity id/name/username it acts on. */
-function pocketidSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(
+function pocketidSubject(raw: Record<string, unknown>): Picked | undefined {
+  return pickKey(
     raw,
     'id',
     'name',
@@ -633,8 +683,8 @@ function pocketidSubject(raw: Record<string, unknown>): string | undefined {
 }
 
 /** A Home Assistant call: the entity name, else area, list item, entity_id, floor, message, media query, reported health observation or todo list. */
-function haSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(
+function haSubject(raw: Record<string, unknown>): Picked | undefined {
+  return pickKey(
     raw,
     'name',
     'area',
@@ -650,40 +700,42 @@ function haSubject(raw: Record<string, unknown>): string | undefined {
 }
 
 /** A zooid/Matrix call: the room or thread it targets, else a name or the message text. */
-function zooidSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(raw, 'room', 'thread_id', 'name', 'text')
+function zooidSubject(raw: Record<string, unknown>): Picked | undefined {
+  return pickKey(raw, 'room', 'thread_id', 'name', 'text')
 }
 
 /** An ssh-mcp call with no command: the signal+pid, path, session name or profile it acts on. */
-function sshSubject(raw: Record<string, unknown>): string | undefined {
-  const pid = pickArg(raw, 'pid')
+function sshSubject(raw: Record<string, unknown>): Picked | undefined {
+  const pid = pickKey(raw, 'pid')
   if (pid) {
-    const signal = pickArg(raw, 'signal')
-    return signal ? `${signal} ${pid}` : pid
+    const signal = pickKey(raw, 'signal')
+    return signal
+      ? { text: `${signal.text} ${pid.text}`, keys: [...signal.keys, ...pid.keys] }
+      : pid
   }
-  return pickArg(raw, 'remotePath', 'localPath', 'path', 'name')
+  return pickKey(raw, 'remotePath', 'localPath', 'path', 'name')
 }
 
 /** A grep/glob pattern. */
-function patternSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(raw, 'pattern', 'query')
+function patternSubject(raw: Record<string, unknown>): Picked | undefined {
+  return pickKey(raw, 'pattern', 'query')
 }
 
 /** A todowrite list length (`3 todos`), when the input carries the list. */
-function todoSubject(raw: Record<string, unknown>): string | undefined {
+function todoSubject(raw: Record<string, unknown>): Picked | undefined {
   const todos = raw.todos
   if (!Array.isArray(todos)) return undefined
-  return `${todos.length} todo${todos.length === 1 ? '' : 's'}`
+  return { text: `${todos.length} todo${todos.length === 1 ? '' : 's'}`, keys: ['todos'] }
 }
 
 /** A task's description/prompt. */
-function descriptionSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(raw, 'description', 'prompt')
+function descriptionSubject(raw: Record<string, unknown>): Picked | undefined {
+  return pickKey(raw, 'description', 'prompt')
 }
 
 /** A skill name. */
-function skillSubject(raw: Record<string, unknown>): string | undefined {
-  return pickArg(raw, 'name', 'skill')
+function skillSubject(raw: Record<string, unknown>): Picked | undefined {
+  return pickKey(raw, 'name', 'skill')
 }
 
 /**
@@ -721,7 +773,7 @@ function toolShortName(title: string): string {
  */
 interface ToolSubjectRule {
   heads: readonly string[]
-  pick: (raw: Record<string, unknown>) => string | undefined
+  pick: (raw: Record<string, unknown>) => Picked | undefined
   verb: boolean
 }
 
@@ -741,7 +793,7 @@ const TOOL_SUBJECT_RULES: readonly ToolSubjectRule[] = [
 ]
 
 /** The family rule for a tool title, if one matches its first word. */
-function toolRuleSubject(entry: TurnToolEntry): string | undefined {
+function toolRuleSubject(entry: TurnToolEntry): Picked | undefined {
   const head = toolHead(entry.title)
   const rule = TOOL_SUBJECT_RULES.find((r) => r.heads.includes(head))
   if (!rule) return undefined
@@ -749,7 +801,73 @@ function toolRuleSubject(entry: TurnToolEntry): string | undefined {
   const detail = raw ? rule.pick(raw) : undefined
   if (!rule.verb) return detail
   const verb = toolShortName(entry.title)
-  return detail ? `${verb} ${detail}` : verb
+  if (!detail) return { text: verb, keys: [] }
+  return { text: `${verb} ${detail.text}`, keys: detail.keys }
+}
+
+/**
+ * The subject a tagline names, resolved once for both the rendered line and the
+ * params-dedup. `text` is what follows the icon; `keys` are the raw-input keys
+ * it already shows (so the params block can drop them, see
+ * `toolSubjectParamKeys`); `machine` is the `@machine` suffix; and
+ * `commandFirst` puts that suffix before a shell command
+ * (`>_ @coolify docker ps`) rather than after a subject.
+ */
+interface ResolvedSubject {
+  text: string
+  keys: string[]
+  machine?: string
+  commandFirst: boolean
+}
+
+function resolveSubject(entry: TurnToolEntry): ResolvedSubject {
+  const icon = toolIcon(entry.title)
+  const isShell = icon === SHELL_TOOL_ICON
+  const machine = entry.machine ?? (isShell ? LOCAL_MACHINE : undefined)
+  const raw = rawObject(entry.rawInput) ?? {}
+  const mKeys = machineKeys(entry.rawInput)
+  const done = (text: string, keys: string[], commandFirst = false): ResolvedSubject => ({
+    text,
+    // Only the machine key when the tagline actually shows the suffix: a call
+    // with no machine (a non-shell tool whose event names none) has no suffix.
+    keys: machine ? [...keys, ...mKeys] : keys,
+    machine,
+    commandFirst,
+  })
+
+  if (WEB_SEARCH_HEADS.has(toolHead(entry.title))) {
+    const query = pickKey(raw, ...RAW_INPUT_QUERY_KEYS)
+    return done(query ? query.text : entry.title, query?.keys ?? [])
+  }
+  if (icon === WEB_TOOL_ICON) {
+    const url = pickKey(raw, ...RAW_INPUT_URL_KEYS)
+    if (url) return done(url.text, url.keys)
+  }
+  if (isShell) {
+    const command = pickKey(raw, ...RAW_INPUT_COMMAND_KEYS)
+    // Collapse a multi-line command so the tagline stays one line; a
+    // whitespace-only command collapses to nothing and falls through to the
+    // rule/title rather than showing a blank subject.
+    const oneLine = command?.text.replace(/\s+/g, ' ').trim()
+    if (command && oneLine) return done(oneLine, command.keys, true)
+  }
+  const rule = toolRuleSubject(entry)
+  if (rule) return done(rule.text, rule.keys)
+  if (PATH_TOOL_ICONS.has(icon)) {
+    const pathKey = firstKey(entry.rawInput, RAW_INPUT_PATH_KEYS)
+    const named = entry.path ?? (pathKey ? scalarString(raw[pathKey]) : undefined)
+    if (named) return done(named, pathKey ? [pathKey] : [])
+  }
+  return done(entry.title, [])
+}
+
+/**
+ * The raw-input keys a tool's tagline already shows, so callers can drop them
+ * from the params block below it (an argument named twice is noise). Includes
+ * the machine key when the tagline carries a `@machine` suffix.
+ */
+export function toolSubjectParamKeys(entry: TurnToolEntry): ReadonlySet<string> {
+  return new Set(resolveSubject(entry).keys)
 }
 
 /**
@@ -783,37 +901,13 @@ const SUBJECT_OVERHEAD = 6
  */
 function toolSubject(entry: TurnToolEntry, lineMax = TOOL_LINE_MAX): string {
   const icon = toolIcon(entry.title)
-  const isShell = icon === SHELL_TOOL_ICON
-  const machine = entry.machine ?? (isShell ? LOCAL_MACHINE : undefined)
+  const { text, machine, commandFirst } = resolveSubject(entry)
   const suffix = machine ? ` @${machine}` : ''
-  const isWebSearch = WEB_SEARCH_HEADS.has(toolHead(entry.title))
-  // A web search names keywords, a web fetch a URL. Only the fetch reads the
-  // `url` key, so a stray `url` on a search can never win over its query.
-  const url =
-    icon === WEB_TOOL_ICON && !isWebSearch
-      ? firstString(entry.rawInput, RAW_INPUT_URL_KEYS)
-      : undefined
-  const query = isWebSearch ? firstString(entry.rawInput, RAW_INPUT_QUERY_KEYS) : undefined
-  const rule = isWebSearch ? undefined : toolRuleSubject(entry)
-  const named =
-    query ??
-    url ??
-    rule ??
-    (PATH_TOOL_ICONS.has(icon) && entry.path ? entry.path : entry.title)
   const budget = lineMax - icon.length - suffix.length - SUBJECT_OVERHEAD
-  const command = isShell ? firstString(entry.rawInput, RAW_INPUT_COMMAND_KEYS) : undefined
-  // A command can be multi-line; collapse it so the tagline stays one line. A
-  // whitespace-only command collapses to nothing — treat it as no command and
-  // fall back to the title rather than drop the subject.
-  const oneLine = command?.replace(/\s+/g, ' ').trim()
-  if (oneLine) {
-    const head =
-      oneLine.length > budget ? oneLine.slice(0, Math.max(1, budget - 1)) + '…' : oneLine
-    return `${icon}${suffix} ${head}`
-  }
-  const head =
-    named.length > budget ? named.slice(0, Math.max(1, budget - 1)) + '…' : named
-  return `${icon} ${head}${suffix}`
+  const head = text.length > budget ? text.slice(0, Math.max(1, budget - 1)) + '…' : text
+  // A shell command puts the machine before it (`>_ @coolify docker ps`); every
+  // other subject puts the machine after (`>_ bash @local`).
+  return commandFirst ? `${icon}${suffix} ${head}` : `${icon} ${head}${suffix}`
 }
 
 /** Cap a single collapsed tool line so a long title stays glanceable. */

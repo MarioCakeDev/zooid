@@ -3748,7 +3748,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     const id = await createdId(
       client,
-      '🔧 architect: 1 tool — >_ @local pnpm test\n• >_ @local pnpm test\ncommand=pnpm test',
+      '🔧 architect: 1 tool — >_ @local pnpm test\n• >_ @local pnpm test',
     )
     await updateTool(agents, sessionId, {
       toolCallId: 'tc-1',
@@ -3757,25 +3757,26 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     await settleTurn()
     // Same block, same entry: the update refreshed status and output in place.
+    // The command is already on the tagline, so it is dropped from the params.
     expect(lines(client)).toEqual([
-      '🔧 architect: 1 tool — >_ @local pnpm test\n• >_ @local pnpm test\ncommand=pnpm test',
+      '🔧 architect: 1 tool — >_ @local pnpm test\n• >_ @local pnpm test',
     ])
     expect(edits(client)).toHaveLength(1)
     expect(appliedEditBody(client, id)).toBe(
-      '🔧 architect: 1 tool — >_ @local pnpm test\n✓ >_ @local pnpm test\ncommand=pnpm test\n────────────────\nok, 12 passed',
+      '🔧 architect: 1 tool — >_ @local pnpm test\n✓ >_ @local pnpm test\nok, 12 passed',
     )
     const newContent = contentOf(edits(client)[0]![0])['m.new_content'] as Record<string, unknown>
     expect(newContent['dev.zooid.mirror']).toBe(true)
     expect(newContent['m.relates_to']).toEqual({ rel_type: 'm.thread', event_id: '$g13' })
     // The HTML edit carries the collapsible group with the tool's own nested
-    // <details>; the tool line is the inner <summary> and params/output are two
-    // separate <pre><code> blocks.
+    // <details>; the tool line is the inner <summary> and the output is a
+    // <pre><code> block (the command is on the tagline, so no params block).
     expect(newContent).toMatchObject({
       format: 'org.matrix.custom.html',
       formatted_body:
         '<details><summary>🔧 architect: 1 tool — &gt;_ @local pnpm test</summary>' +
         '<details><summary>✓ &gt;_ @local pnpm test</summary>' +
-        '<pre><code>command=pnpm test</code></pre><pre><code>ok, 12 passed</code></pre></details>' +
+        '<pre><code>ok, 12 passed</code></pre></details>' +
         '</details>',
     })
     finishPrompt()
@@ -3792,13 +3793,12 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       rawInput: { filePath: "src/x.ts", oldString: "a\nb\n", newString: "a\nc\n" },
     })
     await settleTurn()
-    // One line: the diff, plus the params the diff does not cover (the file
-    // path) — the old/new text itself appears only in the diff.
+    // One line: the diff, and nothing else — the path is on the tagline and the
+    // old/new text appears only in the diff, so the params block is empty.
     expect(lines(client)).toEqual([
       [
         "🔧 architect: 1 tool — ✏️ src/x.ts",
         "⏳ ✏️ src/x.ts",
-        "filePath=src/x.ts",
         "--- a/src/x.ts",
         "+++ b/src/x.ts",
         "@@ -1,2 +1,2 @@",
@@ -3848,10 +3848,10 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     expect(body).toContain("--- a/src/y.ts")
     expect(body).toContain("-one")
     expect(body).toContain("+two")
-    // The old/new keys are filtered out of the params line, so they are
-    // reported once, in the diff's form.
+    // The old/new keys are filtered out of the params line, and the path is
+    // already on the tagline, so neither is repeated.
     expect(body).not.toContain("oldString=")
-    expect(body).toContain("filePath=src/y.ts")
+    expect(body).not.toContain("filePath=src/y.ts")
     finishPrompt()
     await settleTurn()
   })
@@ -3866,7 +3866,9 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     await settleTurn()
     expect(lines(client)[0]).not.toContain("language-diff")
-    expect(lines(client)[0]).toContain("command=git status")
+    // The command is on the tagline, not repeated in the params block.
+    expect(lines(client)[0]).toContain(">_ @local git status")
+    expect(lines(client)[0]).not.toContain("command=git status")
     finishPrompt()
     await settleTurn()
   })
@@ -3882,7 +3884,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     const id = await createdId(
       client,
-      '🔧 architect: 1 tool — 📖 /workspace/AGENTS.md\n✓ 📖 /workspace/AGENTS.md\nfilePath=/workspace/AGENTS.md',
+      '🔧 architect: 1 tool — 📖 /workspace/AGENTS.md\n✓ 📖 /workspace/AGENTS.md',
     )
     // An ssh-mcp call carries its profile; a local bash call carries none and
     // is labelled `local` — the ACP event never invents a hostname.
@@ -3894,15 +3896,14 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     })
     await emitTool(agents, sessionId, { toolCallId: 'tc-3', title: 'bash', status: 'completed' })
     await settleTurn()
+    // The path/command/profile are all on their taglines, so no params lines.
     expect(appliedEditBody(client, id)).toBe(
       [
         '🔧 architect: 3 tools — >_ bash @local',
         '✓ 📖 /workspace/AGENTS.md',
-        'filePath=/workspace/AGENTS.md',
         '',
         '────────────────',
         '✓ >_ @coolify uptime',
-        'profile=coolify, command=uptime',
         '',
         '────────────────',
         '✓ >_ bash @local',
@@ -3912,9 +3913,10 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     expect(String(newContent.formatted_body)).toContain(
       '<summary>🔧 architect: 3 tools — &gt;_ bash @local</summary>',
     )
-    expect(String(newContent.formatted_body)).toContain(
-      '<summary>✓ &gt;_ @coolify uptime</summary>',
-    )
+    // Nothing left to collapse: the path/profile/command are on the taglines,
+    // so the tool lines render bare rather than as dead <details> triangles.
+    expect(String(newContent.formatted_body)).toContain('✓ &gt;_ @coolify uptime')
+    expect(String(newContent.formatted_body)).not.toContain('profile=coolify')
     finishPrompt()
     await settleTurn()
   })
