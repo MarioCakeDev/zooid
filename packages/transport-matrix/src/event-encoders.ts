@@ -531,19 +531,31 @@ function pickKey(raw: Record<string, unknown>, ...keys: readonly string[]): Pick
   return undefined
 }
 
-/** The first raw-input key that carries a value, for params-dedup. */
-function firstKey(obj: unknown, keys: readonly string[]): string | undefined {
+/** First non-empty *string* among `keys`, with its key (the ACP string-field semantics). */
+function pickStringKey(
+  raw: Record<string, unknown>,
+  ...keys: readonly string[]
+): Picked | undefined {
+  for (const key of keys) {
+    const value = nonEmptyString(raw[key])
+    if (value) return { text: value, keys: [key] }
+  }
+  return undefined
+}
+
+/** The first raw-input key whose value is a non-empty string, for params-dedup. */
+function firstStringKey(obj: unknown, keys: readonly string[]): string | undefined {
   const raw = rawObject(obj)
   if (!raw) return undefined
   for (const key of keys) {
-    if (scalarString(raw[key])) return key
+    if (nonEmptyString(raw[key])) return key
   }
   return undefined
 }
 
 /** The `raw_input` key a machine suffix came from (`profile`/`host`/`hostname`). */
 function machineKeys(rawInput: unknown): string[] {
-  const key = firstKey(rawInput, RAW_INPUT_MACHINE_KEYS)
+  const key = firstStringKey(rawInput, RAW_INPUT_MACHINE_KEYS)
   return key ? [key] : []
 }
 
@@ -588,9 +600,12 @@ function githubSubject(raw: Record<string, unknown>): Picked | undefined {
   }
   const head = pickKey(raw, 'head')
   if (head) {
+    if (!repo) return head
     const base = pickKey(raw, 'base')
-    const text = repo ? `${repo.text} ${head.text}→${base?.text ?? '?'}` : head.text
-    return { text, keys: [...(repo?.keys ?? []), ...head.keys, ...(base?.keys ?? [])] }
+    return {
+      text: `${repo.text} ${head.text}→${base?.text ?? '?'}`,
+      keys: [...repo.keys, ...head.keys, ...(base?.keys ?? [])],
+    }
   }
   const branch = pickKey(raw, 'branch')
   if (repo) {
@@ -828,23 +843,25 @@ function resolveSubject(entry: TurnToolEntry): ResolvedSubject {
   const mKeys = machineKeys(entry.rawInput)
   const done = (text: string, keys: string[], commandFirst = false): ResolvedSubject => ({
     text,
-    // Only the machine key when the tagline actually shows the suffix: a call
-    // with no machine (a non-shell tool whose event names none) has no suffix.
-    keys: machine ? [...keys, ...mKeys] : keys,
+    // The machine key is derived from `raw_input`, not `entry.machine`: params
+    // are computed before `entry.machine` is assigned, but whenever the input
+    // names a machine the transport fills it in and the tagline shows it, so
+    // the key must always be dropped.
+    keys: [...keys, ...mKeys],
     machine,
     commandFirst,
   })
 
   if (WEB_SEARCH_HEADS.has(toolHead(entry.title))) {
-    const query = pickKey(raw, ...RAW_INPUT_QUERY_KEYS)
+    const query = pickStringKey(raw, ...RAW_INPUT_QUERY_KEYS)
     return done(query ? query.text : entry.title, query?.keys ?? [])
   }
   if (icon === WEB_TOOL_ICON) {
-    const url = pickKey(raw, ...RAW_INPUT_URL_KEYS)
+    const url = pickStringKey(raw, ...RAW_INPUT_URL_KEYS)
     if (url) return done(url.text, url.keys)
   }
   if (isShell) {
-    const command = pickKey(raw, ...RAW_INPUT_COMMAND_KEYS)
+    const command = pickStringKey(raw, ...RAW_INPUT_COMMAND_KEYS)
     // Collapse a multi-line command so the tagline stays one line; a
     // whitespace-only command collapses to nothing and falls through to the
     // rule/title rather than showing a blank subject.
@@ -854,8 +871,8 @@ function resolveSubject(entry: TurnToolEntry): ResolvedSubject {
   const rule = toolRuleSubject(entry)
   if (rule) return done(rule.text, rule.keys)
   if (PATH_TOOL_ICONS.has(icon)) {
-    const pathKey = firstKey(entry.rawInput, RAW_INPUT_PATH_KEYS)
-    const named = entry.path ?? (pathKey ? scalarString(raw[pathKey]) : undefined)
+    const pathKey = firstStringKey(entry.rawInput, RAW_INPUT_PATH_KEYS)
+    const named = entry.path ?? (pathKey ? nonEmptyString(raw[pathKey]) : undefined)
     if (named) return done(named, pathKey ? [pathKey] : [])
   }
   return done(entry.title, [])

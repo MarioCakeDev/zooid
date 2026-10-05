@@ -3921,6 +3921,26 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
     await settleTurn()
   })
 
+  it('drops a non-shell machine key even when params are built before entry.machine', async () => {
+    const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g16')
+    // A lone tool_call (no later update): the params are derived while
+    // entry.machine is still unset, but the tagline will show @nas, so host=
+    // must not be repeated.
+    await emitTool(agents, sessionId, {
+      toolCallId: 'tc-1',
+      title: 'truenas_list_datasets',
+      status: 'completed',
+      rawInput: { host: 'nas' },
+    })
+    await settleTurn()
+    expect(lines(client)[0]).toBe(
+      '🔧 architect: 1 tool — 💾 list_datasets @nas\n✓ 💾 list_datasets @nas',
+    )
+    expect(lines(client)[0]).not.toContain('host=nas')
+    finishPrompt()
+    await settleTurn()
+  })
+
   it('ignores an orphan tool_call_update (no raw-id line)', async () => {
     const { agents, client, finishPrompt, sessionId } = await startTurnAndGetSession('$g14')
     // An update for an id we never saw as a `tool_call` must not materialise a

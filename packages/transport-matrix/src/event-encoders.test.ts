@@ -1474,14 +1474,31 @@ describe('toolSubjectParamKeys', () => {
     expect(
       [...toolSubjectParamKeys(entry({ title: 'bash', rawInput: { command: 'ls', cwd: '/w' } }))],
     ).toEqual(['command'])
-    // The machine key is dropped for a non-shell rule too.
+    // The machine key is dropped for a non-shell rule too (derived from
+    // raw_input, independent of entry.machine — params are built before it).
+    expect(
+      [...toolSubjectParamKeys(entry({ title: 'truenas_list_datasets', rawInput: { host: 'nas' } }))],
+    ).toEqual(['host'])
+  })
+
+  it('does not drop a base that the tagline never shows', () => {
+    // With no owner/repo the tagline is just the head, so `base` must stay in
+    // the params block.
     expect(
       [
         ...toolSubjectParamKeys(
-          entry({ title: 'truenas_list_datasets', rawInput: { host: 'nas' }, machine: 'nas' }),
+          entry({ title: 'github_create_pull_request', rawInput: { head: 'feat-x', base: 'main' } }),
         ),
       ],
-    ).toEqual(['host'])
+    ).toEqual(['head'])
+  })
+
+  it('does not drop a numeric field a string-only tagline ignored', () => {
+    // A non-string command is not rendered on the tagline (string fields only),
+    // so it must remain in the params block.
+    expect([...toolSubjectParamKeys(entry({ title: 'bash', rawInput: { command: 42 } }))]).toEqual(
+      [],
+    )
   })
 
   it('names no keys when the tagline falls back to the tool name', () => {
