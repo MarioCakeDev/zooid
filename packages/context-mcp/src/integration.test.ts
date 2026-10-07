@@ -68,18 +68,21 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
       await client.close()
     })
 
-    // No taskActions registered on this registry, so the daemon-side
-    // describeRole query fails, bin.ts's role stays undefined, and neither
-    // task tool registers ([[ZOD084]] role-conditional registration).
+    // bin.ts registers the task tools unconditionally — the daemon is the
+    // authorization boundary and refuses disallowed calls per request — so
+    // they are listed even though this registry registers no task actions.
     const list = await client.listTools()
     expect(list.tools.map((t) => t.name).sort()).toEqual([
+      'zooid_complete_task',
       'zooid_get_history',
       'zooid_get_members',
       'zooid_get_recent_threads',
       'zooid_get_room_info',
       'zooid_get_rooms',
       'zooid_get_thread_history',
+      'zooid_handoff',
       'zooid_send_message',
+      'zooid_start_task_threads',
     ])
 
     const result = await client.callTool({
@@ -198,7 +201,7 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
     return client
   }
 
-  it('connects and serves read tools while the daemon role query never returns', async () => {
+  it('connects and serves read tools even when the daemon blocks on describeRole', async () => {
     const registry = new SpawnRegistry()
     const spawnId = registry.register({
       agentName: 'architect',
@@ -207,8 +210,9 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
         getRoomInfo: async () => ({ id: '!room:hs', name: 'room', transport: 'matrix' }),
       }),
     })
-    // A cold/blocked daemon: the role query never settles. The MCP transport
-    // must still come up, or the agent's first tool call hits `Not connected`.
+    // A cold/blocked daemon: describeRole never settles. The task tools no
+    // longer depend on that query (the daemon authorizes per call), so they are
+    // listed immediately, and the transport must still serve the read tools.
     registry.setTaskActions({
       startTasks: async () => ({ results: [], notify: 'caller', delivery: 'd' }),
       completeTask: async () => ({ status: 'recorded' }),
@@ -220,10 +224,10 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
     const info = await client.callTool({ name: 'zooid_get_room_info', arguments: {} })
     expect(JSON.parse((info.content as Array<{ text: string }>)[0].text).id).toBe('!room:hs')
     const names = (await client.listTools()).tools.map((t) => t.name)
-    expect(names).not.toContain('zooid_start_task_threads')
+    expect(names).toContain('zooid_start_task_threads')
   })
 
-  it('adds task tools once a slow role query resolves', async () => {
+  it('routes a task tool call to the daemon-side action', async () => {
     const registry = new SpawnRegistry()
     const spawnId = registry.register({
       agentName: 'architect',
@@ -239,20 +243,14 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
         return { status: 'refused', reason: 'stub' }
       },
       describeRole: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 150))
-        // can_handoff mirrors a real daemon role: production registers
-        // zooid_handoff only through registerTaskTools after this resolves.
-        return { is_task_assignee: false, can_start_task_threads: true, can_handoff: true }
+        // Never consulted by bin.ts now; present because TaskActions requires
+        // it. Kept to prove the task tools do not depend on its result.
+        return { is_task_assignee: false, can_start_task_threads: false, can_handoff: false }
       },
     })
     const client = await startClientAgainst(registry, spawnId)
 
-    let names: string[] = []
-    for (let i = 0; i < 40; i++) {
-      names = (await client.listTools()).tools.map((t) => t.name)
-      if (names.includes('zooid_start_task_threads') && names.includes('zooid_handoff')) break
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
+    const names = (await client.listTools()).tools.map((t) => t.name)
     expect(names).toContain('zooid_start_task_threads')
     expect(names).toContain('zooid_handoff')
 
@@ -263,6 +261,47 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
       arguments: { agent: 'product', prompt: 'write the spec' },
     })
     expect(handoffArgs).toEqual({ agent: 'product', prompt: 'write the spec' })
+  })
+
+  it('two MCP server subprocesses sharing one socket route to their own bindings', async () => {
+    const providerA = fakeProvider({
+      getRoomInfo: async () => ({ id: '!a:hs', name: 'room-A', transport: 'matrix' }),
+    })
+    const providerB = fakeProvider({
+      getRoomInfo: async () => ({ id: '!b:hs', name: 'room-B', transport: 'matrix' }),
+    })
+    const registry = new SpawnRegistry()
+    const spawnA = registry.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!a:hs', threadId: '!a:hs' },
+      provider: providerA,
+    })
+    const spawnB = registry.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!b:hs', threadId: '!b:hs' },
+      provider: providerB,
+    })
+    const sockPath = join(tmpdir(), `zooid-it-${randomUUID()}.sock`)
+    const server = await startDaemonSocketServer({ sockPath, registry, agentName: 'architect' })
+    cleanup.push(() => server.close())
+    async function c(spawnId: string) {
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [BIN, '--spawn-id', spawnId],
+        env: { ...process.env, ZOOID_DAEMON_SOCK: sockPath } as Record<string, string>,
+      })
+      const client = new Client({ name: 'it', version: '0.0.1' }, { capabilities: {} })
+      await client.connect(transport)
+      cleanup.push(async () => {
+        await client.close()
+      })
+      return client
+    }
+    const [a, b] = await Promise.all([c(spawnA), c(spawnB)])
+    const ia = await a.callTool({ name: 'zooid_get_room_info', arguments: {} })
+    const ib = await b.callTool({ name: 'zooid_get_room_info', arguments: {} })
+    expect(JSON.parse((ia.content as Array<{ text: string }>)[0].text).id).toBe('!a:hs')
+    expect(JSON.parse((ib.content as Array<{ text: string }>)[0].text).id).toBe('!b:hs')
   })
 })
 
