@@ -110,6 +110,16 @@ export class TaskRegistry {
     const id = this.byRoot.get(threadRoot)
     return id ? this.tasks.get(id) : undefined
   }
+  /**
+   * The record for a thread only while its task is still open. A closed task no
+   * longer encloses its thread — the thread is ordinary conversation again, so
+   * it must not cap `zooid_start_task_threads` nor be read as a delegated task.
+   * Mirrors `openTaskFor` and the `phase === 'open'` guard at the turn boundary.
+   */
+  enclosingTaskForRoot(threadRoot: string) {
+    const r = this.taskForRoot(threadRoot)
+    return r?.phase === 'open' ? r : undefined
+  }
   openTaskFor(agent: string, root: string) {
     const r = this.taskForRoot(root)
     return r?.phase === 'open' && r.assignee === agent ? r : undefined

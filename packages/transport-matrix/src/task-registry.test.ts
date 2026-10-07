@@ -41,6 +41,15 @@ describe('TaskRegistry', () => {
     r.close(task.taskId)
     expect(r.taskForRoot('$root')?.phase).toBe('closed')
   })
+  it('stops treating a thread as enclosing once its task is closed', () => {
+    const r = new TaskRegistry({ newId: () => 'attempt' })
+    const task = reserve(r)!
+    r.activate(task.taskId, '$root')
+    expect(r.enclosingTaskForRoot('$root')?.taskId).toBe(task.taskId)
+    r.close(task.taskId)
+    expect(r.taskForRoot('$root')?.phase).toBe('closed')
+    expect(r.enclosingTaskForRoot('$root')).toBeUndefined()
+  })
   it('bumps session generations after a reset', () => {
     const r = new TaskRegistry()
     expect(r.generationOf('a', '$s')).toBe(0)
