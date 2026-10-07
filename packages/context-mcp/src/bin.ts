@@ -94,12 +94,9 @@ const remoteTasks: TaskActions = {
     }) as Promise<HandoffOutput>,
 }
 
-// Connect the MCP transport BEFORE the daemon role query. The old order
-// awaited a daemon round-trip first, so on a cold session (daemon recreating,
-// socket slow) the agent's first tool call reached the SDK before the transport
-// was up and failed with `Not connected` — only a manual retry worked. The
-// query is additive: the read tools are live immediately, and an allowed role
-// adds the task tools afterwards.
+// Connect the MCP transport before anything else so the read tools are live
+// immediately; a cold or slow daemon socket must not fail the agent's first
+// tool call with `Not connected` ([[ZOD084]]).
 const server = buildContextMcpServer({
   resolve: async () => remoteProvider,
   resolveTasks: async () => remoteTasks,
@@ -107,15 +104,15 @@ const server = buildContextMcpServer({
 await server.connect(new StdioServerTransport())
 process.stderr.write(`zooid-context-mcp: ready (spawnId=${spawnId})\n`)
 
-// A failed role query yields undefined, which registers neither task tool —
-// the safe direction for MCP: the tools are additive, and a spawn that
-// cannot reach the daemon cannot usefully call them anyway ([[ZOD084]]).
-// Deliberately not awaited: the stdio transport keeps the process alive, and a
-// role query that never settles must not surface as an unsettled top-level
-// await (nor delay the read tools that are already live).
-void callDaemon(sockPath, { spawnId, method: 'describeRole', params: {} })
-  .then((r) => r as TaskRole)
-  .catch(() => undefined)
-  .then((role) => {
-    if (role) registerTaskTools(server, { resolveTasks: async () => remoteTasks, role })
-  })
+// Advertise the task tools unconditionally. The daemon is the authorization
+// boundary and refuses every disallowed task call per request (`depth_limit`,
+// `no_open_task`, `unknown_caller`, `self`, `already_open`), so the MCP does
+// not pre-screen. Gating registration on a one-shot `describeRole` snapshot
+// taken at spawn meant a single raced or failed role query hid
+// `zooid_start_task_threads` for the whole MCP lifetime — the snapshot was
+// never refreshed, so the session stayed without the tool even after the
+// daemon would have allowed it ([[ZOD084]]).
+registerTaskTools(server, {
+  resolveTasks: async () => remoteTasks,
+  role: { is_task_assignee: true, can_start_task_threads: true, can_handoff: true },
+})
