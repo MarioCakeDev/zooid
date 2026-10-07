@@ -47,4 +47,15 @@ describe('TaskRegistry', () => {
     r.bumpGeneration('a', '$s')
     expect(r.generationOf('a', '$s')).toBe(1)
   })
+  it('captures the caller generation in the task thread at activation', () => {
+    const r = new TaskRegistry({ newId: () => 'attempt' })
+    const task = reserve(r)!
+    r.activate(task.taskId, '$task-thread')
+    expect(task.parent.taskThreadGeneration).toBe(0)
+    // A later /clear of the task thread moves the live generation; the captured
+    // value stays put so the completion wake can detect the reset.
+    r.bumpGeneration('supervisor', '$task-thread')
+    expect(r.generationOf('supervisor', '$task-thread')).toBe(1)
+    expect(task.parent.taskThreadGeneration).toBe(0)
+  })
 })

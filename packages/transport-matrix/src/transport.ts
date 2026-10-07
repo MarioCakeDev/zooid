@@ -3157,8 +3157,6 @@ agents.onEvent = async (name, event: AgentEvent) => {
     // deriving the caller's session key from the task thread's state ([[ZOD071]])
     // rather than reusing task.parent.sessionKey, which is bound to the caller's
     // unrelated thread — the leak this path used to have. Mirrors returnInvocation.
-    // The generation guard below still keys off the spawning session captured at
-    // reserve time: it only decides *whether* to wake, never which thread to use.
     await client.sendMessage({
       roomId: task.roomId,
       asUserId: ctx.agent.userId,
@@ -3169,10 +3167,13 @@ agents.onEvent = async (name, event: AgentEvent) => {
         [THREAD_RESULT_FIELD]: completion,
       },
     })
+    // The guard tracks the task thread, not the spawning one: a `/clear` there
+    // must not re-open the thread with a wake, while a reset of the spawning
+    // thread must not swallow a result that belongs to the task thread.
     if (
       !parent ||
-      taskRegistry.generationOf(task.parent.agent, task.parent.sessionKey) !==
-        task.parent.generation
+      taskRegistry.generationOf(task.parent.agent, threadId) !==
+        (task.parent.taskThreadGeneration ?? 0)
     )
       return
     void enqueueTurn(parent, {
@@ -3450,7 +3451,8 @@ agents.onEvent = async (name, event: AgentEvent) => {
         const parent = bindingFor(task.parent.agent)
         if (
           parent &&
-          taskRegistry.generationOf(task.parent.agent, task.parent.sessionKey) === task.parent.generation
+          taskRegistry.generationOf(task.parent.agent, task.threadRoot!) ===
+            (task.parent.taskThreadGeneration ?? 0)
         ) {
           // [[ZOD072]] Same rule as finishTask: an interrupted task's result
           // stays in its own thread, and the caller is woken there with the
