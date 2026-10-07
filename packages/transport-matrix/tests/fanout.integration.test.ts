@@ -120,7 +120,7 @@ function setup() {
 }
 
 describe('thread fan-out', () => {
-  it('dispatches only the assignee and returns its terminal result to the exact caller session', async () => {
+  it('dispatches only the assignee and returns the completion to the task thread, not the caller thread', async () => {
     const { transport, sent, prompts, deliver } = setup()
     const started = await transport.taskActions.startTasks(
       {
@@ -146,7 +146,20 @@ describe('thread fan-out', () => {
     expect(
       sent.some((e) => (e.input.content as Record<string, unknown>)['dev.zooid.thread_result']),
     ).toBe(true)
-    expect(prompts.filter((p) => p.name === 'supervisor')).toMatchObject([{ threadId: '$parent' }])
+    // Regression: the completion notice and the caller wake belong in the
+    // task's own thread (root.event_id), never the caller's spawning thread
+    // (`$parent`) — the leak this path used to have ([[ZOD072]]).
+    const notice = sent.find(
+      (e) =>
+        e.type === 'm.room.message' &&
+        (e.input.content as Record<string, unknown>)?.msgtype === 'm.notice' &&
+        (e.input.content as Record<string, unknown>)?.['dev.zooid.thread_result'],
+    )
+    expect(notice?.input.threadRoot).toBe(root.event_id)
+    expect(sent.some((e) => e.input.threadRoot === '$parent')).toBe(false)
+    expect(prompts.filter((p) => p.name === 'supervisor')).toMatchObject([
+      { threadId: root.event_id },
+    ])
   })
 
   it('prefixes the assignee opening prompt with the task envelope', async () => {

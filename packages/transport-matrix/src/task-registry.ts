@@ -12,6 +12,13 @@ export interface TaskRecord {
     threadRoot: string
     sessionKey: string
     generation: number
+    /**
+     * The caller's session generation in the task's own thread, captured at
+     * activation ([[ZOD072]]). Guards the completion wake against a `/clear` of
+     * the task thread. Absent on records persisted before this field existed,
+     * where it is treated as 0.
+     */
+    taskThreadGeneration?: number
   }
   phase: TaskPhase
   threadRoot?: string
@@ -79,6 +86,7 @@ export class TaskRegistry {
     if (!r) return
     r.phase = 'open'
     r.threadRoot = threadRoot
+    r.parent.taskThreadGeneration = this.generationOf(r.parent.agent, threadRoot)
     this.byRoot.set(threadRoot, taskId)
     this.save()
   }

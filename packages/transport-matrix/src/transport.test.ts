@@ -3214,6 +3214,173 @@ describe('taskActions.describeRole', () => {
   })
 })
 
+describe('delegated task completion routing', () => {
+  const room = '!r:example.com'
+  const taskRouteBindings = [
+    {
+      name: 'supervisor',
+      userId: '@supervisor:example.com',
+      rooms: [{ alias: room }],
+      trigger: 'mention' as const,
+    },
+    {
+      name: 'worker',
+      userId: '@worker:example.com',
+      rooms: [{ alias: room }],
+      trigger: 'mention' as const,
+    },
+  ]
+
+  async function resetThread(
+    t: ReturnType<typeof makeTransport>,
+    root: string,
+    eventId: string,
+  ) {
+    await postTxn(t.transport.app, {
+      events: [
+        {
+          type: 'dev.zooid.session_reset',
+          event_id: eventId,
+          room_id: room,
+          sender: '@alice:example.com',
+          content: { 'm.relates_to': { rel_type: 'm.thread', event_id: root } },
+        },
+      ],
+    })
+  }
+
+  async function runTaskToCompletion(opts: { resetSpawning?: boolean } = {}) {
+    const t = makeTransport(undefined, taskRouteBindings)
+    t.agents.prompt.mockImplementation(async (name: string, p: { threadId: string }) => {
+      if (name === 'worker')
+        t.agents.onEvent('worker', {
+          type: 'agent_message_chunk',
+          sessionId: 'sess-' + p.threadId,
+          content: { type: 'text', text: 'audit is clean' },
+        })
+      return { stopReason: 'end_turn' as const }
+    })
+    const started = await t.transport.taskActions.startTasks(
+      {
+        agentName: 'supervisor',
+        channelId: room,
+        threadRoot: '$spawn-root',
+        sessionKey: '$spawn-root',
+      },
+      { tasks: [{ agent: 'worker', prompt: 'audit' }] },
+    )
+    const taskRoot = (started.results[0] as { thread_id: string }).thread_id
+    if (opts.resetSpawning) await resetThread(t, '$spawn-root', '$reset-spawn')
+
+    await deliverAssignment(t, taskRoot)
+    await settleTurn()
+    return { ...t, taskRoot }
+  }
+
+  async function deliverAssignment(t: ReturnType<typeof makeTransport>, taskRoot: string) {
+    // Deliver the assignment the daemon posted, so worker has a live session.
+    const assignment = t.client.sendMessage.mock.calls.find(
+      ([a]) => (a as { content?: Record<string, unknown> }).content?.['dev.zooid.thread_start'],
+    )![0] as { asUserId: string; content: Record<string, unknown> }
+    await postTxn(t.transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: taskRoot,
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: assignment.asUserId,
+          content: assignment.content,
+        },
+      ],
+    })
+  }
+
+  const noticeIn = (client: ReturnType<typeof fakeClient>, root: string) =>
+    client.sendMessage.mock.calls.some(
+      ([a]) => (a as { threadRoot?: string }).threadRoot === root,
+    )
+
+  it('delivers the completion into the task thread, not the spawning thread', async () => {
+    const { agents, client, taskRoot } = await runTaskToCompletion()
+
+    // The terminal result is published under the task root.
+    expect(client.sendCustomEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'dev.zooid.thread_result',
+        content: expect.objectContaining({ thread_id: taskRoot }),
+      }),
+    )
+    // The completion notice and the caller wake are in the task thread…
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadRoot: taskRoot,
+        content: expect.objectContaining({
+          msgtype: 'm.notice',
+          'dev.zooid.thread_result': expect.anything(),
+        }),
+      }),
+    )
+    expect(agents.prompt).toHaveBeenCalledWith(
+      'supervisor',
+      expect.objectContaining({ threadId: taskRoot }),
+    )
+    // …and nothing — notice or wake — is routed to the spawning thread.
+    expect(noticeIn(client, '$spawn-root')).toBe(false)
+  })
+
+  it('still wakes the caller when the spawning thread was cleared', async () => {
+    const { agents, client, taskRoot } = await runTaskToCompletion({ resetSpawning: true })
+    expect(noticeIn(client, taskRoot)).toBe(true)
+    expect(agents.prompt).toHaveBeenCalledWith(
+      'supervisor',
+      expect.objectContaining({ threadId: taskRoot }),
+    )
+  })
+
+  it('does not wake the caller when the task thread was cleared', async () => {
+    // A clear of the task thread while the assignee is still working must not
+    // re-open it with a completion wake. Hold the worker's turn open, clear,
+    // then let it finish.
+    const t = makeTransport(undefined, taskRouteBindings)
+    let releaseWorker!: () => void
+    const workerTurn = new Promise<void>((r) => (releaseWorker = r))
+    t.agents.prompt.mockImplementation(async (name: string, p: { threadId: string }) => {
+      if (name === 'worker') {
+        await workerTurn
+        t.agents.onEvent('worker', {
+          type: 'agent_message_chunk',
+          sessionId: 'sess-' + p.threadId,
+          content: { type: 'text', text: 'audit is clean' },
+        })
+      }
+      return { stopReason: 'end_turn' as const }
+    })
+    const started = await t.transport.taskActions.startTasks(
+      {
+        agentName: 'supervisor',
+        channelId: room,
+        threadRoot: '$spawn-root',
+        sessionKey: '$spawn-root',
+      },
+      { tasks: [{ agent: 'worker', prompt: 'audit' }] },
+    )
+    const taskRoot = (started.results[0] as { thread_id: string }).thread_id
+    await deliverAssignment(t, taskRoot)
+    await settleTurn()
+    await resetThread(t, taskRoot, '$reset-task')
+    releaseWorker()
+    await settleTurn()
+
+    // The result still lands in the task thread; only the wake is suppressed.
+    expect(noticeIn(t.client, taskRoot)).toBe(true)
+    expect(t.agents.prompt).not.toHaveBeenCalledWith(
+      'supervisor',
+      expect.objectContaining({ threadId: taskRoot }),
+    )
+  })
+})
+
 describe('agents on other workstations ([[ZOD039]] directional continuation)', () => {
   // Two daemons share a thread: architect is ours, @cloud.product lives on
   // another workstation. Each daemon used to read the other's agent as a
