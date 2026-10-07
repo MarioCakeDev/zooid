@@ -3202,7 +3202,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
       const notify = input.notify ?? 'caller'
       const results: StartTaskResult[] = new Array(input.tasks.length)
       const callerBinding = bindingFor(caller.agentName)
-      const enclosing = taskRegistry.taskForRoot(caller.threadRoot)
+      const enclosing = taskRegistry.enclosingTaskForRoot(caller.threadRoot)
       const admitted: Array<{
         index: number
         spec: StartTaskSpec
@@ -3336,7 +3336,7 @@ agents.onEvent = async (name, event: AgentEvent) => {
       return { status: taskRegistry.recordSummary(rec.taskId, summary) }
     },
     async describeRole(caller) {
-      const enclosing = taskRegistry.taskForRoot(caller.threadRoot)
+      const enclosing = taskRegistry.enclosingTaskForRoot(caller.threadRoot)
       const openTask = taskRegistry.openTaskFor(caller.agentName, caller.threadRoot)
       return {
         is_task_assignee: openTask !== undefined && openTask.threadRoot === caller.sessionKey,

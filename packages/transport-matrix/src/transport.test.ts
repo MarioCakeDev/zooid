@@ -3379,6 +3379,33 @@ describe('delegated task completion routing', () => {
       expect.objectContaining({ threadId: taskRoot }),
     )
   })
+
+  it('a closed task thread is no longer capped or an assignee', async () => {
+    const { transport, taskRoot } = await runTaskToCompletion()
+
+    // The completion wake leaves the caller in the task's own thread. Once the
+    // task is closed that thread is ordinary conversation again, so it must not
+    // keep suppressing `zooid_start_task_threads` (the reported regression).
+    const role = await transport.taskActions.describeRole({
+      agentName: 'worker',
+      channelId: room,
+      threadRoot: taskRoot,
+      sessionKey: taskRoot,
+    })
+    expect(role).toEqual({
+      is_task_assignee: false,
+      can_start_task_threads: true,
+      can_handoff: true,
+    })
+
+    // Nor does it still enforce the one-level task depth: a new task started
+    // from the closed thread is admitted, not refused with `depth_limit`.
+    const again = await transport.taskActions.startTasks(
+      { agentName: 'worker', channelId: room, threadRoot: taskRoot, sessionKey: taskRoot },
+      { tasks: [{ agent: 'supervisor', prompt: 'follow-up' }] },
+    )
+    expect((again.results[0] as { status: string }).status).toBe('started')
+  })
 })
 
 describe('agents on other workstations ([[ZOD039]] directional continuation)', () => {
