@@ -6,6 +6,7 @@ import type {
   StartTasksOutput,
   CompleteTaskOutput,
   TaskActions,
+  TaskRole,
   TransportContextProvider,
   HandoffOutput,
 } from '@zooid/core'

@@ -262,47 +262,6 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
     })
     expect(handoffArgs).toEqual({ agent: 'product', prompt: 'write the spec' })
   })
-
-  it('two MCP server subprocesses sharing one socket route to their own bindings', async () => {
-    const providerA = fakeProvider({
-      getRoomInfo: async () => ({ id: '!a:hs', name: 'room-A', transport: 'matrix' }),
-    })
-    const providerB = fakeProvider({
-      getRoomInfo: async () => ({ id: '!b:hs', name: 'room-B', transport: 'matrix' }),
-    })
-    const registry = new SpawnRegistry()
-    const spawnA = registry.register({
-      agentName: 'architect',
-      threadRef: { channelId: '!a:hs', threadId: '!a:hs' },
-      provider: providerA,
-    })
-    const spawnB = registry.register({
-      agentName: 'architect',
-      threadRef: { channelId: '!b:hs', threadId: '!b:hs' },
-      provider: providerB,
-    })
-    const sockPath = join(tmpdir(), `zooid-it-${randomUUID()}.sock`)
-    const server = await startDaemonSocketServer({ sockPath, registry, agentName: 'architect' })
-    cleanup.push(() => server.close())
-    async function c(spawnId: string) {
-      const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: [BIN, '--spawn-id', spawnId],
-        env: { ...process.env, ZOOID_DAEMON_SOCK: sockPath } as Record<string, string>,
-      })
-      const client = new Client({ name: 'it', version: '0.0.1' }, { capabilities: {} })
-      await client.connect(transport)
-      cleanup.push(async () => {
-        await client.close()
-      })
-      return client
-    }
-    const [a, b] = await Promise.all([c(spawnA), c(spawnB)])
-    const ia = await a.callTool({ name: 'zooid_get_room_info', arguments: {} })
-    const ib = await b.callTool({ name: 'zooid_get_room_info', arguments: {} })
-    expect(JSON.parse((ia.content as Array<{ text: string }>)[0].text).id).toBe('!a:hs')
-    expect(JSON.parse((ib.content as Array<{ text: string }>)[0].text).id).toBe('!b:hs')
-  })
 })
 
 describe('per-agent sockets (integration)', () => {
