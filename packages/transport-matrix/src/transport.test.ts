@@ -4107,6 +4107,60 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
       }
     })
 
+    it("flushes the closed group's coalesced frame at the prose boundary, before the prose send", async () => {
+      vi.useFakeTimers()
+      try {
+        const { agents, client, finishPrompt, sessionId } = await startThrottled('$th5')
+        await emitTool(agents, sessionId, {
+          toolCallId: 'tc-1',
+          title: 'bash',
+          status: 'in_progress',
+        })
+        const id = await createdId(
+          client,
+          '🔧 architect: 1 tool — >_ bash @local\n⏳ >_ bash @local',
+        )
+        // Leading edge establishes the window...
+        await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        expect(edits(client)).toHaveLength(1)
+        // ...then a terminal completed frame coalesces inside it.
+        await updateTool(agents, sessionId, {
+          toolCallId: 'tc-1',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'ok, 12 passed' } }],
+        })
+        expect(edits(client)).toHaveLength(1)
+        // Prose closes the group when the next message boundary arrives: its
+        // coalesced frame must flush at that boundary, not wait out the 5s
+        // window, and must land on the wire before the prose it belongs to.
+        await emitText(agents, sessionId, 'now verify.', 'm2')
+        await emitText(agents, sessionId, '', 'm3')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(edits(client)).toHaveLength(2)
+        expect(appliedEditBody(client, id)).toContain('✓ >_ bash @local')
+        expect(appliedEditBody(client, id)).toContain('ok, 12 passed')
+        const calls = client.sendMessage.mock.calls
+        const flushedIdx = calls.findIndex(([a]) => {
+          const body = String(
+            (contentOf(a)['m.new_content'] as { body?: string } | undefined)?.body ?? '',
+          )
+          return isEdit(a) && body.includes('✓ >_ bash @local')
+        })
+        const proseIdx = calls.findIndex(([a]) => contentOf(a).body === 'now verify.')
+        expect(flushedIdx).toBeGreaterThanOrEqual(0)
+        expect(proseIdx).toBeGreaterThanOrEqual(0)
+        expect(flushedIdx).toBeLessThan(proseIdx)
+        // The frame was released at the boundary, so turn end must not re-send it.
+        finishPrompt()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(edits(client)).toHaveLength(2)
+        expect(appliedEditBody(client, id)).toContain('✓ >_ bash @local')
+        expect(lines(client)).toContain('✅ architect: done · 1 tool · 0 files')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('keeps the latest frame when a coalesced edit reverts to the applied body', async () => {
       vi.useFakeTimers()
       try {
@@ -4150,13 +4204,16 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
           status: 'in_progress',
         })
         await createdId(client, '🔧 architect: 1 tool — >_ bash @local\n⏳ >_ bash @local')
-        // Group 1: leading edge, then a queued frame reverted before the window
-        // closes — so the oldest queued edit is a no-op.
+        // Group 1's leading edge goes out, then prose closes the group with
+        // nothing queued.
         await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
+        await emitText(agents, sessionId, 'now verify.', 'm2')
+        // A late update to the closed group queues inside the window, then
+        // reverts to the applied body before the window closes — so the oldest
+        // queued edit is a no-op.
         await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'completed' })
         await updateTool(agents, sessionId, { toolCallId: 'tc-1', status: 'pending' })
-        // Prose closes group 1; group 2 opens and queues its own edit.
-        await emitText(agents, sessionId, 'now verify.', 'm2')
+        // Group 2 opens and queues its own edit behind the no-op.
         await emitTool(agents, sessionId, {
           toolCallId: 'tc-2',
           title: 'Read file',
@@ -4168,7 +4225,7 @@ describe('interleaved mirror lines (all tools since last prose on one line)', ()
         )
         await updateTool(agents, sessionId, { toolCallId: 'tc-2', status: 'completed' })
         expect(edits(client)).toHaveLength(1)
-        // First window flushes group 1's no-op; the timer must re-arm for the
+        // First window flushes the no-op; the timer must re-arm for the
         // still-queued group-2 edit rather than stranding it until turn end.
         await vi.advanceTimersByTimeAsync(INTERVAL)
         expect(edits(client)).toHaveLength(1)
