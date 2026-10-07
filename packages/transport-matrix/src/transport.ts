@@ -670,11 +670,14 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
    * Close the open tool/plan group. Called whenever a prose message is flushed:
    * the next tool/plan activity starts a NEW line, so a gap between two prose
    * messages is exactly one line. The closed group is still tracked per tool so
-   * a late `tool_call_update` edits its own line.
+   * a late `tool_call_update` edits its own line. Closing at a prose boundary
+   * also releases any coalesced edit still queued for the group(s), so their
+   * final frames land before the prose send `flushBuffer` chains next.
    */
   function closeMirrorGroup(sessionId: string): void {
     const state = turnMirrors.get(sessionId)
     if (state) state.current = undefined
+    flushPendingMirrorEdits(sessionId)
   }
 
   function newMirrorGroup(): MirrorGroup {
@@ -797,6 +800,38 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       }
       if (state.pendingEdits.size > 0) armMirrorEditTimer(sessionId, state, mirrorEditIntervalMs)
     })
+  }
+
+  /**
+   * Release every coalesced edit a session has queued, applying it now instead
+   * of waiting for the throttle window. Called at a prose boundary (from
+   * `closeMirrorGroup`): without this the group just closed keeps its frame
+   * parked until the next window (or turn end), so its line shows a stale
+   * `⏳/•` body long after the prose it belongs to has posted. The frames are
+   * dropped from `pendingEdits` as they are enqueued, so `finalizeTurnMirror`
+   * cannot send one a second time.
+   */
+  function flushPendingMirrorEdits(sessionId: string): void {
+    const state = turnMirrors.get(sessionId)
+    if (!state || state.pendingEdits.size === 0) return
+    // Every queued frame is being released now, so the window's timer has
+    // nothing left to fire for; clear it and let the next edit re-anchor the
+    // window to `lastEditAt`.
+    if (state.editTimer) {
+      clearTimeout(state.editTimer)
+      state.editTimer = undefined
+    }
+    const pending = [...state.pendingEdits.values()]
+    state.pendingEdits.clear()
+    for (const edit of pending) {
+      // Last-frame-wins can revert a queued edit to the body already applied:
+      // there is nothing to send, so drop it.
+      if (edit.body === edit.group.lastBody) continue
+      state.lastEditAt = Date.now()
+      enqueueMirrorEdit(sessionId, () =>
+        editMirrorLine(sessionId, edit.ctx, edit.group, edit.body, edit.formattedBody),
+      )
+    }
   }
 
   /**
