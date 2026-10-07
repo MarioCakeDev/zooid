@@ -116,11 +116,19 @@ Modules:
 ## 5. Other fork-only changes
 
 - `packages/context-mcp/src/bin.ts`, `daemon-socket.ts` — connect the MCP stdio
-  transport *before* the daemon role query, and retry once on a connect-phase
-  failure (cold-connect race) without ever re-sending a request that reached the
-  server.
-- `packages/context-mcp/src/mcp-server.ts` — `registerTaskTools` split out so read
-  tools are live before the role query lands.
+  transport *first* (read tools live immediately) and register the task tools
+  **unconditionally**. The daemon is the authorization boundary and refuses every
+  disallowed task call per request (`depth_limit`, `no_open_task`,
+  `unknown_caller`, `self`, `already_open`), so the MCP does not pre-screen. The
+  fork previously gated registration on a one-shot `describeRole` snapshot taken
+  at spawn, with the error swallowed and no retry: a single raced or failed
+  query (e.g. `binding not owned by caller` during the spawn window) hid
+  `zooid_start_task_threads` for the whole MCP lifetime, because the snapshot was
+  never refreshed.
+- `packages/context-mcp/src/mcp-server.ts` — `registerTaskTools` stays split out
+  (read tools live before the task tools land), and the `role` parameter is kept
+  for callers that want to pre-screen; production passes a permissive role and
+  lets the daemon decide.
 - `packages/transport-matrix/src/context-provider.ts` — resolve room names and
   survive cross-room thread ids (top-level fallback on
   `Relations must be in the same room`).
@@ -204,5 +212,3 @@ Modules: `packages/core/src/{types,config}.ts` (`AnnounceConfig`, parse +
 `rootIsTrigger`, notice dropped by `route`); `packages/transport-matrix/src/transport.ts`
 (`lastThreadEventId` capture, `announceThreadCompletion`, `resolveStatusRoom`);
 CLI plumbing in `packages/cli/src/daemon/start-daemon.ts`.
-
-
