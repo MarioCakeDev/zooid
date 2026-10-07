@@ -3152,10 +3152,17 @@ agents.onEvent = async (name, event: AgentEvent) => {
       })
     if (task.notify === 'none') return
     const parent = bindingFor(task.parent.agent)
+    // [[ZOD072]] A delegated task's result belongs in the task's own thread, not
+    // the caller's. Post the notice there and wake the caller *in that thread*,
+    // deriving the caller's session key from the task thread's state ([[ZOD071]])
+    // rather than reusing task.parent.sessionKey, which is bound to the caller's
+    // unrelated thread — the leak this path used to have. Mirrors returnInvocation.
+    // The generation guard below still keys off the spawning session captured at
+    // reserve time: it only decides *whether* to wake, never which thread to use.
     await client.sendMessage({
       roomId: task.roomId,
       asUserId: ctx.agent.userId,
-      threadRoot: task.parent.threadRoot,
+      threadRoot: threadId,
       content: {
         msgtype: 'm.notice',
         body: renderCompletionPrompt(completion),
@@ -3170,8 +3177,8 @@ agents.onEvent = async (name, event: AgentEvent) => {
       return
     void enqueueTurn(parent, {
       roomId: task.roomId,
-      threadRoot: task.parent.threadRoot,
-      sessionKey: task.parent.sessionKey,
+      threadRoot: threadId,
+      sessionKey: sessionKeyFor(parent.userId, threadId, threadStates.get(threadId)),
       promptText: renderCompletionPrompt(completion),
     })
   }
@@ -3445,17 +3452,25 @@ agents.onEvent = async (name, event: AgentEvent) => {
           parent &&
           taskRegistry.generationOf(task.parent.agent, task.parent.sessionKey) === task.parent.generation
         ) {
+          // [[ZOD072]] Same rule as finishTask: an interrupted task's result
+          // stays in its own thread, and the caller is woken there with the
+          // session key derived from that thread ([[ZOD071]]).
           void client.sendMessage({
             roomId: task.roomId,
             asUserId: assignee.userId,
-            threadRoot: task.parent.threadRoot,
+            threadRoot: task.threadRoot,
             content: {
               msgtype: 'm.notice',
               body: renderCompletionPrompt(completion),
               [THREAD_RESULT_FIELD]: completion,
             },
           })
-          void enqueueTurn(parent, { roomId: task.roomId, threadRoot: task.parent.threadRoot, sessionKey: task.parent.sessionKey, promptText: renderCompletionPrompt(completion) })
+          void enqueueTurn(parent, {
+            roomId: task.roomId,
+            threadRoot: task.threadRoot,
+            sessionKey: sessionKeyFor(parent.userId, task.threadRoot!, threadStates.get(task.threadRoot!)),
+            promptText: renderCompletionPrompt(completion),
+          })
         }
       }
     }

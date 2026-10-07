@@ -3214,6 +3214,95 @@ describe('taskActions.describeRole', () => {
   })
 })
 
+describe('delegated task completion routing', () => {
+  const room = '!r:example.com'
+  const taskRouteBindings = [
+    {
+      name: 'supervisor',
+      userId: '@supervisor:example.com',
+      rooms: [{ alias: room }],
+      trigger: 'mention' as const,
+    },
+    {
+      name: 'worker',
+      userId: '@worker:example.com',
+      rooms: [{ alias: room }],
+      trigger: 'mention' as const,
+    },
+  ]
+
+  it('delivers the completion into the task thread, not the spawning thread', async () => {
+    const { transport, agents, client } = makeTransport(undefined, taskRouteBindings)
+    agents.prompt.mockImplementation(async (name: string, p: { threadId: string }) => {
+      if (name === 'worker')
+        agents.onEvent('worker', {
+          type: 'agent_message_chunk',
+          sessionId: 'sess-' + p.threadId,
+          content: { type: 'text', text: 'audit is clean' },
+        })
+      return { stopReason: 'end_turn' as const }
+    })
+
+    const started = await transport.taskActions.startTasks(
+      {
+        agentName: 'supervisor',
+        channelId: room,
+        threadRoot: '$spawn-root',
+        sessionKey: '$spawn-root',
+      },
+      { tasks: [{ agent: 'worker', prompt: 'audit' }] },
+    )
+    const taskRoot = (started.results[0] as { thread_id: string }).thread_id
+    expect(taskRoot).toBeTruthy()
+
+    // Deliver the assignment the daemon posted, so worker has a live session.
+    const assignment = client.sendMessage.mock.calls.find(
+      ([a]) => (a as { content?: Record<string, unknown> }).content?.['dev.zooid.thread_start'],
+    )![0] as { asUserId: string; content: Record<string, unknown> }
+    await postTxn(transport.app, {
+      events: [
+        {
+          type: 'm.room.message',
+          event_id: taskRoot,
+          origin_server_ts: Date.now(),
+          room_id: room,
+          sender: assignment.asUserId,
+          content: assignment.content,
+        },
+      ],
+    })
+    await settleTurn()
+
+    // The terminal result is published under the task root.
+    expect(client.sendCustomEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'dev.zooid.thread_result',
+        content: expect.objectContaining({ thread_id: taskRoot }),
+      }),
+    )
+    // The completion notice is a reply in the task thread…
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadRoot: taskRoot,
+        content: expect.objectContaining({
+          msgtype: 'm.notice',
+          'dev.zooid.thread_result': expect.anything(),
+        }),
+      }),
+    )
+    // …and nothing — notice or wake — is routed to the spawning thread.
+    expect(
+      client.sendMessage.mock.calls.some(
+        ([a]) => (a as { threadRoot?: string }).threadRoot === '$spawn-root',
+      ),
+    ).toBe(false)
+    expect(agents.prompt).toHaveBeenCalledWith(
+      'supervisor',
+      expect.objectContaining({ threadId: taskRoot }),
+    )
+  })
+})
+
 describe('agents on other workstations ([[ZOD039]] directional continuation)', () => {
   // Two daemons share a thread: architect is ours, @cloud.product lives on
   // another workstation. Each daemon used to read the other's agent as a
