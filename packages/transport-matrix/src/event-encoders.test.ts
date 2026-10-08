@@ -110,6 +110,20 @@ describe('toToolCallBody', () => {
     expect(body.raw_input.filepath).toBe('/abs/short.md')
     expect(body.raw_input.diff).toBe('a'.repeat(250) + '… [truncated]')
   })
+
+  it('keeps the Code Mode `code` argument whole but clamps its siblings', () => {
+    const code = 'const a = 1\n'.repeat(80) // ~880 chars, far over the 250 cap
+    const evt: ToolCallEvent = {
+      type: 'tool_call',
+      sessionId: 'sess-1',
+      toolCallId: 'tc-1',
+      title: 'execute',
+      rawInput: { code, note: 'x'.repeat(500) },
+    }
+    const body = toToolCallBody(evt) as { raw_input: Record<string, unknown> }
+    expect(body.raw_input.code).toBe(code)
+    expect(body.raw_input.note).toBe('x'.repeat(250) + '… [truncated]')
+  })
 })
 
 describe('toUpdateBody', () => {
@@ -127,6 +141,20 @@ describe('toUpdateBody', () => {
       status: 'completed',
       content: evt.content,
     })
+  })
+
+  it('keeps the Code Mode `code` whole but clamps its siblings', () => {
+    const code = 'x'.repeat(900)
+    const evt: ToolCallUpdateEvent = {
+      type: 'tool_call_update',
+      sessionId: 'sess-1',
+      toolCallId: 'tc-1',
+      title: 'execute',
+      rawInput: { code, note: 'y'.repeat(400) },
+    }
+    const body = toUpdateBody(evt) as { raw_input: Record<string, unknown> }
+    expect(body.raw_input.code).toBe(code)
+    expect(body.raw_input.note).toBe('y'.repeat(250) + '… [truncated]')
   })
 
   it('omits absent optional fields', () => {

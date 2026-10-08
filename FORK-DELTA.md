@@ -156,7 +156,10 @@ Modules:
   plain `body` (markdown clients — e.g. Element X — soft-wrap a bare newline,
   squashing the script onto one line) and its HTML `<pre><code>` uses explicit
   `<br>`s (`codeBlockHtmlLines`), so a client that flattens the HTML still keeps
-  the line structure.
+  the line structure. The `raw_input` string cap (`RAW_INPUT_STR_MAX = 250`) is
+  also exempted for the Code Mode `code` argument (`clampRawInput`): that clamp
+  exists to stop a big diff or file body bloating the notice, but it was
+  truncating the script itself to `… [truncated]`.
 
 ## 6. Reconciliation note — our @mention handoff was removed
 

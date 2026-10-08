@@ -19,7 +19,7 @@ export function toToolCallBody(evt: ToolCallEvent): Record<string, unknown> {
   }
   if (evt.kind !== undefined) out.kind = evt.kind
   if (evt.status !== undefined) out.status = evt.status
-  if (evt.rawInput !== undefined) out.raw_input = truncateStrings(evt.rawInput, RAW_INPUT_STR_MAX)
+  if (evt.rawInput !== undefined) out.raw_input = clampRawInput(evt.rawInput, RAW_INPUT_STR_MAX)
   if (evt.locations !== undefined) out.locations = evt.locations
   // The diff is computed from the *untruncated* input: raw_input is clamped to
   // RAW_INPUT_STR_MAX, and a diff built from a clamped oldString would be a
@@ -50,6 +50,26 @@ function truncateStrings(v: unknown, max: number): unknown {
   return v
 }
 
+/**
+ * `truncateStrings` with one exemption: a `code` value is kept whole. The cap
+ * exists so a big diff or file body cannot bloat the notice, but for Code Mode's
+ * `execute` the script *is* the call — clamping it to `RAW_INPUT_STR_MAX` (and
+ * appending `… [truncated]`) hides exactly what the tagline exists to show.
+ * Matched by key rather than tool title so it holds on both the initial
+ * `tool_call` and a later `tool_call_update` (whose title is not the tool name).
+ * Every other key is clamped as usual.
+ */
+function clampRawInput(rawInput: unknown, max: number): unknown {
+  if (rawInput !== null && typeof rawInput === 'object' && !Array.isArray(rawInput)) {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(rawInput as Record<string, unknown>)) {
+      out[k] = k === 'code' ? v : truncateStrings(v, max)
+    }
+    return out
+  }
+  return truncateStrings(rawInput, max)
+}
+
 export function toUpdateBody(evt: ToolCallUpdateEvent): Record<string, unknown> {
   const out: Record<string, unknown> = {
     session_id: evt.sessionId,
@@ -71,8 +91,9 @@ export function toUpdateBody(evt: ToolCallUpdateEvent): Record<string, unknown> 
   // intentionally NOT serialized — it's typically large and duplicates content.
   if (evt.content !== undefined) out.content = evt.content
   // Some ACP agents only set rawInput on a later update (not the initial
-  // tool_call). Truncate strings and forward.
-  if (evt.rawInput !== undefined) out.raw_input = truncateStrings(evt.rawInput, RAW_INPUT_STR_MAX)
+  // tool_call). Clamp strings and forward — except a `code` value, which
+  // `clampRawInput` leaves whole.
+  if (evt.rawInput !== undefined) out.raw_input = clampRawInput(evt.rawInput, RAW_INPUT_STR_MAX)
   if (evt.locations !== undefined) out.locations = evt.locations
   // See toToolCallBody: computed pre-truncation, and it prefers the update's
   // own diff content block over the raw input.
