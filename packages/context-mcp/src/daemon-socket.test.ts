@@ -289,46 +289,6 @@ describe('daemon-socket', () => {
     })
   })
 
-  // Regression: two concurrent turns for the same agent. The turn's own thread
-  // travels with the request, so a handoff is bound to the thread that issued
-  // it even though the spawn binding resolves to another session of that agent
-  // (opencode registers ACP mcpServers per-directory, so a later session can
-  // take over an earlier one's binding). Before the fix the caller was rebuilt
-  // from `binding.threadRef`, and turn A's handoff landed in turn B's thread.
-  it('pins a handoff to the turn thread carried by the request, not the binding', async () => {
-    const seen: unknown[] = []
-    const registry = new SpawnRegistry()
-    registry.setTaskActions(
-      fakeTasks({
-        handoff: async (caller, input) => {
-          seen.push({ caller, input })
-          return { status: 'started', call_id: 'c1', callee: '@b:hs', delivery: 'd' }
-        },
-      }),
-    )
-    // The binding the socket happens to resolve for this spawn belongs to the
-    // *other* concurrent session (thread B).
-    const spawnId = registry.register({
-      agentName: 'infra',
-      threadRef: { channelId: 'c', threadId: '$threadB' },
-      provider: defaultProvider,
-      sessionKey: '$threadB',
-    })
-    const sockPath = join(tmpdir(), `zooid-test-${randomUUID()}.sock`)
-    const server = await startDaemonSocketServer({ sockPath, registry, agentName: 'infra' })
-    cleanup.push(() => server.close())
-
-    await callDaemon(sockPath, {
-      spawnId,
-      caller: { channelId: 'c', threadRoot: '$threadA', sessionKey: '$threadA' },
-      method: 'handoff',
-      params: { agent: 'b', prompt: 'go' },
-    })
-    expect(seen[0]).toMatchObject({
-      caller: { agentName: 'infra', threadRoot: '$threadA', sessionKey: '$threadA' },
-    })
-  })
-
   it('routes sendMessage and getRooms to the provider', async () => {
     const providerCalls: unknown[] = []
     const provider = fakeProvider({

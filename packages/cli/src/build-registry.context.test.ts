@@ -102,9 +102,11 @@ describe('buildAcpRegistry — context provider in a container runtime', () => {
     expect(spec.env).toContainEqual({ name: 'ZOOID_DAEMON_SOCK', value: CONTEXT_CONTAINER_SOCK })
   })
 
-  // Regression: each session's context spec carries its own turn thread, so two
-  // concurrent same-agent sessions cannot share one daemon caller binding.
-  it("stamps each session's own thread onto its context spec", async () => {
+  // Regression ([[ZOD092]]): each session's context spec carries its own
+  // mcpServers name, so two concurrent same-agent sessions cannot collide in
+  // opencode's name-keyed MCP registry (a later session's registration would
+  // otherwise take over the earlier session's server).
+  it("gives each session's context spec a distinct mcpServers name", async () => {
     const spawnIds = ['spawn-a', 'spawn-b']
     const spawnOpts = {
       ...opts,
@@ -118,11 +120,11 @@ describe('buildAcpRegistry — context provider in a container runtime', () => {
     const a = await factory('$threadA', '!r:hs', '$threadA')
     const b = await factory('$threadB', '!r:hs', '$threadB')
 
-    const threadRootOf = (args: string[]) => args[args.indexOf('--thread-root') + 1]
-    expect(threadRootOf(a.args)).toBe('$threadA')
-    expect(threadRootOf(b.args)).toBe('$threadB')
     expect(a.args).toContain('spawn-a')
     expect(b.args).toContain('spawn-b')
+    expect(a.name).toBe('zooid-context-spawn-a')
+    expect(b.name).toBe('zooid-context-spawn-b')
+    expect(a.name).not.toBe(b.name)
   })
 
   it('leaves the local runtime host-shaped (no context mounts, host command)', async () => {

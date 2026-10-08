@@ -13,9 +13,17 @@ export interface SpawnBinding {
   sessionKey?: string
 }
 
-/** Shape we pass into ACP `session/new mcpServers[]`. */
+/**
+ * Shape we pass into ACP `session/new mcpServers[]`.
+ *
+ * `name` is unique per spawn (`zooid-context-<spawnId>`): opencode registers ACP
+ * MCP servers in a directory-scoped registry keyed by name, so two concurrent
+ * sessions of one agent that shared the name would have the later registration
+ * take over the first, routing the first session's tool calls to the other
+ * session's process. A per-spawn name keeps each session's server distinct.
+ */
 export interface ZooidContextServerSpec {
-  name: 'zooid-context'
+  name: string
   command: string
   args: string[]
   env: Array<{ name: string; value: string }>

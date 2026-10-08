@@ -4,24 +4,9 @@ import type { SpawnRegistry } from './spawn-registry.js'
 import type { CompleteTaskInput, StartTasksInput, HandoffInput } from '@zooid/core'
 import { agentSocketPath } from './socket-paths.js'
 
-/**
- * The turn that issued the request, captured by the context-MCP at spawn time
- * and echoed on every task call. The socket trusts this over the spawn binding's
- * `threadRef`: a binding is process-global and, when one ACP host multiplexes
- * concurrent sessions (opencode registers ACP `mcpServers` by name at directory
- * scope), it can drift to another session, whereas this ref is the turn's own
- * thread ([[ZOD092]]).
- */
-export interface DaemonCallerThreadRef {
-  channelId: string
-  threadRoot: string
-  sessionKey?: string
-}
-
 export interface DaemonRequest {
   spawnId?: string
   acpSessionId?: string
-  caller?: DaemonCallerThreadRef
   method:
     | 'getRoomHistory'
     | 'getRecentThreads'
@@ -195,17 +180,15 @@ async function handleLine(
         )
         return
       }
-      // Pin the caller to the turn's own thread when the MCP supplied one,
-      // falling back to the binding only for callers that predate the field.
-      // Never rebuild the thread from ambient binding state when the turn
-      // declared it: a retry after a dropped MCP transport must not drift to a
-      // concurrently registered session for the same agent.
+      // Thread affinity comes from the spawn binding. Each ACP session gets a
+      // distinct spawn (and, critically, a distinct MCP server name — see
+      // `contextServerName`), so opencode routes this process's calls to its
+      // own session's binding rather than a concurrently registered one.
       const caller = {
         agentName: binding.agentName,
-        channelId: req.caller?.channelId ?? channelId,
-        threadRoot: req.caller?.threadRoot ?? binding.threadRef.threadId,
-        sessionKey:
-          req.caller?.sessionKey ?? binding.sessionKey ?? binding.threadRef.threadId,
+        channelId,
+        threadRoot: binding.threadRef.threadId,
+        sessionKey: binding.sessionKey ?? binding.threadRef.threadId,
       }
       result =
         req.method === 'startTasks'

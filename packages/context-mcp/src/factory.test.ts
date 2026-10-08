@@ -16,7 +16,7 @@ describe('buildContextServerSpec', () => {
       sockPath: '/run/zooid/abc.sock',
       binPath: '/usr/local/lib/zooid/zooid-context-mcp.js',
     })
-    expect(spec.name).toBe('zooid-context')
+    expect(spec.name).toBe('zooid-context-11111111-1111-4111-8111-111111111111')
     expect(spec.command).toBe(process.execPath)
     expect(spec.args[0]).toBe('/usr/local/lib/zooid/zooid-context-mcp.js')
     expect(spec.args).toContain('--spawn-id')
@@ -24,17 +24,24 @@ describe('buildContextServerSpec', () => {
     expect(spec.env).toEqual([{ name: 'ZOOID_DAEMON_SOCK', value: '/run/zooid/abc.sock' }])
   })
 
-  it('threads the turn thread into the spec so the daemon can pin the caller', () => {
-    const spec = buildContextServerSpec({
-      spawnId: 'sid',
-      sockPath: '/tmp/x.sock',
+  // Regression ([[ZOD092]]): opencode registers ACP MCP servers in a
+  // directory-scoped registry keyed by name, so two concurrent sessions of one
+  // agent must carry distinct names or the later registration hijacks the
+  // first. The spawn id is unique per session, so the name must be too.
+  it('gives each spawn a distinct mcpServers name', () => {
+    const a = buildContextServerSpec({
+      spawnId: 'spawn-a',
+      sockPath: '/run/zooid/abc.sock',
       binPath: '/host/bin.js',
-      threadRef: { channelId: '!r:hs', threadId: '$thread', sessionKey: '$thread|$call' },
     })
-    expect(spec.args).toContain('--thread-root')
-    expect(spec.args[spec.args.indexOf('--thread-root') + 1]).toBe('$thread')
-    expect(spec.args[spec.args.indexOf('--channel-id') + 1]).toBe('!r:hs')
-    expect(spec.args[spec.args.indexOf('--session-key') + 1]).toBe('$thread|$call')
+    const b = buildContextServerSpec({
+      spawnId: 'spawn-b',
+      sockPath: '/run/zooid/abc.sock',
+      binPath: '/host/bin.js',
+    })
+    expect(a.name).toBe('zooid-context-spawn-a')
+    expect(b.name).toBe('zooid-context-spawn-b')
+    expect(a.name).not.toBe(b.name)
   })
 
   it('resolves the default bin via Node module resolution to a real path on disk', () => {
@@ -61,7 +68,7 @@ describe('buildContextServerSpec — containerize', () => {
       binPath: '/usr/lib/node_modules/zooid/node_modules/@zooid/context-mcp/dist/bin.js',
       containerize: true,
     })
-    expect(spec.name).toBe('zooid-context')
+    expect(spec.name).toBe('zooid-context-sid-1')
     // bare `node`, resolved via the agent image PATH — NOT the host execPath.
     expect(spec.command).toBe('node')
     expect(spec.args[0]).toBe(CONTEXT_CONTAINER_BIN) // '/zooid/context-mcp/bin.js'

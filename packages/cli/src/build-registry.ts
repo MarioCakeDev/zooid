@@ -371,7 +371,6 @@ function buildContextSpawns(
           spawnId,
           sockPath,
           containerize: cfg.runtime !== 'local',
-          threadRef: { channelId: channelId ?? threadId, threadId, sessionKey: sessionKey ?? threadId },
         })
       }
     } else {

@@ -124,7 +124,7 @@ export interface AcpClientOptions {
     channelId?: string,
     sessionKey?: string,
   ) => Promise<{
-    name: 'zooid-context'
+    name: string
     command: string
     args: string[]
     env: Array<{ name: string; value: string }>

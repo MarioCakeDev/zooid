@@ -757,10 +757,12 @@ function skillSubject(raw: Record<string, unknown>): Picked | undefined {
  * Family prefixes stripped from a tool title before its verb is shown, longest
  * first so `zooid-context_zooid_` wins over the shorter forms. The icon already
  * names the family, so `github_get_file_contents` reads as `get_file_contents`.
+ *
+ * `zooid-context` is not listed here: its ACP server name is unique per spawn
+ * (`zooid-context-<spawnId>`, see `contextServerName`), so it is matched by the
+ * regex below rather than a fixed literal.
  */
 const TOOL_NAME_FAMILIES: readonly string[] = [
-  'zooid-context_zooid_',
-  'zooid-context_',
   'github_',
   'coolify_',
   'truenas_',
@@ -769,8 +771,16 @@ const TOOL_NAME_FAMILIES: readonly string[] = [
   'ha_',
 ]
 
+/** `zooid-context_` or the per-spawn `zooid-context-<spawnId>_` form. */
+const ZOOID_CONTEXT_PREFIX = /^zooid-context(?:-[^_]+)?_/i
+
 /** A tool title with its family prefix removed (`github_deploy` → `deploy`). */
 function toolShortName(title: string): string {
+  const context = title.match(ZOOID_CONTEXT_PREFIX)
+  if (context) {
+    const rest = title.slice(context[0].length)
+    return rest.toLowerCase().startsWith('zooid_') ? rest.slice('zooid_'.length) : rest
+  }
   const lower = title.toLowerCase()
   for (const prefix of TOOL_NAME_FAMILIES) {
     if (lower.startsWith(prefix)) return title.slice(prefix.length)
