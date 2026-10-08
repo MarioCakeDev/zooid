@@ -146,6 +146,12 @@ Modules:
   carried**. The fork's CI is external (built/deployed via Coolify), and pulling
   upstream `.github/workflows/*` would require a `workflow`-scoped token to push.
   Revisit when upstreaming. Re-apply the same exclusion on future upstream merges.
+- `packages/transport-matrix/src/event-encoders.ts` (+ `transport.ts`) — Code
+  Mode's `execute` tool gets a dedicated tagline: a `📜` icon
+  (`TOOL_ICON_BY_NAME`) and the **whole** script rendered verbatim as its own
+  multi-line block, instead of the collapsed, 200-char-clamped `code=…` param
+  (`toolCodeText` / `CODE_TOOL_HEADS`, wired through `transport.ts`'s
+  `entryParams`). Upstream treats every tool param as a compact one-liner.
 
 ## 6. Reconciliation note — our @mention handoff was removed
 

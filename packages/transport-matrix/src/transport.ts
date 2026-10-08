@@ -72,6 +72,7 @@ import {
   DIFF_PARAM_KEYS,
   toolEntryMachine,
   toolSubjectParamKeys,
+  toolCodeText,
   TURN_MIRROR_MARKER,
   threadCompletionContent,
   completionSummary,
@@ -921,6 +922,10 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
    * earlier `tool_call` without the keys the diff now shows.
    */
   function entryParams(entry: TurnToolEntry): string | undefined {
+    // Code Mode's `execute` shows its whole script, verbatim and unclamped;
+    // every other tool keeps the compact one-line param rendering.
+    const code = toolCodeText(entry)
+    if (code !== undefined) return code
     const omit = new Set<string>(entry.diff ? DIFF_PARAM_KEYS : [])
     for (const key of toolSubjectParamKeys(entry)) omit.add(key)
     return toolParamsText(entry.rawInput, omit.size > 0 ? omit : undefined)
