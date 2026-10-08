@@ -14,9 +14,15 @@ export class SpawnRegistry {
     provider: TransportContextProvider
     sessionKey?: string
   }): string {
+    const key = this.key(input.agentName, input.sessionKey ?? input.threadRef.threadId)
+    const existing = this.spawnByAgentSession.get(key)
+    if (existing) {
+      this.bindings.set(existing, { spawnId: existing, ...input })
+      return existing
+    }
     const spawnId = randomUUID()
     this.bindings.set(spawnId, { spawnId, ...input })
-    this.spawnByAgentSession.set(this.key(input.agentName, input.sessionKey ?? input.threadRef.threadId), spawnId)
+    this.spawnByAgentSession.set(key, spawnId)
     return spawnId
   }
 

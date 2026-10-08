@@ -21,7 +21,12 @@ ambient-state resolutions, each across a concurrent-turn boundary:
   session's process, whose spawn id and binding are its own. Each spawn now
   advertises a unique server name (`zooid-context-<spawnId>`, see
   `contextServerName`), so the two registrations coexist instead of colliding
-  and each session's tool calls reach its own daemon binding.
+  and each session's tool calls reach its own daemon binding. `SpawnRegistry`
+  reuses the binding and spawn id for an existing `agentName::sessionKey`, so
+  a session's name stays stable across re-registrations — opencode's same-name
+  `storeClient` replace then closes the previous client instead of leaking an
+  idle-close→resume orphan — while distinct session keys still get distinct
+  names.
 - **transport-matrix.** `deliverReturn` recomputed the recipient session from
   ambient thread state at release time, so a caller that entered a new handoff
   arc in the same thread between making the call and the return was woken on the
