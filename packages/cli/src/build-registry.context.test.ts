@@ -102,6 +102,31 @@ describe('buildAcpRegistry — context provider in a container runtime', () => {
     expect(spec.env).toContainEqual({ name: 'ZOOID_DAEMON_SOCK', value: CONTEXT_CONTAINER_SOCK })
   })
 
+  // Regression ([[ZOD092]]): each session's context spec carries its own
+  // mcpServers name, so two concurrent same-agent sessions cannot collide in
+  // opencode's name-keyed MCP registry (a later session's registration would
+  // otherwise take over the earlier session's server).
+  it("gives each session's context spec a distinct mcpServers name", async () => {
+    const spawnIds = ['spawn-a', 'spawn-b']
+    const spawnOpts = {
+      ...opts,
+      contextSpawnRegistry: {
+        register: vi.fn(() => spawnIds.shift()!),
+      } as never,
+    }
+    const registry = buildAcpRegistry(podmanCfg(), spawnOpts)
+    const factory = registry.opts.contextSpawns!.architect!
+
+    const a = await factory('$threadA', '!r:hs', '$threadA')
+    const b = await factory('$threadB', '!r:hs', '$threadB')
+
+    expect(a.args).toContain('spawn-a')
+    expect(b.args).toContain('spawn-b')
+    expect(a.name).toBe('zooid-context-spawn-a')
+    expect(b.name).toBe('zooid-context-spawn-b')
+    expect(a.name).not.toBe(b.name)
+  })
+
   it('leaves the local runtime host-shaped (no context mounts, host command)', async () => {
     // matrixCfg is runtime: local. No container mounts; factory stays host-shaped.
     const registry = buildAcpRegistry(matrixCfg, opts)

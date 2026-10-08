@@ -9,7 +9,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SpawnRegistry } from './spawn-registry.js'
 import { callDaemon, startAgentSocketServers, startDaemonSocketServer } from './daemon-socket.js'
 import { agentSocketPath } from './socket-paths.js'
-import type { TransportContextProvider } from '@zooid/core'
+import type { TaskActions, TransportContextProvider } from '@zooid/core'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const BIN = join(__dirname, '..', 'dist', 'bin.js')
@@ -225,6 +225,68 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
     expect(JSON.parse((info.content as Array<{ text: string }>)[0].text).id).toBe('!room:hs')
     const names = (await client.listTools()).tools.map((t) => t.name)
     expect(names).toContain('zooid_start_task_threads')
+  })
+
+  it('two real MCP spawns against one daemon socket keep their own thread on task calls', async () => {
+    // Two real MCP servers against one daemon socket, each its own spawn
+    // binding; each spawn's task call must be attributed to its own binding's
+    // thread. NOTE: each server here is started with an explicit `--spawn-id`
+    // and driven directly, so this does NOT exercise `contextServerName` or
+    // opencode's name-keyed MCP registry — it passes on the base commit too.
+    // The registry guard for the 06:18 seam (distinct per-spawn names) lives in
+    // `factory.test.ts`.
+    const registry = new SpawnRegistry()
+    const spawnA = registry.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!a:hs', threadId: '$threadA' },
+      provider: fakeProvider(),
+      sessionKey: '$sessionA',
+    })
+    const spawnB = registry.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!b:hs', threadId: '$threadB' },
+      provider: fakeProvider(),
+      sessionKey: '$sessionB',
+    })
+    const seen: Array<{ threadRoot: string; sessionKey?: string }> = []
+    registry.setTaskActions({
+      startTasks: async () => ({ results: [], notify: 'caller', delivery: 'd' }),
+      completeTask: async () => ({ status: 'recorded' }),
+      describeRole: async () => ({ is_task_assignee: false, can_start_task_threads: true }),
+      handoff: async (caller) => {
+        seen.push({ threadRoot: caller.threadRoot, sessionKey: caller.sessionKey })
+        return { status: 'refused', reason: 'stub' }
+      },
+    } satisfies TaskActions)
+    const sockPath = join(tmpdir(), `zooid-it-${randomUUID()}.sock`)
+    const server = await startDaemonSocketServer({ sockPath, registry, agentName: 'architect' })
+    cleanup.push(() => server.close())
+
+    async function startClient(spawnId: string) {
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [BIN, '--spawn-id', spawnId],
+        env: { ...process.env, ZOOID_DAEMON_SOCK: sockPath } as Record<string, string>,
+      })
+      const client = new Client({ name: 'it', version: '0.0.1' }, { capabilities: {} })
+      await client.connect(transport)
+      cleanup.push(async () => {
+        await client.close()
+      })
+      return client
+    }
+
+    const [clientA, clientB] = await Promise.all([startClient(spawnA), startClient(spawnB)])
+    await Promise.all([
+      clientA.callTool({ name: 'zooid_handoff', arguments: { agent: 'b', prompt: 'go' } }),
+      clientB.callTool({ name: 'zooid_handoff', arguments: { agent: 'b', prompt: 'go' } }),
+    ])
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        { threadRoot: '$threadA', sessionKey: '$sessionA' },
+        { threadRoot: '$threadB', sessionKey: '$sessionB' },
+      ]),
+    )
   })
 
   it('routes a task tool call to the daemon-side action', async () => {

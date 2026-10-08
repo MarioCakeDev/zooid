@@ -180,6 +180,10 @@ async function handleLine(
         )
         return
       }
+      // Thread affinity comes from the spawn binding. Each ACP session gets a
+      // distinct spawn (and, critically, a distinct MCP server name — see
+      // `contextServerName`), so opencode routes this process's calls to its
+      // own session's binding rather than a concurrently registered one.
       const caller = {
         agentName: binding.agentName,
         channelId,

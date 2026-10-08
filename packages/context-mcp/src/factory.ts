@@ -33,6 +33,19 @@ export const CONTEXT_CONTAINER_BIN = `${CONTEXT_CONTAINER_BIN_DIR}/bin.js`
 export const CONTEXT_CONTAINER_SOCK = '/zooid/context.sock'
 
 /**
+ * The ACP `mcpServers[].name` for a spawn. opencode registers ACP MCP servers
+ * in a directory-scoped registry keyed by this name (`mcp.add({directory,
+ * name, config})`) and exposes their tools as `sanitize(name)_sanitize(tool)`.
+ * Two concurrent sessions of the same agent must not share a name, or the
+ * later registration takes over the first and the first session's tool calls
+ * are served by the other session's process ([[ZOD092]]). The spawn id is
+ * unique per ACP session, so the name is too.
+ */
+export function contextServerName(spawnId: string): string {
+  return `zooid-context-${spawnId}`
+}
+
+/**
  * The two bind-mounts a containerized, context-enabled agent needs. The bin dir
  * is read-only (self-contained bundle); the socket is read-write (the MCP
  * subprocess connect()s to it). Host sources default to the resolved package
@@ -63,14 +76,14 @@ export function buildContextServerSpec(opts: {
 }): ZooidContextServerSpec {
   if (opts.containerize) {
     return {
-      name: 'zooid-context',
+      name: contextServerName(opts.spawnId),
       command: 'node',
       args: [CONTEXT_CONTAINER_BIN, '--spawn-id', opts.spawnId],
       env: [{ name: 'ZOOID_DAEMON_SOCK', value: CONTEXT_CONTAINER_SOCK }],
     }
   }
   return {
-    name: 'zooid-context',
+    name: contextServerName(opts.spawnId),
     command: process.execPath,
     args: [opts.binPath ?? getDefaultBin(), '--spawn-id', opts.spawnId],
     env: [{ name: 'ZOOID_DAEMON_SOCK', value: opts.sockPath }],

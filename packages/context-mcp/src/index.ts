@@ -5,6 +5,7 @@ export { agentSocketPath, SUN_PATH_MAX } from './socket-paths.js'
 export { buildContextMcpServer } from './mcp-server.js'
 export {
   buildContextServerSpec,
+  contextServerName,
   contextContainerMounts,
   CONTEXT_CONTAINER_BIN,
   CONTEXT_CONTAINER_BIN_DIR,

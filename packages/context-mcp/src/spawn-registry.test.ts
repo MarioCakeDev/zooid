@@ -13,7 +13,7 @@ const fakeProvider: TransportContextProvider = {
 }
 
 describe('SpawnRegistry', () => {
-  it('register() returns a unique spawn-id', () => {
+  it('register() reuses the binding and spawn-id for an existing agent/session key', () => {
     const r = new SpawnRegistry()
     const a = r.register({
       agentName: 'architect',
@@ -25,8 +25,45 @@ describe('SpawnRegistry', () => {
       threadRef: { channelId: '!room:hs', threadId: '$root' },
       provider: fakeProvider,
     })
+    expect(b).toBe(a)
+    expect(a).toMatch(/^[a-f0-9-]{36}$/)
+  })
+
+  it('register() refreshes the reused binding from the latest input', () => {
+    const r = new SpawnRegistry()
+    const a = r.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!room:hs', threadId: '$root' },
+      provider: fakeProvider,
+    })
+    const updated: TransportContextProvider = { ...fakeProvider, sendMessage: async () => ({ event_id: '$updated' }) }
+    const b = r.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!room:hs', threadId: '$root' },
+      sessionKey: '$root',
+      provider: updated,
+    })
+    expect(b).toBe(a)
+    expect(r.get(a)?.provider).toBe(updated)
+  })
+
+  it('register() mints distinct spawn-ids for distinct session keys', () => {
+    const r = new SpawnRegistry()
+    const a = r.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!room:hs', threadId: '$root' },
+      sessionKey: '$t1',
+      provider: fakeProvider,
+    })
+    const b = r.register({
+      agentName: 'architect',
+      threadRef: { channelId: '!room:hs', threadId: '$root' },
+      sessionKey: '$t2',
+      provider: fakeProvider,
+    })
     expect(a).not.toEqual(b)
     expect(a).toMatch(/^[a-f0-9-]{36}$/)
+    expect(b).toMatch(/^[a-f0-9-]{36}$/)
   })
 
   it('get() returns the binding stored under the spawn-id', () => {
