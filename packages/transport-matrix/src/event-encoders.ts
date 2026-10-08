@@ -171,6 +171,22 @@ function codeBlockHtml(text: string, language?: string): string {
   return `<pre><code${cls}>${escapeHtml(text)}</code></pre>`
 }
 
+/**
+ * A preformatted block whose line breaks are explicit `<br>`s rather than
+ * literal newlines. Used for a multi-line script (Code Mode) because some
+ * clients flatten the HTML (or render only the plain body) and collapse literal
+ * whitespace, squashing the whole script onto one line; an explicit `<br>`
+ * survives any renderer that honours it, and renderers that already preserve
+ * `<pre>` whitespace simply break on the `<br>` (there is no stray `\n` left to
+ * double it).
+ */
+function codeBlockHtmlLines(text: string): string {
+  return `<pre><code>${text
+    .split('\n')
+    .map((l) => escapeHtml(l))
+    .join('<br>')}</code></pre>`
+}
+
 /** Read one string field from a raw (unknown-shaped) tool input object. */
 function inputString(input: unknown, key: string): string | undefined {
   if (!input || typeof input !== 'object') return undefined
@@ -1108,11 +1124,25 @@ const GROUP_CHAR_MAX = 8000
  */
 function toolSectionLines(entry: TurnToolEntry): GroupLine[] {
   const lines: GroupLine[] = [{ kind: 'text', text: toolEntryLine(entry) }]
-  if (entry.params) lines.push({ kind: 'text', text: entry.params })
+  // Code Mode's script renders as a fenced block. The plain body is what
+  // markdown-rendering clients show (Element X flattens the HTML), and there a
+  // bare newline is a soft break — the whole script would collapse onto one
+  // line. A fence makes it a real code block that keeps its line structure; the
+  // HTML body uses `<pre>` instead (see `toolSectionHtml`).
+  const code = toolCodeText(entry)
+  if (code !== undefined) {
+    lines.push({ kind: 'text', text: '```' })
+    for (const l of code.split('\n')) lines.push({ kind: 'text', text: l })
+    lines.push({ kind: 'text', text: '```' })
+  } else if (entry.params) {
+    lines.push({ kind: 'text', text: entry.params })
+  }
   if (entry.diff) {
     for (const l of entry.diff.split('\n')) lines.push({ kind: 'text', text: l })
   }
-  if ((entry.params || entry.diff) && entry.output) lines.push({ kind: 'divider' })
+  if ((code !== undefined || entry.params || entry.diff) && entry.output) {
+    lines.push({ kind: 'divider' })
+  }
   if (entry.output) {
     for (const l of entry.output.split('\n')) lines.push({ kind: 'text', text: l })
   }
@@ -1242,8 +1272,12 @@ function toolSectionHtml(entry: TurnToolEntry): string {
   const blocks: string[] = []
   // A change renders as a language-diff code block: Element Web/Desktop colour
   // the -/+ lines, Element X shows it monospaced. Either way it reads as a diff.
-  // The params line comes first and holds only what the diff omits.
-  if (entry.params) blocks.push(codeBlockHtml(entry.params))
+  // The params line comes first and holds only what the diff omits. A Code Mode
+  // script uses explicit `<br>` breaks so a flattening renderer still shows its
+  // lines (see `codeBlockHtmlLines`).
+  const code = toolCodeText(entry)
+  if (code !== undefined) blocks.push(codeBlockHtmlLines(code))
+  else if (entry.params) blocks.push(codeBlockHtml(entry.params))
   if (entry.diff) blocks.push(codeBlockHtml(entry.diff, 'language-diff'))
   if (entry.output) blocks.push(codeBlockHtml(entry.output))
   if (blocks.length === 0) return summary

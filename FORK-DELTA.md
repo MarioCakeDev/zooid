@@ -151,7 +151,12 @@ Modules:
   (`TOOL_ICON_BY_NAME`) and the **whole** script rendered verbatim as its own
   multi-line block, instead of the collapsed, 200-char-clamped `code=…` param
   (`toolCodeText` / `CODE_TOOL_HEADS`, wired through `transport.ts`'s
-  `entryParams`). Upstream treats every tool param as a compact one-liner.
+  `entryParams`). Upstream treats every tool param as a compact one-liner. The
+  script is also rendered so its line breaks survive: it is **fenced** in the
+  plain `body` (markdown clients — e.g. Element X — soft-wrap a bare newline,
+  squashing the script onto one line) and its HTML `<pre><code>` uses explicit
+  `<br>`s (`codeBlockHtmlLines`), so a client that flattens the HTML still keeps
+  the line structure.
 
 ## 6. Reconciliation note — our @mention handoff was removed
 

@@ -700,6 +700,27 @@ describe('turnGroupBody', () => {
     ])
   })
 
+  it('fences a Code Mode script so a markdown client keeps its line breaks', () => {
+    const body = turnGroupBody('dev', [
+      entry({
+        title: 'execute',
+        status: 'completed',
+        rawInput: { code: 'const a = 1\nreturn a' },
+        output: 'done',
+      }),
+    ])
+    expect(body.split('\n')).toEqual([
+      '🔧 dev: 1 tool — 📜 execute',
+      '✓ 📜 execute',
+      '```',
+      'const a = 1',
+      'return a',
+      '```',
+      '────────────────',
+      'done',
+    ])
+  })
+
   it('separates consecutive tool sections with a blank line and a rule', () => {
     const body = turnGroupBody('dev', [
       entry({ toolCallId: 'tc-1', title: 'bash', status: 'completed', output: 'clean' }),
@@ -869,6 +890,17 @@ describe('turnGroupHtml', () => {
         '<br>✓ 📖 Read file</details>',
     )
     expect(html).not.toContain('<hr>')
+  })
+
+  it('breaks a Code Mode script with explicit <br>s so a flattening client keeps its lines', () => {
+    const html = turnGroupHtml('dev', [
+      entry({
+        title: 'execute',
+        status: 'completed',
+        rawInput: { code: 'const a = 1\nreturn a' },
+      }),
+    ])
+    expect(html).toContain('<pre><code>const a = 1<br>return a</code></pre>')
   })
 
   it('escapes HTML-significant text in the tool line, params and output', () => {
