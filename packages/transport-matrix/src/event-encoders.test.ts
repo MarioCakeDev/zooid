@@ -20,6 +20,7 @@ import {
   toolParamsText,
   toolOutputText,
   toolSubjectParamKeys,
+  toolCodeText,
   turnGroupBody,
   turnGroupHtml,
   turnGroupSummary,
@@ -519,6 +520,34 @@ describe('toolParamsText', () => {
     )
     // Without the omit set nothing is filtered.
     expect(toolParamsText(raw)).toContain('oldString=a')
+  })
+})
+
+describe('toolCodeText', () => {
+  const entry = (over: Partial<TurnToolEntry>): TurnToolEntry => ({
+    toolCallId: 'tc-1',
+    title: 'execute',
+    ...over,
+  })
+
+  it('returns the whole script of a Code-Mode call, newlines preserved', () => {
+    expect(toolCodeText(entry({ rawInput: { code: 'const a = 1\nreturn a' } }))).toBe(
+      'const a = 1\nreturn a',
+    )
+    // `code_mode_execute` → head `code`.
+    expect(toolCodeText(entry({ title: 'code_mode_execute', rawInput: { code: 'x' } }))).toBe('x')
+  })
+
+  it('does not clamp a long script', () => {
+    const code = 'x'.repeat(5000)
+    expect(toolCodeText(entry({ rawInput: { code } }))).toBe(code)
+  })
+
+  it('is undefined for other tools or a missing/non-string code', () => {
+    expect(toolCodeText(entry({ title: 'bash', rawInput: { command: 'ls' } }))).toBeUndefined()
+    expect(toolCodeText(entry({ rawInput: { other: 1 } }))).toBeUndefined()
+    expect(toolCodeText(entry({ rawInput: { code: 42 } }))).toBeUndefined()
+    expect(toolCodeText(entry({}))).toBeUndefined()
   })
 })
 
@@ -1064,6 +1093,9 @@ describe('toolEntryLine', () => {
     expect(toolEntryLine(entry({ title: 'bash' }))).toBe('• >_ bash @local')
     expect(toolEntryLine(entry({ title: 'bash', machine: 'hass' }))).toBe('• >_ bash @hass')
     expect(toolEntryLine(entry({ title: 'Verify' }))).toBe('• 🛠 Verify')
+    expect(toolEntryLine(entry({ title: 'execute', rawInput: { code: 'x' } }))).toBe(
+      '• 📜 execute',
+    )
   })
 
   it('puts the executed command after the host for a local shell call', () => {
@@ -1541,6 +1573,8 @@ describe('toolIcon', () => {
     expect(toolIcon('truenas_create_snapshot')).toBe('💾')
     expect(toolIcon('pocketid_user_list')).toBe('🔑')
     expect(toolIcon('ha_GetDateTime')).toBe('🏠')
+    expect(toolIcon('execute')).toBe('📜')
+    expect(toolIcon('code_mode_execute')).toBe('📜')
   })
 
   it('falls back to the prefix rule for descriptive titles', () => {

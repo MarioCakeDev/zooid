@@ -373,6 +373,11 @@ const TOOL_ICON_BY_NAME: Record<string, string> = {
   ha: '🏠',
   hass: '🏠',
   homeassistant: '🏠',
+  // Code Mode (`execute`, listed first in the tagline) and its `code*` aliases:
+  // a script glyph, because the call runs a script rather than reading, writing
+  // or fetching (see `CODE_TOOL_HEADS`).
+  execute: '📜',
+  code: '📜',
 }
 
 /** Prefix fallback for descriptive titles (`Reading auth.ts`, `Editing notes`). */
@@ -1017,6 +1022,28 @@ export function toolParamsText(
         .filter(([k]) => !omit?.has(k))
         .map(([k, v]) => `${k}=${compactValue(v)}`)
   return parts.length > 0 ? clamp(parts.join(', '), TOOL_PARAM_MAX) : undefined
+}
+
+/**
+ * Code-Mode tool heads whose raw `code` is rendered verbatim. The Code Mode
+ * `execute` tool carries its whole script as a single `code` argument; collapsing
+ * and clamping it like an ordinary param (`code=…`, capped at `TOOL_PARAM_MAX`)
+ * hides the one thing the call is about, so a dedicated block shows it in full
+ * instead. `code` also matches names like `code_mode_execute` — `toolHead`
+ * splits on `_`.
+ */
+const CODE_TOOL_HEADS: ReadonlySet<string> = new Set(['execute', 'code'])
+
+/**
+ * The verbatim `code` of a Code-Mode tool call, or `undefined` for any other
+ * tool (and for a code tool whose input carries no string `code`). Unlike
+ * `compactValue`, whitespace and newlines are preserved — the code renders as
+ * its own multi-line block, never collapsed and never clamped.
+ */
+export function toolCodeText(entry: TurnToolEntry): string | undefined {
+  if (!CODE_TOOL_HEADS.has(toolHead(entry.title))) return undefined
+  const raw = rawObject(entry.rawInput)
+  return raw ? nonEmptyString(raw.code) : undefined
 }
 
 /** Extract display text from one ACP `ToolCallContent` entry. */
