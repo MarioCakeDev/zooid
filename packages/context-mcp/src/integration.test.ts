@@ -228,13 +228,13 @@ describe.skipIf(!existsSync(BIN))('zooid-context MCP server (out-of-process)', (
   })
 
   it('two real MCP spawns against one daemon socket keep their own thread on task calls', async () => {
-    // Reproduces the 06:18 concurrency seam with real processes: two MCP
-    // servers spawned against one daemon socket, each its own spawn binding.
-    // Each spawn's task call must be attributed to its own binding's thread.
-    // What keeps the two servers distinct inside one opencode process is the
-    // per-spawn name (`contextServerName`): opencode registers ACP MCP servers
-    // in a directory-scoped registry keyed by name, so a shared name would let
-    // the later registration serve the earlier session's calls.
+    // Two real MCP servers against one daemon socket, each its own spawn
+    // binding; each spawn's task call must be attributed to its own binding's
+    // thread. NOTE: each server here is started with an explicit `--spawn-id`
+    // and driven directly, so this does NOT exercise `contextServerName` or
+    // opencode's name-keyed MCP registry — it passes on the base commit too.
+    // The registry guard for the 06:18 seam (distinct per-spawn names) lives in
+    // `factory.test.ts`.
     const registry = new SpawnRegistry()
     const spawnA = registry.register({
       agentName: 'architect',

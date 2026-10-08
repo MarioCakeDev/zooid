@@ -1164,6 +1164,13 @@ describe('family subjects', () => {
     )
     expect(toolEntryLine(entry({ title: 'ha_GetDateTime' }))).toBe('• 🏠 GetDateTime')
     expect(toolEntryLine(entry({ title: 'zooid-context_zooid_get_rooms' }))).toBe('• 💬 get_rooms')
+    expect(
+      toolEntryLine(
+        entry({
+          title: 'zooid-context-11111111-1111-4111-8111-111111111111_zooid_get_rooms',
+        }),
+      ),
+    ).toBe('• 💬 get_rooms')
     expect(toolEntryLine(entry({ title: 'task' }))).toBe('• 🤖 task')
     expect(toolEntryLine(entry({ title: 'grep' }))).toBe('• 🔍 grep')
   })
@@ -1348,6 +1355,17 @@ describe('family subjects', () => {
         entry({ title: 'zooid-context_zooid_get_thread_history', rawInput: { thread_id: '$e' } }),
       ),
     ).toBe('• 💬 get_thread_history $e')
+  })
+
+  // The ACP server name is unique per spawn (`zooid-context-<spawnId>`, a
+  // UUID), so the title is `zooid-context-<uuid>_zooid_<tool>`, not the fixed
+  // `zooid-context_zooid_<tool>` form above.
+  it('strips the per-spawn zooid-context server name', () => {
+    const title = 'zooid-context-11111111-1111-4111-8111-111111111111_zooid_send_message'
+    expect(toolEntryLine(entry({ title, rawInput: { room: '!r:mariocake.de', text: 'hi' } }))).toBe(
+      '• 💬 send_message !r:mariocake.de',
+    )
+    expect(toolIcon(title)).toBe('💬')
   })
 
   it('names the ssh path, signal+pid or session when no command is present', () => {
