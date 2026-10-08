@@ -24,6 +24,19 @@ describe('buildContextServerSpec', () => {
     expect(spec.env).toEqual([{ name: 'ZOOID_DAEMON_SOCK', value: '/run/zooid/abc.sock' }])
   })
 
+  it('threads the turn thread into the spec so the daemon can pin the caller', () => {
+    const spec = buildContextServerSpec({
+      spawnId: 'sid',
+      sockPath: '/tmp/x.sock',
+      binPath: '/host/bin.js',
+      threadRef: { channelId: '!r:hs', threadId: '$thread', sessionKey: '$thread|$call' },
+    })
+    expect(spec.args).toContain('--thread-root')
+    expect(spec.args[spec.args.indexOf('--thread-root') + 1]).toBe('$thread')
+    expect(spec.args[spec.args.indexOf('--channel-id') + 1]).toBe('!r:hs')
+    expect(spec.args[spec.args.indexOf('--session-key') + 1]).toBe('$thread|$call')
+  })
+
   it('resolves the default bin via Node module resolution to a real path on disk', () => {
     // Pinned regression: tsup bundles this file into the CLI chunk, so the
     // earlier `import.meta.url`-based default broke at runtime (it resolved

@@ -13,6 +13,10 @@ import type {
 
 const spawnIdIdx = process.argv.indexOf('--spawn-id')
 const spawnId = spawnIdIdx >= 0 ? process.argv[spawnIdIdx + 1] : undefined
+const argValue = (name: string): string | undefined => {
+  const i = process.argv.indexOf(name)
+  return i >= 0 ? process.argv[i + 1] : undefined
+}
 const sockPath = process.env.ZOOID_DAEMON_SOCK
 if (!spawnId || !sockPath) {
   process.stderr.write('zooid-context-mcp: --spawn-id and ZOOID_DAEMON_SOCK are required\n')
@@ -21,6 +25,18 @@ if (!spawnId || !sockPath) {
 process.stderr.write(
   `zooid-context-mcp: starting (pid=${process.pid} spawnId=${spawnId} sock=${sockPath})\n`,
 )
+
+// The turn's own thread, fixed at spawn. Echoed on every task call so the
+// daemon pins a handoff/return to this session even if the spawn binding has
+// been taken over by another concurrent session of the same agent ([[ZOD092]]).
+const threadRoot = argValue('--thread-root')
+const caller = threadRoot
+  ? {
+      channelId: argValue('--channel-id') ?? threadRoot,
+      threadRoot,
+      sessionKey: argValue('--session-key'),
+    }
+  : undefined
 
 const remoteProvider: TransportContextProvider = {
   getRoomHistory: (_channelId, opts) =>
@@ -71,24 +87,28 @@ const remoteTasks: TaskActions = {
   startTasks: (_caller, input) =>
     callDaemon(sockPath, {
       spawnId,
+      caller,
       method: 'startTasks',
       params: input as unknown as Record<string, unknown>,
     }) as Promise<StartTasksOutput>,
   completeTask: (_caller, input) =>
     callDaemon(sockPath, {
       spawnId,
+      caller,
       method: 'completeTask',
       params: input as unknown as Record<string, unknown>,
     }) as Promise<CompleteTaskOutput>,
   describeRole: () =>
     callDaemon(sockPath, {
       spawnId,
+      caller,
       method: 'describeRole',
       params: {},
     }) as Promise<TaskRole>,
   handoff: (_caller, input) =>
     callDaemon(sockPath, {
       spawnId,
+      caller,
       method: 'handoff',
       params: input as unknown as Record<string, unknown>,
     }) as Promise<HandoffOutput>,

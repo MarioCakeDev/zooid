@@ -6,6 +6,15 @@ export interface ReleasedReturn {
   roomId: string
   threadRoot: string
   targets: AgentBinding[]
+  /**
+   * The caller session that opened the call, captured when the call was
+   * recorded. The return is delivered here rather than to whatever session
+   * `threadStates` resolves at release time — the caller may have entered a
+   * new handoff arc in the same thread meanwhile, and reconstructing from that
+   * ambient state would wake the wrong session ([[ZOD071]]). Absent for a hold
+   * with no recorded call, which falls back to the thread-level key.
+   */
+  callerSessionKey?: string
   /** Final non-empty prose of the resolving turn; '' when that turn produced none. */
   text: string
 }
@@ -22,6 +31,8 @@ interface PendingReturn {
   roomId: string
   threadRoot: string
   targets: Map<string, AgentBinding>
+  /** Caller session key captured at `open`; undefined for a bare hold. */
+  callerSessionKey?: string
   text: string
   /** The callee's current turn @mentioned an agent: a call, not a return. */
   delegated: boolean
@@ -64,11 +75,11 @@ export class PendingReturns {
     threadRoot: string,
     roomId: string,
     caller: AgentBinding,
-    o: { remote?: boolean } = {},
+    o: { remote?: boolean; callerSessionKey?: string } = {},
   ): void {
     const k = key(callee, threadRoot)
     this.drop(k)
-    this.pending.set(k, fresh(callee, threadRoot, roomId, [caller], o.remote === true))
+    this.pending.set(k, fresh(callee, threadRoot, roomId, [caller], o.remote === true, o.callerSessionKey))
   }
 
   /** A callee message routed as a return: held, never delivered on its own. */
@@ -182,6 +193,7 @@ export class PendingReturns {
       roomId: p.roomId,
       threadRoot: p.threadRoot,
       targets: [...p.targets.values()],
+      callerSessionKey: p.callerSessionKey,
       text: p.text,
     })
   }
@@ -202,12 +214,14 @@ function fresh(
   roomId: string,
   targets: AgentBinding[],
   remote: boolean,
+  callerSessionKey?: string,
 ): PendingReturn {
   return {
     callee,
     roomId,
     threadRoot,
     targets: new Map(targets.map((t) => [t.name, t])),
+    callerSessionKey,
     text: '',
     delegated: false,
     waiting: false,

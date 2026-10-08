@@ -102,6 +102,29 @@ describe('buildAcpRegistry — context provider in a container runtime', () => {
     expect(spec.env).toContainEqual({ name: 'ZOOID_DAEMON_SOCK', value: CONTEXT_CONTAINER_SOCK })
   })
 
+  // Regression: each session's context spec carries its own turn thread, so two
+  // concurrent same-agent sessions cannot share one daemon caller binding.
+  it("stamps each session's own thread onto its context spec", async () => {
+    const spawnIds = ['spawn-a', 'spawn-b']
+    const spawnOpts = {
+      ...opts,
+      contextSpawnRegistry: {
+        register: vi.fn(() => spawnIds.shift()!),
+      } as never,
+    }
+    const registry = buildAcpRegistry(podmanCfg(), spawnOpts)
+    const factory = registry.opts.contextSpawns!.architect!
+
+    const a = await factory('$threadA', '!r:hs', '$threadA')
+    const b = await factory('$threadB', '!r:hs', '$threadB')
+
+    const threadRootOf = (args: string[]) => args[args.indexOf('--thread-root') + 1]
+    expect(threadRootOf(a.args)).toBe('$threadA')
+    expect(threadRootOf(b.args)).toBe('$threadB')
+    expect(a.args).toContain('spawn-a')
+    expect(b.args).toContain('spawn-b')
+  })
+
   it('leaves the local runtime host-shaped (no context mounts, host command)', async () => {
     // matrixCfg is runtime: local. No container mounts; factory stays host-shaped.
     const registry = buildAcpRegistry(matrixCfg, opts)

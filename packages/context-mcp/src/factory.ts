@@ -54,6 +54,12 @@ export function buildContextServerSpec(opts: {
   sockPath: string
   binPath?: string
   /**
+   * The turn's thread, echoed to the daemon on every task call so a handoff is
+   * pinned to the session that started the turn even if its spawn binding
+   * drifts ([[ZOD092]]). Omitted only by callers that have no thread context.
+   */
+  threadRef?: { channelId: string; threadId: string; sessionKey?: string }
+  /**
    * When set, emit a spec that resolves INSIDE the agent container: bare `node`
    * (image PATH), the bind-mounted bin path, and the bind-mounted socket path.
    * The host `sockPath`/`binPath` still feed `contextContainerMounts`, but do
@@ -61,18 +67,27 @@ export function buildContextServerSpec(opts: {
    */
   containerize?: boolean
 }): ZooidContextServerSpec {
+  const threadArgs = opts.threadRef
+    ? [
+        '--thread-root',
+        opts.threadRef.threadId,
+        '--channel-id',
+        opts.threadRef.channelId,
+        ...(opts.threadRef.sessionKey ? ['--session-key', opts.threadRef.sessionKey] : []),
+      ]
+    : []
   if (opts.containerize) {
     return {
       name: 'zooid-context',
       command: 'node',
-      args: [CONTEXT_CONTAINER_BIN, '--spawn-id', opts.spawnId],
+      args: [CONTEXT_CONTAINER_BIN, '--spawn-id', opts.spawnId, ...threadArgs],
       env: [{ name: 'ZOOID_DAEMON_SOCK', value: CONTEXT_CONTAINER_SOCK }],
     }
   }
   return {
     name: 'zooid-context',
     command: process.execPath,
-    args: [opts.binPath ?? getDefaultBin(), '--spawn-id', opts.spawnId],
+    args: [opts.binPath ?? getDefaultBin(), '--spawn-id', opts.spawnId, ...threadArgs],
     env: [{ name: 'ZOOID_DAEMON_SOCK', value: opts.sockPath }],
   }
 }

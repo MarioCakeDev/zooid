@@ -2776,6 +2776,71 @@ describe('directional agent-to-agent handoffs', () => {
   })
 })
 
+describe('handoff return session affinity ([[ZOD071]])', () => {
+  const bindings = [
+    { name: 'parent', userId: '@parent:example.com', rooms: [{ alias: '!r:example.com' }], trigger: 'mention' as const },
+    { name: 'sub', userId: '@sub:example.com', rooms: [{ alias: '!r:example.com' }], trigger: 'mention' as const },
+    { name: 'third', userId: '@third:example.com', rooms: [{ alias: '!r:example.com' }], trigger: 'mention' as const },
+  ]
+
+  function make() {
+    const { reg } = fakeRegistry()
+    reg.prompt.mockImplementation(async () => ({ stopReason: 'end_turn' as const }))
+    const transport = createMatrixTransport({
+      agents: reg as never,
+      approvals: fakeApprovals() as never,
+      client: fakeClient() as never,
+      bindings,
+      hsToken: 'hs-secret',
+      botUserId: '@zooid:example.com',
+      drainQuietMs: 0,
+    })
+    return { transport, agents: reg }
+  }
+
+  function post(
+    transport: ReturnType<typeof make>['transport'],
+    o: { id: string; sender: string; root?: string; mentions?: string[] },
+  ) {
+    const content: Record<string, unknown> = { msgtype: 'm.text', body: 'x' }
+    if (o.mentions) content['m.mentions'] = { user_ids: o.mentions }
+    if (o.root) content['m.relates_to'] = { rel_type: 'm.thread', event_id: o.root }
+    if (bindings.some((b) => b.userId === o.sender) && o.mentions?.length === 1)
+      content['dev.zooid.handoff'] = { version: 1, call_id: o.id, caller: o.sender, callee: o.mentions[0] }
+    return postTxn(transport.app, {
+      events: [
+        { type: 'm.room.message', event_id: o.id, room_id: '!r:example.com', sender: o.sender, content },
+      ],
+    })
+  }
+
+  // Regression: a caller that is itself pulled into the thread *after* it made a
+  // handoff gets a new arc. The held return must still wake the session that
+  // opened the call, not the newer arc that ambient thread state points at.
+  it('delivers a held return to the caller session that opened the call, not a later arc', async () => {
+    const { transport, agents } = make()
+
+    await post(transport, { id: '$root', sender: '@alice:example.com', mentions: ['@parent:example.com'] })
+    await settleTurn()
+
+    // parent → sub: opens sub's pending return, pinned to parent's session $root.
+    await post(transport, { id: '$c1', sender: '@parent:example.com', root: '$root', mentions: ['@sub:example.com'] })
+    await settleTurn()
+
+    // third → parent: mints a new arc ($root|$c2) for parent in the same thread.
+    await post(transport, { id: '$c2', sender: '@third:example.com', root: '$root', mentions: ['@parent:example.com'] })
+    await settleTurn()
+    agents.ensureSession.mockClear()
+
+    // sub's bare reply + turn end releases the return to parent.
+    await post(transport, { id: '$s1', sender: '@sub:example.com', root: '$root' })
+    await postTurnEnd(transport.app, { agent: 'sub', root: '$root' })
+    await settleTurn()
+
+    expect(agents.ensureSession).toHaveBeenCalledWith('parent', '$root', '!r:example.com', '$root')
+  })
+})
+
 describe('per-handoff session isolation ([[ZOD071]])', () => {
   const mkBinding = (name: string) => ({
     name,

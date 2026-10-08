@@ -1218,7 +1218,11 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
       void enqueueTurn(target, {
         roomId: r.roomId,
         threadRoot: r.threadRoot,
-        sessionKey: sessionKeyFor(target.userId, r.threadRoot, threadStates.get(r.threadRoot)),
+        // Pinned when the call was recorded: a caller that entered a new handoff
+        // arc in this thread meanwhile must not hijack its own earlier return.
+        sessionKey:
+          r.callerSessionKey ??
+          sessionKeyFor(target.userId, r.threadRoot, threadStates.get(r.threadRoot)),
         promptText: renderHandoffReturn({ callee: agentName(r.callee), text: r.text }),
       })
     }
@@ -2717,6 +2721,11 @@ agents.onEvent = async (name, event: AgentEvent) => {
             if (callerBinding?.trigger === 'mention')
               returns.open(callEdge.callee, promotedRoot, evt.room_id, callerBinding, {
                 remote: !isLocal(callEdge.callee),
+                callerSessionKey: sessionKeyFor(
+                  callerBinding.userId,
+                  promotedRoot,
+                  threadStates.get(promotedRoot),
+                ),
               })
             returns.markDelegated(callEdge.caller, promotedRoot)
           }
