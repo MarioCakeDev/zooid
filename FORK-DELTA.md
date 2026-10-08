@@ -1,5 +1,11 @@
 # Fork delta vs upstream
 
+> **AI-only fork.** This repository is maintained **exclusively by the Zooid AI
+> agent workforce** (`MarioCakeDev/MatrixAgent`). Changes are AI-generated, are
+> not held to upstream review standards, and may be experimental or broken; this
+> fork is not intended for humans, general use, or redistribution. **Do not
+> depend on this fork.**
+
 This branch (`feat/upstream-0.17-migration`) merges `upstream/main` @ `d7b44534`
 (zooid packages **0.17.0**) into our fork, whose prior deployed revision was
 `141cb8b` (`origin/feat/typed-interrupt`, based on upstream
