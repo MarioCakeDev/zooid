@@ -3,9 +3,14 @@ import { EventEmitter } from 'node:events'
 import { Readable, Writable } from 'node:stream'
 
 const spawnMock = vi.fn()
+const mkdirMock = vi.fn()
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
+}))
+
+vi.mock('node:fs', () => ({
+  mkdirSync: mkdirMock,
 }))
 
 const { LocalAcpRuntime } = await import('./local-acp.js')
@@ -21,6 +26,7 @@ class FakeChild extends EventEmitter {
 describe('LocalAcpRuntime', () => {
   beforeEach(() => {
     spawnMock.mockReset()
+    mkdirMock.mockReset()
     spawnMock.mockReturnValue(new FakeChild())
   })
   afterEach(() => {
@@ -41,6 +47,23 @@ describe('LocalAcpRuntime', () => {
     const rt = new LocalAcpRuntime()
     rt.spawn({ command: 'x', args: [], cwd: '/workspace' })
     expect(spawnMock.mock.calls[0][2].cwd).toBe('/workspace')
+  })
+
+  it('creates a missing cwd before spawning', () => {
+    const order: string[] = []
+    mkdirMock.mockImplementation(() => order.push('mkdir'))
+    spawnMock.mockImplementation(() => {
+      order.push('spawn')
+      return new FakeChild()
+    })
+    new LocalAcpRuntime().spawn({ command: 'x', args: [], cwd: '/work/agent' })
+    expect(mkdirMock).toHaveBeenCalledWith('/work/agent', { recursive: true })
+    expect(order).toEqual(['mkdir', 'spawn'])
+  })
+
+  it('does not mkdir when no cwd is given', () => {
+    new LocalAcpRuntime().spawn({ command: 'x', args: [] })
+    expect(mkdirMock).not.toHaveBeenCalled()
   })
 
   it('merges process.env first, spec.env wins', () => {

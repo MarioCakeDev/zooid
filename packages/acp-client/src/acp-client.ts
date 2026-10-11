@@ -148,6 +148,7 @@ export class AcpClient {
     let stdout: Readable
     let stdin: Writable
     let stderr: Readable | null = null
+    let spawnFailed: Promise<never> | null = null
     if (this.options.runtime) {
       const child = this.options.runtime.spawn({
         command,
@@ -158,6 +159,16 @@ export class AcpClient {
         mounts: this.options.agent.mounts,
       })
       this.runtimeChild = child
+      // Without a listener a failed spawn (e.g. ENOENT on a missing cwd) is an
+      // unhandled 'error' event that takes the whole daemon down.
+      spawnFailed = new Promise<never>((_, reject) => {
+        child.once('error', (err) => {
+          console.warn(`[acp-client:${this.options.agent.id}] runtime spawn failed: ${err.message}`)
+          reject(err)
+        })
+      })
+      spawnFailed.catch(() => {})
+      child.on('error', () => {})
       if (!child.stdout || !child.stdin) {
         throw new Error('AcpClient: runtime returned a child without piped stdio')
       }
@@ -203,11 +214,12 @@ export class AcpClient {
       cancel: (p) => agent.notify(methods.agent.session.cancel, p),
     }
 
-    const init = await this.connection.initialize({
+    const initializing = this.connection.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: this.clientCapabilities(),
       clientInfo: { name: 'zooid', title: 'Zooid', version: '0.0.1' },
     })
+    const init = await (spawnFailed ? Promise.race([initializing, spawnFailed]) : initializing)
     this.agentCapabilities = init.agentCapabilities ?? {}
     this.initialized = true
   }
