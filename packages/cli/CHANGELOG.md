@@ -1,5 +1,20 @@
 # zooid
 
+## 0.17.2
+
+### Patch Changes
+
+- Room creation works on Tuwunel 1.9.3 (room v12), which rejects the creator in `power_level_content_override.users`. `createRoom` retries once without the creator on that rejection; older servers keep it listed. `zooid dev` now pins the Tuwunel image to v1.9.3 instead of `:latest`.
+- Updated dependencies
+- Updated dependencies [8d21634]
+  - @zooid/transport-matrix@0.17.2
+  - @zooid/core@0.17.2
+  - @zooid/acp-client@0.17.2
+  - @zooid/context-mcp@0.17.2
+  - @zooid/runtime-docker@0.17.2
+  - @zooid/runtime-local@0.17.2
+  - @zooid/transport-http@0.17.2
+
 ## 0.17.1
 
 ### Patch Changes

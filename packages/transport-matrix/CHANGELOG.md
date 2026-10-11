@@ -1,5 +1,14 @@
 # @zooid/transport-matrix
 
+## 0.17.2
+
+### Patch Changes
+
+- Room creation works on Tuwunel 1.9.3 (room v12), which rejects the creator in `power_level_content_override.users`. `createRoom` retries once without the creator on that rejection; older servers keep it listed. `zooid dev` now pins the Tuwunel image to v1.9.3 instead of `:latest`.
+- 8d21634: `zooid_get_recent_threads` fills each page even when thread replies crowd the timeline. Tuwunel ignores `not_rel_types` on `/messages`, so replies used to use up the page and leave it thin or empty. The provider now fetches in batches of at least 50 events, up to 5 rounds, and re-requests the last batch exactly so no entry is skipped.
+  - @zooid/core@0.17.2
+  - @zooid/acp-client@0.17.2
+
 ## 0.17.1
 
 ### Patch Changes
