@@ -192,22 +192,6 @@ function codeBlockHtml(text: string, language?: string): string {
   return `<pre><code${cls}>${escapeHtml(text)}</code></pre>`
 }
 
-/**
- * A preformatted block whose line breaks are explicit `<br>`s rather than
- * literal newlines. Used for a multi-line script (Code Mode) because some
- * clients flatten the HTML (or render only the plain body) and collapse literal
- * whitespace, squashing the whole script onto one line; an explicit `<br>`
- * survives any renderer that honours it, and renderers that already preserve
- * `<pre>` whitespace simply break on the `<br>` (there is no stray `\n` left to
- * double it).
- */
-function codeBlockHtmlLines(text: string): string {
-  return `<pre><code>${text
-    .split('\n')
-    .map((l) => escapeHtml(l))
-    .join('<br>')}</code></pre>`
-}
-
 /** Read one string field from a raw (unknown-shaped) tool input object. */
 function inputString(input: unknown, key: string): string | undefined {
   if (!input || typeof input !== 'object') return undefined
@@ -1294,10 +1278,13 @@ function toolSectionHtml(entry: TurnToolEntry): string {
   // A change renders as a language-diff code block: Element Web/Desktop colour
   // the -/+ lines, Element X shows it monospaced. Either way it reads as a diff.
   // The params line comes first and holds only what the diff omits. A Code Mode
-  // script uses explicit `<br>` breaks so a flattening renderer still shows its
-  // lines (see `codeBlockHtmlLines`).
+  // script reuses `codeBlockHtml` (literal `\n`, never `<br>`): line-counting and
+  // text-extraction clients need real newlines inside `<pre>` — Element
+  // Web/Desktop counts `\n` for its line numbers and highlights from
+  // `textContent`, Element X takes the `<pre>`'s `wholeText`; an explicit `<br>`
+  // contributes no character to either and collapses the script to one line.
   const code = toolCodeText(entry)
-  if (code !== undefined) blocks.push(codeBlockHtmlLines(code))
+  if (code !== undefined) blocks.push(codeBlockHtml(code))
   else if (entry.params) blocks.push(codeBlockHtml(entry.params))
   if (entry.diff) blocks.push(codeBlockHtml(entry.diff, 'language-diff'))
   if (entry.output) blocks.push(codeBlockHtml(entry.output))
