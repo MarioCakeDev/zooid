@@ -920,7 +920,7 @@ describe('turnGroupHtml', () => {
     expect(html).not.toContain('<hr>')
   })
 
-  it('breaks a Code Mode script with explicit <br>s so a flattening client keeps its lines', () => {
+  it('keeps a Code Mode script on literal newlines so line-counting clients keep its lines', () => {
     const html = turnGroupHtml('dev', [
       entry({
         title: 'execute',
@@ -928,7 +928,10 @@ describe('turnGroupHtml', () => {
         rawInput: { code: 'const a = 1\nreturn a' },
       }),
     ])
-    expect(html).toContain('<pre><code>const a = 1<br>return a</code></pre>')
+    // Literal `\n`, never `<br>`: Element Web/Desktop counts `\n` for its line
+    // numbers and highlights from `textContent`, and Element X takes the
+    // `<pre>`'s `wholeText` — a `<br>` would collapse the script to one line.
+    expect(html).toContain('<pre><code>const a = 1\nreturn a</code></pre>')
   })
 
   it('escapes HTML-significant text in the tool line, params and output', () => {
