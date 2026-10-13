@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createConnection } from 'node:net'
 import { SpawnRegistry } from './spawn-registry.js'
-import { startDaemonSocketServer, callDaemon } from './daemon-socket.js'
+import { startDaemonSocketServer, callDaemon, MAX_LINE_LENGTH } from './daemon-socket.js'
 import type { TaskActions, TransportContextProvider } from '@zooid/core'
 
 function fakeProvider(over: Partial<TransportContextProvider> = {}): TransportContextProvider {
@@ -346,6 +346,59 @@ describe('daemon-socket', () => {
         params: { room: '!elsewhere:localhost', text: 'hi' },
       }),
     ).rejects.toThrow(/not_in_room/)
+  })
+})
+
+describe('line length cap', () => {
+  async function connect(sockPath: string) {
+    const client = createConnection(sockPath)
+    client.setEncoding('utf8')
+    await new Promise<void>((resolve, reject) => {
+      client.once('connect', () => resolve())
+      client.once('error', reject)
+    })
+    return client
+  }
+
+  it('replies with an error and closes the connection when a line outgrows the cap', async () => {
+    const sockPath = join(tmpdir(), `zooid-cap-${randomUUID()}.sock`)
+    const server = await startDaemonSocketServer({
+      sockPath,
+      registry: new SpawnRegistry(),
+      agentName: 'a',
+    })
+    cleanup.push(() => server.close())
+    const client = await connect(sockPath)
+    let received = ''
+    client.on('data', (c) => (received += c))
+    const closed = new Promise<void>((resolve) => client.once('close', () => resolve()))
+    client.on('error', () => {})
+
+    // No newline anywhere: the server must give up rather than keep buffering.
+    client.write('x'.repeat(MAX_LINE_LENGTH + 1))
+
+    const outcome = await Promise.race([
+      closed.then(() => 'closed' as const),
+      new Promise<'open'>((resolve) => setTimeout(() => resolve('open'), 2000)),
+    ])
+    client.destroy()
+    expect(outcome).toBe('closed')
+    expect(JSON.parse(received.trim())).toEqual({ ok: false, error: 'request line too long' })
+  })
+
+  it('still serves a request line just under the cap', async () => {
+    const registry = new SpawnRegistry()
+    const sockPath = join(tmpdir(), `zooid-cap-${randomUUID()}.sock`)
+    const server = await startDaemonSocketServer({ sockPath, registry, agentName: 'a' })
+    cleanup.push(() => server.close())
+
+    await expect(
+      callDaemon(sockPath, {
+        spawnId: 'nope',
+        method: 'getRooms',
+        params: { pad: 'x'.repeat(MAX_LINE_LENGTH - 1000) },
+      }),
+    ).rejects.toThrow('binding not owned by caller')
   })
 })
 
