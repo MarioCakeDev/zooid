@@ -118,6 +118,12 @@ export interface RoomBinding {
   /** Room alias (typical) or room ID. */
   alias: string
   /**
+   * The alias/ID as configured, kept by `bot-pool` when it rewrites `alias`
+   * to the canonical room ID at bootstrap. Lets `zooid_send_message` accept
+   * the room by the name the agent's config uses (ZOD084).
+   */
+  configuredAlias?: string
+  /**
    * Power level the agent should hold in this room at the moment it is
    * created. Omitted = `users_default` (effectively 0). Not reconciled
    * after creation.

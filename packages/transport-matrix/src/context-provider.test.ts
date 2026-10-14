@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { BotPool } from './bot-pool.js'
 import { MatrixContextProvider } from './context-provider.js'
 import type { MatrixClient } from './matrix-client.js'
 
@@ -407,6 +408,75 @@ describe('MatrixContextProvider', () => {
     await expect(provider.sendMessage({ room: '!elsewhere:hs', text: 'hi' })).rejects.toThrow(
       /not_in_room/,
     )
+  })
+
+  describe('sendMessage after bootstrap rewrote the binding (#104)', () => {
+    async function bootstrapped(configured: string[]) {
+      const rooms = configured.map((alias) => ({ alias }))
+      const resolveAlias = vi.fn(async (a: string) => a.replace('#', '!id-of-'))
+      const pool = new BotPool(
+        {
+          registerBot: vi.fn(async () => undefined),
+          invite: vi.fn(async () => undefined),
+          joinRoom: vi.fn(async () => undefined),
+          resolveAlias,
+          createRoom: vi.fn(),
+          sendStateEvent: vi.fn(async () => undefined),
+          setDisplayName: vi.fn(async () => undefined),
+        } as never,
+        [{ name: 'cpo', userId: '@cpo:zooid.zoon.eco', rooms, trigger: 'mention' }],
+      )
+      await pool.bootstrap({})
+      const sendMessage = vi.fn().mockResolvedValue({ event_id: '$sent' })
+      const provider = new MatrixContextProvider({
+        client: fakeClient({ sendMessage } as unknown as Partial<MatrixClient>),
+        asUserId: '@cpo:zooid.zoon.eco',
+        agentBots: new Map(),
+        rooms,
+      })
+      return { provider, sendMessage, rooms }
+    }
+
+    it('accepts the configured alias and sends to the canonical room ID', async () => {
+      const { provider, sendMessage, rooms } = await bootstrapped(['#product:zooid.zoon.eco'])
+      expect(rooms[0]!.alias).toBe('!id-of-product:zooid.zoon.eco')
+      await provider.sendMessage({ room: '#product:zooid.zoon.eco', text: 'hi' })
+      expect(sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ roomId: '!id-of-product:zooid.zoon.eco' }),
+      )
+    })
+
+    it('accepts the bare #localpart the config normalizer expanded', async () => {
+      const { provider, sendMessage } = await bootstrapped(['#product:zooid.zoon.eco'])
+      await provider.sendMessage({ room: '#product', text: 'hi' })
+      expect(sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ roomId: '!id-of-product:zooid.zoon.eco' }),
+      )
+    })
+
+    it('still accepts the canonical room ID', async () => {
+      const { provider, sendMessage } = await bootstrapped(['#product:zooid.zoon.eco'])
+      await provider.sendMessage({ room: '!id-of-product:zooid.zoon.eco', text: 'hi' })
+      expect(sendMessage).toHaveBeenCalledTimes(1)
+    })
+
+    it('refuses an alias that is not bound, listing the rooms the agent is in', async () => {
+      const { provider, sendMessage } = await bootstrapped([
+        '#product:zooid.zoon.eco',
+        '#dev:zooid.zoon.eco',
+      ])
+      await expect(provider.sendMessage({ room: '#other', text: 'hi' })).rejects.toThrow(
+        /not_in_room: this agent is not a member of #other.*!id-of-product:zooid\.zoon\.eco, !id-of-dev:zooid\.zoon\.eco/,
+      )
+      expect(sendMessage).not.toHaveBeenCalled()
+    })
+
+    it('refuses a bare #localpart that matches rooms on two servers', async () => {
+      const { provider } = await bootstrapped(['#product:a.eco', '#product:b.eco'])
+      await expect(provider.sendMessage({ room: '#product', text: 'hi' })).rejects.toThrow(
+        /not_in_room/,
+      )
+    })
   })
 
   it('getRecentThreads returns top-level entries newest-first with bundled thread metadata, skipping thread replies', async () => {
