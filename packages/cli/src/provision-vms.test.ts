@@ -3,10 +3,8 @@ import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentConfig, ZooidConfig } from '@zooid/core'
-import { PRESETS } from '@zooid/acp-client'
-import { buildForwarderArgv, vmMachineName, type VmExec, type VmExecResult } from '@zooid/runtime-vm'
-import { credentialSocketPath } from './cred-proxy/socket-path.js'
-import type { startCredentialProxy } from './cred-proxy/proxy.js'
+import { existsSync } from 'node:fs'
+import { vmMachineName, type VmExec, type VmExecResult } from '@zooid/runtime-vm'
 import { provisionVms } from './provision-vms.js'
 
 let configDir: string
@@ -92,9 +90,8 @@ describe('provisionVms', () => {
   })
 })
 
-describe('provisionVms — credential proxy, egress and local images (ZOD128)', () => {
+describe('provisionVms — egress, operator mounts and local images', () => {
   type Rec = { name: string; state: string }
-  const guestSetup = PRESETS.pi.vmCredential!.guestSetup
   let home: string
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'zod128-home-'))
@@ -110,7 +107,6 @@ describe('provisionVms — credential proxy, egress and local images (ZOD128)', 
   const cfgWith = (smoke: AgentConfig): ZooidConfig => ({ ...config(), agents: { lead: agent('lead'), smoke } })
 
   function recorder(machines: Rec[] = [], fail?: (args: string[]) => VmExecResult | undefined) {
-    const events: string[] = []
     const calls: string[][] = []
     const exec: VmExec = vi.fn(async (_cmd, args) => {
       calls.push(args)
@@ -118,25 +114,13 @@ describe('provisionVms — credential proxy, egress and local images (ZOD128)', 
       if (failed) return failed
       const [, sub] = args
       const name = args[args.indexOf('--name') + 1]!
-      events.push(sub === 'exec' ? `exec:${args.slice(args.indexOf('--') + 1, args.indexOf('--') + 3).join(' ')}` : sub!)
       if (sub === 'ls') return { code: 0, stdout: JSON.stringify(machines), stderr: '' }
       if (sub === 'create') machines.push({ name, state: 'stopped' })
       if (sub === 'start') machines.find((m) => m.name === name)!.state = 'running'
       if (sub === 'delete') machines.splice(machines.findIndex((m) => m.name === name), 1)
       return { code: 0, stdout: '', stderr: '' }
     })
-    const closes: string[] = []
-    const startProxy = vi.fn(async (o: Parameters<typeof startCredentialProxy>[0]) => {
-      events.push('proxy')
-      return {
-        socketPath: o.socketPath,
-        close: vi.fn(async () => {
-          closes.push(o.socketPath)
-          events.push('proxy-close')
-        }),
-      }
-    })
-    return { exec, calls, events, startProxy, closes }
+    return { exec, calls }
   }
 
   const run = (c: ZooidConfig, r: ReturnType<typeof recorder>) =>
@@ -146,56 +130,53 @@ describe('provisionVms — credential proxy, egress and local images (ZOD128)', 
       agentsDir: join(configDir, '.data', 'agents'),
       daemonHome: home,
       exec: r.exec,
-      startProxy: r.startProxy as unknown as typeof startCredentialProxy,
       log: () => {},
     })
 
-  it('starts the proxy and mounts its socket into a pi vm agent with the allowlisted network', async () => {
+  it('a pi vm agent gets the allowlisted network and nothing preset-specific: no socket, no guest setup', async () => {
     const r = recorder()
     await run(cfgWith(piSmoke()), r)
-    const sock = credentialSocketPath(configDir, 'smoke')
-    expect(r.startProxy).toHaveBeenCalledTimes(1)
-    const o = r.startProxy.mock.calls[0]![0]
-    expect(o).toMatchObject({ socketPath: sock, upstream: 'https://chatgpt.com', allowPaths: ['/backend-api/codex/'], agent: 'smoke' })
-    const create = r.calls.find((c) => c[1] === 'create')!.join(' ')
-    expect(create).toContain(`--net --allow-host github.com --mount-socket ${sock}:/run/zooid/model.sock`)
-  })
-
-  it('the proxy reads the dedicated login under the daemon home', async () => {
-    const r = recorder()
-    await run(cfgWith(piSmoke()), r)
-    const { auth } = r.startProxy.mock.calls[0]![0]
-    // A missing login surfaces as the expired-login error naming the file.
-    await expect(auth.current()).rejects.toThrow(join(home, '.zooid', 'cred-proxy', 'pi', 'auth.json'))
-  })
-
-  it('orders proxy → create → start → guest setup → forwarder', async () => {
-    const r = recorder()
-    await run(cfgWith(piSmoke()), r)
-    // exec:sleep 1 is ensureVmMachine settling a networked machine (smolvm kills the first exec).
-    expect(r.events).toEqual(['proxy', 'ls', 'create', 'start', 'exec:sleep 1', 'exec:sh -c', 'exec:node -e'])
-    const m = vmMachineName('smoke', configDir)
-    expect(r.calls).toContainEqual(['machine', 'exec', '--name', m, '--', 'sh', '-c', guestSetup])
-    expect(r.calls).toContainEqual(buildForwarderArgv(m, 8787, '/run/zooid/model.sock'))
-  })
-
-  it('reruns the guest setup and forwarder on an already-running machine', async () => {
-    const machines: Rec[] = []
-    await run(cfgWith(piSmoke()), recorder(machines))
-    const r = recorder(machines)
-    await run(cfgWith(piSmoke()), r)
-    expect(r.events).toEqual(['proxy', 'ls', 'exec:sh -c', 'exec:node -e'])
-  })
-
-  it('a vm agent without a credential preset gets the network but no proxy, socket or setup', async () => {
-    const r = recorder()
-    await run(cfgWith(agent('smoke', { runtime: 'vm', vm: { image: 'node:22-alpine', allow_hosts: ['github.com'] } })), r)
-    expect(r.startProxy).not.toHaveBeenCalled()
     const create = r.calls.find((c) => c[1] === 'create')!
-    expect(create).toContain('--net')
+    expect(create.join(' ')).toContain('--net --allow-host github.com')
     expect(create).not.toContain('--mount-socket')
+    // The only exec is ensureVmMachine settling a networked machine (smolvm kills the first exec).
     const execs = r.calls.filter((c) => c[1] === 'exec').map((c) => c.slice(c.indexOf('--') + 1))
     expect(execs).toEqual([['sleep', '1']])
+  })
+
+  it('passes vm.mounts to create, rw by default and :ro when asked', async () => {
+    const login = join(home, 'login')
+    const ref = join(home, 'ref')
+    mkdirSync(login)
+    mkdirSync(ref)
+    const r = recorder()
+    await run(
+      cfgWith(
+        piSmoke({
+          mounts: [
+            { host: login, target: '/pi', mode: 'rw' },
+            { host: ref, target: '/ref', mode: 'ro' },
+          ],
+        }),
+      ),
+      r,
+    )
+    const create = r.calls.find((c) => c[1] === 'create')!.join(' ')
+    expect(create).toContain(`-v ${login}:/pi -v ${ref}:/ref:ro`)
+  })
+
+  it('creates a mount host dir when the entry says create: true, like container.mounts', async () => {
+    const login = join(home, 'new-login')
+    await run(cfgWith(piSmoke({ mounts: [{ host: login, target: '/pi', mode: 'rw', create: true }] })), recorder())
+    expect(existsSync(login)).toBe(true)
+  })
+
+  it('refuses a missing mount dir without create, before smolvm', async () => {
+    const r = recorder()
+    await expect(
+      run(cfgWith(piSmoke({ mounts: [{ host: join(home, 'nope'), target: '/pi', mode: 'rw' }] })), r),
+    ).rejects.toThrow(`vm mount ${join(home, 'nope')} is not a directory`)
+    expect(r.calls.filter((c) => c[1] === 'create')).toEqual([])
   })
 
   it('resolves a local image against the config dir and recreates the machine when it is rebuilt', async () => {
@@ -215,28 +196,11 @@ describe('provisionVms — credential proxy, egress and local images (ZOD128)', 
     expect(subs.indexOf('create')).toBeGreaterThan(subs.indexOf('delete'))
   })
 
-  it('fails early on a missing local image, before smolvm or the proxy', async () => {
+  it('fails early on a missing local image, before smolvm', async () => {
     const r = recorder()
     await expect(run(cfgWith(piSmoke({ image: '~/missing.tar' })), r)).rejects.toThrow(
       `vm image ${join(home, 'missing.tar')} does not exist`,
     )
     expect(r.calls).toEqual([])
-    expect(r.startProxy).not.toHaveBeenCalled()
-  })
-
-  it('stop() stops the machines, then closes the proxies', async () => {
-    const r = recorder()
-    const handle = await run(cfgWith(piSmoke()), r)
-    r.events.length = 0
-    await handle.stop()
-    expect(r.events).toEqual(['stop', 'proxy-close'])
-  })
-
-  it('a failed guest setup names the agent and stderr, and closes the proxy', async () => {
-    const r = recorder([], (args) =>
-      args[1] === 'exec' && args.includes('sh') ? { code: 1, stdout: '', stderr: 'boom' } : undefined,
-    )
-    await expect(run(cfgWith(piSmoke()), r)).rejects.toThrow(/smoke[\s\S]*boom/)
-    expect(r.closes).toEqual([credentialSocketPath(configDir, 'smoke')])
   })
 })
