@@ -347,11 +347,15 @@ export class MatrixContextProvider implements TransportContextProvider {
 
   async sendMessage(input: SendMessageInput): Promise<SendMessageResult> {
     const rooms = this.opts.rooms ?? []
-    if (!rooms.some((r) => r.alias === input.room)) {
-      throw new Error(`not_in_room: this agent is not a member of ${input.room}`)
+    const roomId = resolveBoundRoom(rooms, input.room)
+    if (!roomId) {
+      const bound = rooms.map((r) => r.alias).join(', ') || 'none'
+      throw new Error(
+        `not_in_room: this agent is not a member of ${input.room}. Rooms this agent is in: ${bound}`,
+      )
     }
     const { event_id } = await this.opts.client.sendMessage({
-      roomId: input.room,
+      roomId,
       asUserId: this.opts.asUserId,
       // m.notice, not m.text: agent prose sends as m.notice so
       // .m.rule.suppress_notices silences it server-side (ZNC025 §10).
@@ -360,4 +364,21 @@ export class MatrixContextProvider implements TransportContextProvider {
     })
     return { event_id, ...(input.thread_id ? { thread_id: input.thread_id } : {}) }
   }
+}
+
+/**
+ * Resolve an agent-supplied room selector against the agent's own bindings,
+ * locally (ZOD084: no homeserver call). Matches the canonical room ID, the
+ * configured alias, or a bare `#localpart` of a configured `#localpart:server`
+ * alias. Returns the canonical ID, or undefined when nothing (or more than one
+ * distinct room) matches.
+ */
+function resolveBoundRoom(rooms: RoomBinding[], selector: string): string | undefined {
+  const exact = rooms.find((r) => r.alias === selector || r.configuredAlias === selector)
+  if (exact) return exact.alias
+  if (!selector.startsWith('#') || selector.includes(':')) return undefined
+  const hits = new Set(
+    rooms.filter((r) => r.configuredAlias?.startsWith(`${selector}:`)).map((r) => r.alias),
+  )
+  return hits.size === 1 ? [...hits][0] : undefined
 }
