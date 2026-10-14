@@ -65,6 +65,8 @@ export interface PromptInput {
 
 export interface PromptResult {
   stopReason: StopReason
+  /** The tracker's id for this turn; null when no TurnTracker is attached (no onTap). */
+  turnId?: string | null
 }
 
 export type AgentEvent =

@@ -1400,6 +1400,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
 
     let turnError: unknown
     let stopReason: StopReason | undefined
+    let turnId: string | null | undefined
     try {
       const rawBody = input.event?.content?.body ?? ''
       const strippedPromptText = input.promptText ?? stripMention(rawBody, agent.userId)
@@ -1439,6 +1440,7 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
         content: [...blocks, { type: 'text', text: fullPromptText }],
       })
       stopReason = promptResult.stopReason as StopReason
+      turnId = promptResult.turnId
       // Drain: the prompt promise resolves on the stopReason response, but
       // trailing chunks may still arrive (see DRAIN_* above). Wait until the
       // buffer is quiet for DRAIN_QUIET_MS, re-arming on each new chunk.
@@ -1496,6 +1498,8 @@ export function createMatrixTransport(opts: CreateMatrixTransportOptions) {
               sessionId,
               producedOutput,
               lastMessage: lastFlushed.get(sessionId),
+              turnId,
+              stopReason,
             },
             threadRoot,
           ),

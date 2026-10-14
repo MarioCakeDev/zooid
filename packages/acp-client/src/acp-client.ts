@@ -630,7 +630,7 @@ export class AcpClient {
         sessionId: launched.id,
         stopReason: result.stopReason,
       })
-      return { stopReason: result.stopReason }
+      return { stopReason: result.stopReason, turnId }
     } catch (err) {
       const c = classify(err)
       this.options.onTap?.({

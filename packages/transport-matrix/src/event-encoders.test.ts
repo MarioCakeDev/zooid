@@ -293,6 +293,32 @@ describe('toTurnEndBody', () => {
     expect(out.body).toBe('claude finished without output')
   })
 
+  it('carries turn_id and a verbatim stop_reason', () => {
+    const out = toTurnEndBody(
+      { agentId: 'claude', sessionId: 's1', producedOutput: false, turnId: 't1', stopReason: 'end_turn' },
+      '$root',
+    )
+    expect(out).toMatchObject({ turn_id: 't1', stop_reason: 'end_turn', produced_output: false, session_id: 's1' })
+  })
+
+  it('does not interpret the stop reason', () => {
+    const out = toTurnEndBody(
+      { agentId: 'claude', sessionId: 's1', producedOutput: false, stopReason: 'refusal' },
+      '$root',
+    )
+    expect(out.stop_reason).toBe('refusal')
+    expect(out.body).toBe('claude finished without output')
+  })
+
+  it('omits turn_id and stop_reason when unknown', () => {
+    const out = toTurnEndBody(
+      { agentId: 'claude', sessionId: 's1', producedOutput: false, turnId: null },
+      '$root',
+    )
+    expect('turn_id' in out).toBe(false)
+    expect('stop_reason' in out).toBe(false)
+  })
+
   it('carries no msgtype — a vestigial m.notice here would collide with .m.rule.suppress_notices', () => {
     const out = toTurnEndBody({ agentId: 'a', sessionId: 's', producedOutput: true }, '$r')
     expect(out).not.toHaveProperty('msgtype')
