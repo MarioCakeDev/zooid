@@ -1,6 +1,6 @@
 {
   "name": "@zooid/runtime-vm",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "description": "smolvm runtime for zooid. Runs the agent's ACP process in a per-agent microVM booted from an OCI image.",
   "type": "module",
   "license": "MIT",

@@ -1,5 +1,20 @@
 # @zooid/transport-matrix
 
+## 0.18.0
+
+### Minor Changes
+
+- `dev.zooid.turn.end` now carries the turn's `turn_id` and the agent's `stop_reason`, so a client can tell a turn that ended without a reply apart from one that replied.
+
+### Patch Changes
+
+- Updated dependencies [05d02f5]
+- Updated dependencies
+- Updated dependencies [c113da8]
+- Updated dependencies [b290fb6]
+  - @zooid/acp-client@0.18.0
+  - @zooid/core@0.18.0
+
 ## 0.17.2
 
 ### Patch Changes
