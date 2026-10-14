@@ -289,3 +289,12 @@ export async function callDaemon(sockPath: string, req: DaemonRequest): Promise<
     socket.write(JSON.stringify(req) + '\n')
   })
 }
+
+/**
+ * True when `err` came from the socket (ENOENT, ECONNREFUSED, ECONNRESET,
+ * ETIMEDOUT, ...) rather than from a reply the daemon sent. Node's socket
+ * errors carry a string `code`; daemon replies reject with a plain Error.
+ */
+export function isTransportError(err: unknown): boolean {
+  return err instanceof Error && typeof (err as NodeJS.ErrnoException).code === 'string'
+}

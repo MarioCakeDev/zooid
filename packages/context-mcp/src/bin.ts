@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { buildContextMcpServer } from './mcp-server.js'
-import { callDaemon } from './daemon-socket.js'
+import { callDaemon, isTransportError } from './daemon-socket.js'
 import type {
   StartTasksOutput,
   CompleteTaskOutput,
@@ -96,16 +96,19 @@ const remoteTasks: TaskActions = {
 
 // A failed role query registers neither task tool — the safe direction for
 // MCP, since a spawn that cannot reach the daemon cannot usefully call them
-// ([[ZOD084]]). The failure is logged and surfaced to the agent via roleError
-// rather than swallowed.
+// ([[ZOD084]]). Every failure is logged. Only a transport failure (the socket
+// is dead) is surfaced to the agent via roleError; a daemon that answered with
+// an error, such as "task actions unavailable", is reachable and keeps the
+// plain no-task-tools behaviour.
 let role: TaskRole | undefined
 let roleError: string | undefined
 try {
   role = (await callDaemon(sockPath, { spawnId, method: 'describeRole', params: {} })) as TaskRole
 } catch (err) {
-  roleError = err instanceof Error ? err.message : String(err)
+  const message = err instanceof Error ? err.message : String(err)
+  if (isTransportError(err)) roleError = message
   process.stderr.write(
-    `zooid-context-mcp: describeRole failed (sock=${sockPath}): ${roleError}; task tools disabled\n`,
+    `zooid-context-mcp: describeRole failed (sock=${sockPath}): ${message}; task tools disabled\n`,
   )
 }
 
