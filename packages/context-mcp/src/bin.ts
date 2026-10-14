@@ -94,17 +94,26 @@ const remoteTasks: TaskActions = {
     }) as Promise<HandoffOutput>,
 }
 
-// A failed role query yields undefined, which registers neither task tool —
-// the safe direction for MCP: the tools are additive, and a spawn that
-// cannot reach the daemon cannot usefully call them anyway ([[ZOD084]]).
-const role = await callDaemon(sockPath, { spawnId, method: 'describeRole', params: {} })
-  .then((r) => r as TaskRole)
-  .catch(() => undefined)
+// A failed role query registers neither task tool — the safe direction for
+// MCP, since a spawn that cannot reach the daemon cannot usefully call them
+// ([[ZOD084]]). The failure is logged and surfaced to the agent via roleError
+// rather than swallowed.
+let role: TaskRole | undefined
+let roleError: string | undefined
+try {
+  role = (await callDaemon(sockPath, { spawnId, method: 'describeRole', params: {} })) as TaskRole
+} catch (err) {
+  roleError = err instanceof Error ? err.message : String(err)
+  process.stderr.write(
+    `zooid-context-mcp: describeRole failed (sock=${sockPath}): ${roleError}; task tools disabled\n`,
+  )
+}
 
 const server = buildContextMcpServer({
   resolve: async () => remoteProvider,
   resolveTasks: async () => remoteTasks,
   role,
+  roleError,
 })
 await server.connect(new StdioServerTransport())
 process.stderr.write(`zooid-context-mcp: ready (spawnId=${spawnId})\n`)

@@ -25,6 +25,13 @@ export interface BuildContextMcpServerOpts {
    * usefully call them anyway ([[ZOD084]]).
    */
   role?: TaskRole
+  /**
+   * Set when the role query failed (daemon socket unreachable). The task tools
+   * stay unregistered, but the agent is told why: the instructions carry a
+   * notice and `zooid_context_status` reports the error, so "context daemon
+   * unreachable" is distinguishable from "tool missing".
+   */
+  roleError?: string
 }
 // The socket substitutes its authenticated spawn binding; models never supply an address.
 const CALLER_FROM_BINDING: TaskCallerRef = {
@@ -34,13 +41,29 @@ const CALLER_FROM_BINDING: TaskCallerRef = {
   sessionKey: '',
 }
 
+function unreachableNotice(error: string): string {
+  return `The zooid context daemon is unreachable (${error}), so zooid_handoff, zooid_start_task_threads and zooid_complete_task are unavailable in this session. Tell the user the context daemon needs a restart rather than reporting the tools as missing.`
+}
+
 export function buildContextMcpServer(opts: BuildContextMcpServerOpts): McpServer {
   const server = new McpServer(
     { name: 'zooid-context', version: '0.0.1' },
     {
-      instructions: AGENT_NOTIFY_INSTRUCTIONS,
+      instructions: opts.roleError
+        ? `${AGENT_NOTIFY_INSTRUCTIONS}\n\n${unreachableNotice(opts.roleError)}`
+        : AGENT_NOTIFY_INSTRUCTIONS,
     },
   )
+
+  if (opts.roleError) {
+    const notice = unreachableNotice(opts.roleError)
+    server.tool(
+      'zooid_context_status',
+      'Report whether the zooid context daemon is reachable. Call this when zooid_handoff, zooid_start_task_threads or zooid_complete_task is missing.',
+      {},
+      async () => ({ content: [{ type: 'text', text: notice }], isError: true }),
+    )
+  }
 
   server.tool(
     'zooid_get_history',
