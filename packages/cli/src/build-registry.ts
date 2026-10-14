@@ -277,15 +277,8 @@ export function buildAcpRegistry(
 
   for (const [name, agent] of Object.entries(cfg.agents)) {
     env[name] = agent.container?.env ?? {}
-    if (resolveAgentRuntime(agent, cfg) === 'vm') {
-      // A vm agent has no container block. Its env points pi at the guest's
-      // writable agent dir and tells the smoke tools where to clone. [ZOD128]
-      const preset = presetOf(agent)
-      env[name] = {
-        ...(preset ? PRESETS[preset].vmCredential?.guestEnv : undefined),
-        ...(agent.vm?.git ? { ZOOID_VM_GIT: agent.vm.git } : {}),
-      }
-    }
+    // A vm agent has no container block; its env is vm.env, and nothing else. [ZOD109]
+    if (resolveAgentRuntime(agent, cfg) === 'vm') env[name] = agent.vm?.env ?? {}
     const { image: resolvedImage, source } = resolveAgentImage(agent, cfg)
     image[name] = resolvedImage
     const composed = composeAgentMounts(name, agent, cfg, opts)

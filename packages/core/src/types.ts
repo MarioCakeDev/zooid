@@ -59,10 +59,16 @@ export interface VmConfig {
   cpus?: number
   memory_mib?: number
   disk_gib?: number
-  /** https remote the guest clones from; its host must be in `allow_hosts`. [ZOD128] */
-  git?: string
   /** Hosts the guest may reach. Absent means no network at all. [ZOD128] */
   allow_hosts?: string[]
+  /** Env for the agent's ACP process in the guest. Same rules as `container.env`. */
+  env?: Record<string, string>
+  /**
+   * Host directories mounted into the guest, beyond the read-only workdir.
+   * Same entries as `container.mounts`, minus `id`. Directories only: smolvm
+   * can't mount a single file. A credential mounted here is readable by the guest.
+   */
+  mounts?: MountConfig[]
 }
 
 /**

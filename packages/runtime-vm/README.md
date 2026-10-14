@@ -24,28 +24,44 @@ brew install smol-machines/tap/smolvm   # macOS (Apple Silicon)
 
 ## What the guest gets
 
-- **One host mount.** The agent's workdir, read-only at `/workspace`. smolvm
-  enforces `:ro` host-side, so not even root in the guest can write it.
-  Files the daemon writes there (inbound attachments) show up in the guest.
-- **No secrets.** The daemon refuses to start if a vm agent's workdir holds
-  `.env*`, `.dev.vars*` or `.claude/settings.local.json`: the guest can read
-  everything in it.
+- **Its workdir, read-only, at `/workspace`.** smolvm enforces `:ro`
+  host-side, so not even root in the guest can write it. Files the daemon
+  writes there (inbound attachments) show up in the guest.
+- **No secrets in the workdir.** The daemon refuses to start if a vm agent's
+  workdir holds `.env*`, `.dev.vars*` or `.claude/settings.local.json`: the
+  guest can read everything in it.
 - **No network unless you list hosts.** `vm.allow_hosts: [github.com, …]`
-  turns on egress to exactly those hosts. `vm.git` (an https remote whose
-  host is in that list) reaches the agent as `ZOOID_VM_GIT`.
-- **No model credential.** A `preset: pi` agent's model calls go through a
-  host-side proxy on a mounted Unix socket; the guest holds only a
-  placeholder key. The proxy reads a dedicated login it alone refreshes:
-  `PI_CODING_AGENT_DIR=~/.zooid/cred-proxy/pi pi`, then `/login` → OpenAI
-  Codex → device code. Other presets have no proxy yet.
+  turns on egress to exactly those hosts.
+- **The env and mounts you give it, nothing else.** `vm.env` and `vm.mounts`
+  work like `container.env` and `container.mounts`. Mounts are directories
+  only (smolvm can't mount a single file), `rw` unless you say `mode: ro`.
+  zooid passes no credential of its own: a model key goes in `vm.env`, and a
+  login that refreshes itself goes in a `vm.mounts` directory.
 - **No `zooid_*` context tools** in this release.
+
+```yaml
+    vm:
+      image: ~/images/agent.tar
+      allow_hosts: [github.com, chatgpt.com, auth.openai.com]
+      env:
+        PI_CODING_AGENT_DIR: /pi
+      mounts:
+        - { host: ~/.zooid/smoke-tester-pi, target: /pi }
+```
+
+**Anything you pass in, the guest can read**, and a `rw` mount is a place it
+can write on the host. The VM protects the host from what the agent runs, not
+the credentials you hand it. Pass a dedicated, revocable credential (a login
+only this agent uses, or a key with a spending limit), and mount a directory
+the host never executes or loads.
 
 `vm.image` is a registry reference, or a local `docker save` archive or
 rootfs directory when it starts with `/`, `./`, `../` or `~/`. Rebuilding a
 local archive recreates the machine.
 
 The machine is created and started when the daemon starts, stopped (not
-deleted) when it stops, and recreated when its `vm:` settings change. See
+deleted) when it stops, and recreated when its `vm:` settings change
+(`vm.env` excepted: it goes to the agent's process, not the machine). See
 ZOD109 and ZOD128.
 
 ## Tests

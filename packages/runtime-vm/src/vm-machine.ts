@@ -37,10 +37,19 @@ export interface VmMachineSpec {
   diskGib?: number
   /** Non-empty means `--net` plus one `--allow-host` each; otherwise no network. [ZOD128] */
   allowHosts?: string[]
-  /** Host Unix sockets mounted into the guest. [ZOD128] */
+  /** The operator's `vm.mounts`: host directories, after the workdir. */
+  mounts?: VmDirMount[]
+  /** Host Unix sockets mounted into the guest. Daemon-internal; nothing sets it yet ([ZOD136]). */
   sockets?: VmSocketMount[]
   /** Local images only: changes when the archive is rebuilt, so the machine is recreated. */
   imageStamp?: string
+}
+
+export interface VmDirMount {
+  /** Absolute host directory. */
+  host: string
+  guest: string
+  readOnly: boolean
 }
 
 export interface VmSocketMount {
@@ -88,6 +97,9 @@ export function vmSpecHash(spec: VmMachineSpec): string {
   // New keys join only when set, so a cycle-1 spec hashes as before and its machine is kept.
   const input: Record<string, unknown> = { image, workdir, cpus, memoryMib, diskGib }
   if (spec.allowHosts?.length) input.allowHosts = [...spec.allowHosts].sort()
+  if (spec.mounts?.length) {
+    input.mounts = [...spec.mounts].sort((a, b) => a.guest.localeCompare(b.guest))
+  }
   if (spec.sockets?.length) {
     input.sockets = [...spec.sockets].sort((a, b) => a.guest.localeCompare(b.guest))
   }
@@ -96,11 +108,12 @@ export function vmSpecHash(spec: VmMachineSpec): string {
 }
 
 /**
- * The workdir is the only host path the guest gets, always `:ro` (smolvm
- * enforces it host-side, so a guest `remount,rw` doesn't help) and never
- * `:staged` (a write path back out). The mount shadows smolvm's own
- * `/workspace` on the storage disk. The network is off unless the agent
- * lists `allow_hosts`, and then only those hosts resolve. [ZOD109] [ZOD128]
+ * The workdir is always mounted `:ro` (smolvm enforces it host-side, so a
+ * guest `remount,rw` doesn't help) and never `:staged` (a write path back
+ * out). It shadows smolvm's own `/workspace` on the storage disk. The
+ * operator's `vm.mounts` follow, rw unless they say `ro`. The network is off
+ * unless the agent lists `allow_hosts`, and then only those hosts resolve.
+ * [ZOD109] [ZOD128]
  */
 export function buildCreateArgv(spec: VmMachineSpec): string[] {
   const argv = ['machine', 'create', '--name', spec.name, '--image', spec.image]
@@ -108,6 +121,7 @@ export function buildCreateArgv(spec: VmMachineSpec): string[] {
   if (spec.memoryMib !== undefined) argv.push('--mem', String(spec.memoryMib))
   if (spec.diskGib !== undefined) argv.push('--storage', String(spec.diskGib))
   argv.push('-v', `${spec.workdir}:${VM_GUEST_WORKDIR}:ro`)
+  for (const m of spec.mounts ?? []) argv.push('-v', `${m.host}:${m.guest}${m.readOnly ? ':ro' : ''}`)
   if (spec.allowHosts?.length) {
     argv.push('--net')
     for (const h of spec.allowHosts) argv.push('--allow-host', h)
@@ -196,6 +210,15 @@ export async function ensureVmMachine({
       `vm agent workdir ${spec.workdir} holds secret files (${secrets.join(', ')}); ` +
         `the guest can read everything in it. Move credentials out of the workdir. See [ZOD109].`,
     )
+  }
+  for (const m of spec.mounts ?? []) {
+    let isDir = false
+    try {
+      isDir = statSync(m.host).isDirectory()
+    } catch {}
+    if (!isDir) {
+      throw new Error(`vm mount ${m.host} is not a directory; smolvm mounts directories only. See [ZOD109].`)
+    }
   }
   const hash = vmSpecHash(spec)
   let rec = parseMachineList((await run(exec, ['machine', 'ls', '--json'])).stdout).find(

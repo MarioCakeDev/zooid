@@ -1,10 +1,8 @@
 import { execSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { createServer, type Server } from 'node:http'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildForwarderArgv } from './guest-forwarder.js'
 import { SMOLVM_BIN, defaultVmExec, ensureVmMachine, stopVmMachine } from './vm-machine.js'
 
 function smolvmAvailable(): boolean {
@@ -16,11 +14,11 @@ function smolvmAvailable(): boolean {
   }
 }
 
-describe.skipIf(!smolvmAvailable())('egress allowlist and socket mounts — real smolvm machine (ZOD128)', () => {
+describe.skipIf(!smolvmAvailable())('egress allowlist and operator mounts — real smolvm machine', () => {
   const machine = `zooid-it-egress-${process.pid}`
   let root: string
-  let sockDir: string
-  let server: Server
+  let rw: string
+  let ro: string
 
   const guest = (script: string, timeout = '20s') =>
     defaultVmExec(SMOLVM_BIN, ['machine', 'exec', '--timeout', timeout, '--name', machine, '--', 'node', '-e', script])
@@ -29,11 +27,12 @@ describe.skipIf(!smolvmAvailable())('egress allowlist and socket mounts — real
     root = mkdtempSync(join(tmpdir(), 'zod128-it-'))
     const workdir = join(root, 'workdir')
     mkdirSync(workdir)
-    // Short: Unix socket paths over 103 bytes are truncated.
-    sockDir = mkdtempSync('/tmp/zi-')
-    const sock = join(sockDir, 't.sock')
-    server = createServer((_req, res) => res.end('ok'))
-    await new Promise<void>((r) => server.listen(sock, () => r()))
+    rw = join(root, 'login')
+    ro = join(root, 'ref')
+    mkdirSync(rw)
+    mkdirSync(ro)
+    writeFileSync(join(rw, 'auth.json'), '{"token":"t1"}')
+    writeFileSync(join(ro, 'ref.txt'), 'ref')
     await ensureVmMachine({
       spec: {
         name: machine,
@@ -42,7 +41,10 @@ describe.skipIf(!smolvmAvailable())('egress allowlist and socket mounts — real
         cpus: 1,
         memoryMib: 1024,
         allowHosts: ['registry.npmjs.org'],
-        sockets: [{ host: sock, guest: '/run/zooid/t.sock' }],
+        mounts: [
+          { host: rw, guest: '/login', readOnly: false },
+          { host: ro, guest: '/ref', readOnly: true },
+        ],
       },
       exec: defaultVmExec,
       stateFile: join(root, 'vm.json'),
@@ -53,9 +55,7 @@ describe.skipIf(!smolvmAvailable())('egress allowlist and socket mounts — real
   afterAll(async () => {
     await stopVmMachine(machine, defaultVmExec).catch(() => {})
     await defaultVmExec(SMOLVM_BIN, ['machine', 'delete', '--name', machine, '--force']).catch(() => {})
-    await new Promise((r) => server?.close(r))
     rmSync(root, { recursive: true, force: true })
-    rmSync(sockDir, { recursive: true, force: true })
   }, 120_000)
 
   it('reaches an allowed host', async () => {
@@ -71,22 +71,20 @@ describe.skipIf(!smolvmAvailable())('egress allowlist and socket mounts — real
     expect(r.code).not.toBe(0)
   }, 60_000)
 
-  it('reaches the host socket through the guest forwarder', async () => {
-    const f = await defaultVmExec(SMOLVM_BIN, buildForwarderArgv(machine, 8787, '/run/zooid/t.sock'))
-    expect(f.code).toBe(0)
-    let out = ''
-    for (let i = 0; i < 20 && out !== 'ok'; i++) {
-      out = (await guest("fetch('http://127.0.0.1:8787/').then(r=>r.text()).then(t=>console.log(t),()=>console.log('down'))")).stdout.trim()
-      if (out !== 'ok') await new Promise((r) => setTimeout(r, 250))
-    }
-    expect(out).toBe('ok')
+  it('a rw mount reads the host file and writes back to the host, as a refreshing login does', async () => {
+    const r = await guest(
+      "const fs=require('fs');console.log(fs.readFileSync('/login/auth.json','utf8'));fs.writeFileSync('/login/auth.json',JSON.stringify({token:'t2'}))",
+    )
+    expect(r).toMatchObject({ code: 0, stdout: '{"token":"t1"}\n' })
+    expect(readFileSync(join(rw, 'auth.json'), 'utf8')).toBe('{"token":"t2"}')
   }, 60_000)
 
-  it('a second forwarder start is harmless', async () => {
-    const f = await defaultVmExec(SMOLVM_BIN, buildForwarderArgv(machine, 8787, '/run/zooid/t.sock'))
-    expect(f.code).toBe(0)
-    await new Promise((r) => setTimeout(r, 500))
-    const r = await guest("fetch('http://127.0.0.1:8787/').then(r=>r.text()).then(t=>console.log(t))")
-    expect(r.stdout.trim()).toBe('ok')
+  it('a ro mount is readable and refuses writes', async () => {
+    const r = await guest(
+      "const fs=require('fs');console.log(fs.readFileSync('/ref/ref.txt','utf8'));try{fs.writeFileSync('/ref/new.txt','x');console.log('WROTE')}catch(e){console.log(e.code)}",
+    )
+    expect(r.stdout).toContain('ref')
+    expect(r.stdout).not.toContain('WROTE')
+    expect(existsSync(join(ro, 'new.txt'))).toBe(false)
   }, 60_000)
 })

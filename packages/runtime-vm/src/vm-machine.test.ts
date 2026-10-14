@@ -85,7 +85,7 @@ describe('buildCreateArgv', () => {
   })
 })
 
-describe('buildCreateArgv — network and sockets (ZOD128)', () => {
+describe('buildCreateArgv — network and sockets', () => {
   const tail = (a: string[]) => a.slice(a.indexOf('-v'))
 
   it('a cycle-1 spec still gets no network and no sockets', () => {
@@ -112,14 +112,39 @@ describe('buildCreateArgv — network and sockets (ZOD128)', () => {
         buildCreateArgv(
           spec({
             allowHosts: ['github.com'],
-            sockets: [{ host: '/t/a.sock', guest: '/run/zooid/model.sock' }],
+            sockets: [{ host: '/t/a.sock', guest: '/run/zooid/context.sock' }],
           }),
         ),
       ),
     ).toEqual([
       '-v', `${workdir}:${VM_GUEST_WORKDIR}:ro`,
       '--net', '--allow-host', 'github.com',
-      '--mount-socket', '/t/a.sock:/run/zooid/model.sock',
+      '--mount-socket', '/t/a.sock:/run/zooid/context.sock',
+    ])
+  })
+})
+
+describe('buildCreateArgv — operator mounts (vm.mounts)', () => {
+  const tail = (a: string[]) => a.slice(a.indexOf('-v'))
+
+  it('adds one -v per mount after the workdir, :ro only when read-only', () => {
+    expect(
+      tail(
+        buildCreateArgv(
+          spec({
+            mounts: [
+              { host: '/h/pi', guest: '/pi', readOnly: false },
+              { host: '/h/ref', guest: '/ref', readOnly: true },
+            ],
+            allowHosts: ['github.com'],
+          }),
+        ),
+      ),
+    ).toEqual([
+      '-v', `${workdir}:${VM_GUEST_WORKDIR}:ro`,
+      '-v', '/h/pi:/pi',
+      '-v', '/h/ref:/ref:ro',
+      '--net', '--allow-host', 'github.com',
     ])
   })
 })
@@ -143,6 +168,13 @@ describe('vmSpecHash (ZOD128)', () => {
 
   it('changes when hosts are added', () => {
     expect(vmSpecHash({ ...base, allowHosts: ['a.io'] })).not.toBe(vmSpecHash(base))
+  })
+
+  it('changes when a mount is added, and with its mode', () => {
+    const rw = { ...base, mounts: [{ host: '/h', guest: '/g', readOnly: false }] }
+    expect(vmSpecHash(rw)).not.toBe(vmSpecHash(base))
+    expect(vmSpecHash({ ...base, mounts: [{ host: '/h', guest: '/g', readOnly: true }] })).not.toBe(vmSpecHash(rw))
+    expect(vmSpecHash({ ...base, mounts: [] })).toBe(vmSpecHash(base))
   })
 
   it('changes when a socket is added', () => {
@@ -307,6 +339,20 @@ describe('ensureVmMachine', () => {
     )
     expect(calls).toEqual([])
     expect(existsSync(stateFile)).toBe(false)
+  })
+
+  it('refuses a mount whose host is not a directory, before touching smolvm', async () => {
+    writeFileSync(join(dir, 'auth.json'), '{}')
+    const { exec, calls } = fakeExec([])
+    const bad = spec({ mounts: [{ host: join(dir, 'auth.json'), guest: '/pi', readOnly: false }] })
+    await expect(ensureVmMachine({ spec: bad, exec, stateFile, log: () => {} })).rejects.toThrow(
+      `vm mount ${join(dir, 'auth.json')} is not a directory; smolvm mounts directories only`,
+    )
+    const missing = spec({ mounts: [{ host: join(dir, 'nope'), guest: '/pi', readOnly: false }] })
+    await expect(ensureVmMachine({ spec: missing, exec, stateFile, log: () => {} })).rejects.toThrow(
+      `vm mount ${join(dir, 'nope')} is not a directory`,
+    )
+    expect(calls).toEqual([])
   })
 
   it('surfaces smolvm stderr when a command fails', async () => {

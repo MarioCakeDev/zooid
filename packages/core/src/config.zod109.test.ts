@@ -107,8 +107,8 @@ describe('ZOD109: vm block', () => {
 
   it('rejects unknown vm fields', () => {
     expect(() =>
-      loadZooidConfig(yaml('runtime: vm', agent('smoke', '    vm: { mounts: [] }\n'))),
-    ).toThrow(/agents\.smoke\.vm\.mounts is not a recognised field/)
+      loadZooidConfig(yaml('runtime: vm', agent('smoke', '    vm: { volumes: [] }\n'))),
+    ).toThrow(/agents\.smoke\.vm\.volumes is not a recognised field/)
   })
 
   it('rejects vm on an agent whose resolved runtime is not vm', () => {

@@ -163,6 +163,25 @@ function parseSessionIdleTimeout(name: string, raw: unknown): number {
   return milliseconds
 }
 
+/** A `container.env` / `vm.env` mapping: strings only, `${VAR}`-interpolated, no `ZOOID_*`. */
+function parseEnvMapping(
+  raw: unknown,
+  processEnv: NodeJS.ProcessEnv,
+  field: string,
+): Record<string, string> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`${field} must be a mapping`)
+  }
+  const stringEnv: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v !== 'string') {
+      throw new Error(`${field}.${k}: must be a string (got ${typeof v})`)
+    }
+    stringEnv[k] = v
+  }
+  return interpolateEnv(stringEnv, processEnv, field)
+}
+
 function parseAgentContainer(
   name: string,
   raw: unknown,
@@ -181,20 +200,7 @@ function parseAgentContainer(
     out.image = r.image
   }
   if (r.env !== undefined && r.env !== null) {
-    if (typeof r.env !== 'object' || Array.isArray(r.env)) {
-      throw new Error(`agents.${name}.container.env must be a mapping`)
-    }
-    const rawEnv = r.env as Record<string, unknown>
-    const stringEnv: Record<string, string> = {}
-    for (const [k, v] of Object.entries(rawEnv)) {
-      if (typeof v !== 'string') {
-        throw new Error(
-          `agents.${name}.container.env.${k}: must be a string (got ${typeof v})`,
-        )
-      }
-      stringEnv[k] = v
-    }
-    out.env = interpolateEnv(stringEnv, processEnv, `agents.${name}.container.env`)
+    out.env = parseEnvMapping(r.env, processEnv, `agents.${name}.container.env`)
   }
   if (r.mounts !== undefined) {
     out.mounts = parseMountList(name, r.mounts, processEnv, configDir)
@@ -210,55 +216,62 @@ function parseMountList(
   raw: unknown,
   processEnv: NodeJS.ProcessEnv,
   configDir: string | undefined,
+  block: 'container' | 'vm' = 'container',
 ): MountConfig[] {
+  const field = `agents.${agentName}.${block}.mounts`
   if (!Array.isArray(raw)) {
-    throw new Error(`agents.${agentName}.container.mounts must be an array`)
+    throw new Error(`${field} must be an array`)
   }
   const out: MountConfig[] = []
   const seenIds = new Set<string>()
   for (let i = 0; i < raw.length; i++) {
     const entry = raw[i]
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      throw new Error(`agents.${agentName}.container.mounts[${i}] must be a mapping`)
+      throw new Error(`${field}[${i}] must be a mapping`)
     }
     const e = entry as Record<string, unknown>
     if (e.host === undefined) {
-      throw new Error(`agents.${agentName}.container.mounts[${i}].host is required`)
+      throw new Error(`${field}[${i}].host is required`)
     }
     if (e.target === undefined) {
-      throw new Error(`agents.${agentName}.container.mounts[${i}].target is required`)
+      throw new Error(`${field}[${i}].target is required`)
     }
     if (typeof e.host !== 'string' || e.host.length === 0) {
       throw new Error(
-        `agents.${agentName}.container.mounts[${i}].host must be a non-empty string`,
+        `${field}[${i}].host must be a non-empty string`,
       )
     }
     if (typeof e.target !== 'string' || e.target.length === 0) {
       throw new Error(
-        `agents.${agentName}.container.mounts[${i}].target must be a non-empty string`,
+        `${field}[${i}].target must be a non-empty string`,
       )
     }
     const mode = e.mode ?? 'rw'
     if (mode !== 'ro' && mode !== 'rw') {
       throw new Error(
-        `agents.${agentName}.container.mounts[${i}].mode must be "ro" or "rw" (got ${JSON.stringify(e.mode)})`,
+        `${field}[${i}].mode must be "ro" or "rw" (got ${JSON.stringify(e.mode)})`,
       )
     }
     let id: string | undefined
+    if (e.id !== undefined && block === 'vm') {
+      throw new Error(
+        `${field}[${i}].id is not supported: a vm agent has no preset mounts, so there is nothing to subtract by id`,
+      )
+    }
     if (e.id !== undefined) {
       if (typeof e.id !== 'string' || e.id.length === 0) {
         throw new Error(
-          `agents.${agentName}.container.mounts[${i}].id must be a non-empty string`,
+          `${field}[${i}].id must be a non-empty string`,
         )
       }
       if (e.id === 'workspace') {
         throw new Error(
-          `agents.${agentName}.container.mounts[${i}].id: "workspace" is a reserved id (set by the workspace auto-mount). Use a different id or rely on disable_mounts to subtract.`,
+          `${field}[${i}].id: "workspace" is a reserved id (set by the workspace auto-mount). Use a different id or rely on disable_mounts to subtract.`,
         )
       }
       if (seenIds.has(e.id)) {
         throw new Error(
-          `agents.${agentName}.container.mounts: duplicate id "${e.id}"`,
+          `${field}: duplicate id "${e.id}"`,
         )
       }
       seenIds.add(e.id)
@@ -268,18 +281,16 @@ function parseMountList(
     if (e.create !== undefined) {
       if (typeof e.create !== 'boolean') {
         throw new Error(
-          `agents.${agentName}.container.mounts[${i}].create must be a boolean`,
+          `${field}[${i}].create must be a boolean`,
         )
       }
       create = e.create
     }
-    const host = resolveHostPath(
-      agentName,
-      i,
-      interpolateString(e.host, processEnv),
-      configDir,
-    )
+    const host = resolveHostPath(field, i, interpolateString(e.host, processEnv), configDir)
     const target = interpolateString(e.target, processEnv)
+    if (block === 'vm' && target.replace(/\/+$/, '') === VM_WORKDIR) {
+      throw new Error(`${field}[${i}].target: ${VM_WORKDIR} is the agent's read-only workdir`)
+    }
     const m: MountConfig = { host, target, mode }
     if (id !== undefined) m.id = id
     if (create !== undefined) m.create = create
@@ -289,7 +300,7 @@ function parseMountList(
 }
 
 function resolveHostPath(
-  agentName: string,
+  field: string,
   index: number,
   host: string,
   configDir: string | undefined,
@@ -298,7 +309,7 @@ function resolveHostPath(
     const home = process.env.HOME
     if (!home) {
       throw new Error(
-        `agents.${agentName}.container.mounts[${index}].host: cannot expand ~ — $HOME is not set`,
+        `${field}[${index}].host: cannot expand ~ — $HOME is not set`,
       )
     }
     return `${home}/${host.slice(2)}`
@@ -307,7 +318,7 @@ function resolveHostPath(
     const home = process.env.HOME
     if (!home) {
       throw new Error(
-        `agents.${agentName}.container.mounts[${index}].host: cannot expand ~ — $HOME is not set`,
+        `${field}[${index}].host: cannot expand ~ — $HOME is not set`,
       )
     }
     return home
@@ -315,7 +326,7 @@ function resolveHostPath(
   if (isAbsolute(host)) return host
   if (!configDir) {
     throw new Error(
-      `agents.${agentName}.container.mounts[${index}]: relative host path "${host}" requires configDir (zooid.yaml directory) — pass it via loadZooidConfig(yaml, { configDir })`,
+      `${field}[${index}]: relative host path "${host}" requires configDir (zooid.yaml directory) — pass it via loadZooidConfig(yaml, { configDir })`,
     )
   }
   return pathResolve(configDir, host)
@@ -338,7 +349,9 @@ function parseDisableMounts(agentName: string, raw: unknown): string[] {
   return out
 }
 
-const VM_FIELDS = ['image', 'cpus', 'memory', 'disk', 'git', 'allow_hosts'] as const
+const VM_FIELDS = ['image', 'cpus', 'memory', 'disk', 'allow_hosts', 'env', 'mounts'] as const
+/** The guest path runtime-vm mounts the workdir at (VM_GUEST_WORKDIR there). */
+const VM_WORKDIR = '/workspace'
 const HOST_NAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i
 
 /** `8GiB` / `512MiB` → MiB. Binary units only, so there is one way to write a size. */
@@ -350,7 +363,12 @@ function parseSizeMib(raw: unknown, field: string): number {
   return m[2] === 'GiB' ? n * 1024 : n
 }
 
-function parseVmBlock(name: string, raw: unknown): VmConfig {
+function parseVmBlock(
+  name: string,
+  raw: unknown,
+  processEnv: NodeJS.ProcessEnv,
+  configDir: string | undefined,
+): VmConfig {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`agents.${name}.vm must be a mapping`)
   }
@@ -395,22 +413,11 @@ function parseVmBlock(name: string, raw: unknown): VmConfig {
     }
     out.allow_hosts = hosts as string[]
   }
-  if (v.git !== undefined) {
-    let url: URL | undefined
-    try {
-      url = typeof v.git === 'string' ? new URL(v.git) : undefined
-    } catch {
-      url = undefined
-    }
-    if (!url || url.protocol !== 'https:') {
-      throw new Error(`agents.${name}.vm.git must be an https:// URL (got ${JSON.stringify(v.git)})`)
-    }
-    if (!out.allow_hosts?.includes(url.hostname)) {
-      throw new Error(
-        `agents.${name}.vm.git host ${url.hostname} is not in agents.${name}.vm.allow_hosts; the guest could not fetch from it`,
-      )
-    }
-    out.git = v.git as string
+  if (v.env !== undefined && v.env !== null) {
+    out.env = parseEnvMapping(v.env, processEnv, `agents.${name}.vm.env`)
+  }
+  if (v.mounts !== undefined) {
+    out.mounts = parseMountList(name, v.mounts, processEnv, configDir, 'vm')
   }
   return out
 }
@@ -870,8 +877,8 @@ function parseAgents(
 
     if (entry.container !== undefined && entry.container !== null && resolvedRuntime === 'vm') {
       throw new Error(
-        `agents.${name}.container is not valid when runtime is 'vm'. A vm agent has no container ` +
-          `and no host mount besides its read-only workdir; set its image under agents.${name}.vm. See [ZOD109].`,
+        `agents.${name}.container is not valid when runtime is 'vm'. A vm agent has no container; ` +
+          `set its image, env and mounts under agents.${name}.vm. See [ZOD109].`,
       )
     }
 
@@ -907,7 +914,7 @@ function parseAgents(
           `agents.${name}.vm is only valid when the agent's runtime is 'vm' (resolved: '${resolvedRuntime}'). See [ZOD109].`,
         )
       }
-      vmBlock = parseVmBlock(name, entry.vm)
+      vmBlock = parseVmBlock(name, entry.vm, processEnv, configDir)
     }
 
     const binding = parseTransportBinding(name, entry, transports)
