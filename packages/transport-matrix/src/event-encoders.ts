@@ -117,6 +117,10 @@ export interface TurnEnd {
   producedOutput: boolean
   /** The turn's final assistant message, for the push notification's preview. */
   lastMessage?: string
+  /** The ACP client's id for this turn; absent when it had none. */
+  turnId?: string | null
+  /** The harness's stop reason, verbatim and uninterpreted; absent when the prompt threw. */
+  stopReason?: string
 }
 
 /** Push payloads are size-capped, and a notification body is glanceable or useless. */
@@ -142,6 +146,8 @@ export function toTurnEndBody(evt: TurnEnd, threadRoot: string): Record<string, 
     ...(preview ? { last_message: preview.slice(0, PREVIEW_MAX) } : {}),
     agent_id: evt.agentId,
     session_id: evt.sessionId,
+    ...(evt.turnId ? { turn_id: evt.turnId } : {}),
+    ...(typeof evt.stopReason === 'string' ? { stop_reason: evt.stopReason } : {}),
     produced_output: evt.producedOutput,
     'm.relates_to': { rel_type: 'm.thread', event_id: threadRoot },
   }

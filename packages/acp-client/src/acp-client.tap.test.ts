@@ -99,3 +99,43 @@ describe('AcpClient — error TapEvent emission', () => {
     expect(errEvt!.code).toBe('container_exit')
   })
 })
+
+describe('AcpClient — prompt result turn id', () => {
+  function build(onTap?: (e: TapEvent) => void) {
+    const child = new FakeChild() as unknown as ChildProcess
+    const rt = { spawn: vi.fn().mockReturnValue(child) }
+    const client = new AcpClient({
+      agent: { id: 'alice', command: 'foo', args: [] },
+      onEvent: () => {},
+      onApprovalRequest: async () => ({ decision: 'cancel' }),
+      runtime: rt,
+      ...(onTap ? { onTap } : {}),
+    })
+    const fakeConn = {
+      newSession: vi.fn().mockResolvedValue({ sessionId: 'sess-1' }),
+      prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+      loadSession: vi.fn(),
+    }
+    ;(client as unknown as Record<string, unknown>).connection = fakeConn
+    ;(client as unknown as Record<string, unknown>).initialized = true
+    return client
+  }
+
+  it('returns the tracked turn id', async () => {
+    const seen: TapEvent[] = []
+    const client = build((e) => seen.push(e))
+    const result = await client.prompt({ threadId: 't', content: [{ type: 'text', text: 'hi' }] })
+    const started = seen.find((e) => e.kind === 'turn_started')
+    const completed = seen.find((e) => e.kind === 'turn_completed')
+    expect(started?.turnId).toBeTruthy()
+    expect(completed?.turnId).toBe(started?.turnId)
+    expect(result).toEqual({ stopReason: 'end_turn', turnId: started?.turnId })
+  })
+
+  it('turn id is null without a tap', async () => {
+    const client = build()
+    const result = await client.prompt({ threadId: 't', content: [{ type: 'text', text: 'hi' }] })
+    expect(result.turnId).toBeNull()
+    expect(result.stopReason).toBe('end_turn')
+  })
+})
