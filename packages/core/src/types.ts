@@ -44,6 +44,33 @@ export interface MountConfig {
   create?: boolean
 }
 
+/** Where an agent's ACP process runs. Resolved per agent: agent > workforce > 'docker'. [ZOD109] */
+export type RuntimeKind = 'local' | 'docker' | 'podman' | 'vm'
+
+/**
+ * Per-agent VM settings, valid only when the agent resolves to `runtime: vm`.
+ * Sizes are normalised at parse time (`memory: 8GiB` → `memory_mib: 8192`).
+ * Mounts and sizes are fixed when the machine is created; changing them
+ * recreates the machine. [ZOD109]
+ */
+export interface VmConfig {
+  /** OCI image booted as the microVM. Defaults to the preset's image. */
+  image?: string
+  cpus?: number
+  memory_mib?: number
+  disk_gib?: number
+  /** Hosts the guest may reach. Absent means no network at all. [ZOD128] */
+  allow_hosts?: string[]
+  /** Env for the agent's ACP process in the guest. Same rules as `container.env`. */
+  env?: Record<string, string>
+  /**
+   * Host directories mounted into the guest, beyond the read-only workdir.
+   * Same entries as `container.mounts`, minus `id`. Directories only: smolvm
+   * can't mount a single file. A credential mounted here is readable by the guest.
+   */
+  mounts?: MountConfig[]
+}
+
 /**
  * Per-agent container configuration. Holds runtime-neutral container
  * concerns — image, env, mounts. `image` / `env` are rejected at parse time
@@ -90,6 +117,12 @@ export interface ZooidContainerConfig {
 export interface RoomBinding {
   /** Room alias (typical) or room ID. */
   alias: string
+  /**
+   * The alias/ID as configured, kept by `bot-pool` when it rewrites `alias`
+   * to the canonical room ID at bootstrap. Lets `zooid_send_message` accept
+   * the room by the name the agent's config uses (ZOD084).
+   */
+  configuredAlias?: string
   /**
    * Power level the agent should hold in this room at the moment it is
    * created. Omitted = `users_default` (effectively 0). Not reconciled
@@ -211,7 +244,14 @@ export interface AgentConfig {
   first_response_timeout_ms?: number
   /** Milliseconds before an idle ACP session is closed; 0 disables idle close. */
   session_idle_timeout_ms: number
-  /** Container config. Rejected at parse time when runtime: local. */
+  /**
+   * Explicit per-agent runtime. Unset means "inherit the workforce value";
+   * read it through `resolveAgentRuntime`, never directly. [ZOD109]
+   */
+  runtime?: RuntimeKind
+  /** VM settings. Rejected at parse time unless the resolved runtime is vm. */
+  vm?: VmConfig
+  /** Container config. Rejected at parse time when the resolved runtime is vm; image/env rejected when local. */
   container?: ContainerConfig
   /** Per-agent override of the workforce-level `announce` defaults. */
   announce?: AgentAnnounceConfig
@@ -299,7 +339,8 @@ export type TransportConfig = MatrixTransportConfig | HttpTransportConfig
  * each agent must reference one by name.
  */
 export interface ZooidConfig {
-  runtime: 'local' | 'docker' | 'podman'
+  /** Workforce default runtime; agents may override it. [ZOD109] */
+  runtime: RuntimeKind
   /**
    * Workstation identity. A short, lowercase, hyphen-separated name that
    * uniquely identifies this daemon instance (e.g. `laptop`, `ec2-prod`).
@@ -307,7 +348,7 @@ export interface ZooidConfig {
    * `user_namespace` from it, enabling exclusive per-workstation AS namespaces.
    */
   workstation?: string
-  /** Workforce-wide container defaults. Image only — no workforce-level env. Rejected when runtime: local. */
+  /** Workforce-wide container defaults. Image only — no workforce-level env. Rejected when no agent resolves to docker or podman. */
   container?: ZooidContainerConfig
   /** Required. Map of operator-chosen names → transport config. At least one entry. */
   transports: Record<string, TransportConfig>

@@ -7,11 +7,13 @@ import { serve, type ServerType } from '@hono/node-server'
 import {
   ApprovalCorrelator,
   ElicitationCorrelator,
+  containerEngineOf,
   findConfigFile,
   findHttpTransport,
   findMatrixTransport,
   loadZooidConfig,
   mergeCliFlags,
+  resolveAgentRuntime,
   type CliFlags,
   type TapEvent,
   type SessionLifecycleEvent,
@@ -29,8 +31,14 @@ import {
   type SyncLoop,
 } from '@zooid/transport-matrix'
 import { SpawnRegistry, startAgentSocketServers, type AgentSocketsHandle } from '@zooid/context-mcp'
-import { buildAcpRegistry, contextEligibleAgents } from '../build-registry.js'
-import { installPiExtension, resolvePiAgentDir } from '../pi-extension-install.js'
+import {
+  buildAcpRegistry,
+  containerAgentNames,
+  contextEligibleAgents,
+  contextUnavailableAgents,
+} from '../build-registry.js'
+import { provisionVms, type VmsHandle } from '../provision-vms.js'
+import { installPiExtensions } from '../pi-extension-install.js'
 import { resolvePiExtensionBundle } from '@zooid/pi-extension'
 import { prepullImages } from '../prepull-images.js'
 import { mountPushGateway } from '../push-gateway/index.js'
@@ -41,6 +49,7 @@ import { startTriggerScheduler, validateCron } from './trigger-scheduler.js'
 import { mountWebhookRoutes, WEBHOOK_ROUTE_PREFIX } from './webhook-routes.js'
 import { loadCustomVerifiers } from './load-custom-verifiers.js'
 import { joinTriggerRooms } from './trigger-rooms.js'
+import { ignoredHooksWarning } from './ignored-hooks.js'
 
 export interface StartDaemonOpts {
   configPath?: string
@@ -123,6 +132,9 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
   const base = loadZooidConfig(readFileSync(found.path, 'utf8'), { configDir, validateCron })
   const config = mergeCliFlags(base, opts.cliFlags ?? {})
 
+  const hooksWarning = ignoredHooksWarning(config.agents)
+  if (hooksWarning) console.warn(hooksWarning)
+
   const approvals = new ApprovalCorrelator()
   const elicitations = new ElicitationCorrelator()
 
@@ -152,46 +164,50 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
   })
   const agentNames = Object.keys(config.agents)
 
-  const piAgents = agentNames.filter(
-    (name) => (config.agents[name].acp as { preset?: string } | undefined)?.preset === 'pi',
-  )
-  if (piAgents.length > 0) {
-    const bundlePath = resolvePiExtensionBundle()
-    // PI_CODING_AGENT_DIR is normally relative, so each agent gets its own
-    // extensions dir; an absolute value (or none) collapses them into one.
-    const installed = new Set<string>()
-    for (const name of piAgents) {
-      const { dir, scope } = resolvePiAgentDir({
-        agentWorkdir: resolve(configDir, config.agents[name].workdir),
-        daemonHome: process.env.HOME ?? '',
-        env: process.env,
-      })
-      if (installed.has(dir)) continue
-      installed.add(dir)
-      const result = installPiExtension({
-        agentDir: dir,
-        bundlePath,
-        createMissing: scope === 'project',
-      })
-      const where = result.target ? ` extension=${result.target}` : ''
-      const why = result.reason ? ` reason=${result.reason}` : ''
-      console.log(`[pi] agent=${name}${where} status=${result.status}${why}`)
-    }
-  }
+  installPiExtensions({
+    config,
+    configDir,
+    daemonHome: process.env.HOME ?? '',
+    env: process.env,
+    bundlePath: resolvePiExtensionBundle,
+    log: (line) => console.log(line),
+  })
 
-  if (config.runtime !== 'local') {
-    await prepullImages(registry, {
-      engine: config.runtime === 'podman' ? 'podman' : 'docker',
-      runtime: config.runtime,
-      skip: opts.noPrepull ?? process.env.ZOOID_NO_PREPULL === '1',
-      refresh: opts.refreshImages ?? process.env.ZOOID_REFRESH_IMAGES === '1',
-      log: opts.prepullLog,
-    })
+  // Only container agents' images go through the engine; vm images are pulled by smolvm. [ZOD109]
+  const engine = containerEngineOf(config)
+  if (engine) {
+    const containerAgents = containerAgentNames(config)
+    await prepullImages(
+      {
+        agentNames: () => containerAgents,
+        resolveSpawnImage: (n) => registry.resolveSpawnImage(n),
+      },
+      {
+        engine,
+        runtime: engine,
+        skip: opts.noPrepull ?? process.env.ZOOID_NO_PREPULL === '1',
+        refresh: opts.refreshImages ?? process.env.ZOOID_REFRESH_IMAGES === '1',
+        log: opts.prepullLog,
+      },
+    )
   }
+  const vms: VmsHandle = await provisionVms({
+    cfg: config,
+    configDir,
+    agentsDir: opts.agentsDir,
+    daemonHome: process.env.HOME,
+    log: opts.prepullLog,
+  })
 
   console.log(`[context] runDir=${runDir}`)
+  const noContext = new Set(contextUnavailableAgents(config))
   for (const name of agentNames) {
-    console.log(`[context] agent=${name} socket=${contextSockets.paths[name] ?? '(disabled)'}`)
+    const socket =
+      contextSockets.paths[name] ??
+      (noContext.has(name)
+        ? '(unavailable: runtime vm has no host socket, so this agent has no zooid_* context tools; see ZOD109)'
+        : '(disabled)')
+    console.log(`[context] agent=${name} socket=${socket}`)
   }
 
   let server: ServerType | null = null
@@ -224,7 +240,6 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
       homeserver: matrix.transport.homeserver,
       asToken: matrix.transport.as_token,
     })
-    const isContainerRuntime = config.runtime !== 'local'
     const bindings: AgentBinding[] = []
     for (const a of Object.values(config.agents)) {
       if (a.matrix?.transport !== matrix.name) continue
@@ -238,7 +253,9 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
       // Resolve workspace dirs for media attachment routing.
       const workspaceDir = isAbsolute(a.workdir) ? a.workdir : resolve(configDir, a.workdir)
       binding.workspaceDir = workspaceDir
-      binding.agentWorkspacePath = isContainerRuntime ? '/workspace' : workspaceDir
+      // Containers and vm guests both see the workdir at /workspace.
+      binding.agentWorkspacePath =
+        resolveAgentRuntime(a, config) === 'local' ? workspaceDir : '/workspace'
       binding.announceThreadCompletion =
         a.announce?.thread_completion ?? config.announce?.thread_completion ?? false
       bindings.push(binding)
@@ -482,6 +499,11 @@ export async function startDaemon(opts: StartDaemonOpts = {}): Promise<DaemonHan
       await registry.stopAll()
     } catch (err) {
       console.error('stopAll:', err)
+    }
+    try {
+      await vms.stop()
+    } catch (err) {
+      console.error('vm stop:', err)
     }
     try {
       await contextSockets.close()

@@ -1,5 +1,74 @@
 # zooid
 
+## 0.18.0
+
+### Minor Changes
+
+- c113da8: A `runtime: vm` agent can reach the network, take env vars and mount host directories.
+
+  - `vm.allow_hosts` gives the guest a network limited to those hosts. Without it, the guest still has none.
+  - `vm.env` sets env vars on the agent's process in the guest, with the same rules as `container.env`.
+  - `vm.mounts` mounts host directories into the guest, with the same entries as `container.mounts` (`host`, `target`, `mode`, `create`). Directories only. A credential such as a harness login goes here or in `vm.env`. The guest can read anything you pass in, so use a dedicated, revocable one.
+  - `vm.image` accepts a local `docker save` archive or rootfs directory (`./…`, `../…`, `/…`, `~/…`). Rebuilding the archive recreates the machine.
+  - The zooid-tasks pi extension is not installed for vm agents, which have no context socket yet.
+
+- b290fb6: Per-agent `runtime:` — a workforce can mix `local`, `docker`/`podman` and the
+  new `vm` runtime, which runs an agent's ACP process in its own smolvm
+  microVM with its workdir mounted read-only. Context tools and guest
+  networking are not available under `vm` yet.
+
+### Patch Changes
+
+- Serves `@zooid/web` 0.16.0: a turn that ends without output shows "<agent> ended its turn without output" with the stop reason in a tooltip, and room history gaps whose missing messages are thread replies now show their "Load messages" marker and fill.
+- Updated dependencies [04f6c28]
+- Updated dependencies [05d02f5]
+- Updated dependencies
+- Updated dependencies [c113da8]
+- Updated dependencies [b290fb6]
+  - @zooid/context-mcp@0.18.0
+  - @zooid/acp-client@0.18.0
+  - @zooid/runtime-local@0.18.0
+  - @zooid/transport-matrix@0.18.0
+  - @zooid/core@0.18.0
+  - @zooid/runtime-vm@0.18.0
+  - @zooid/transport-http@0.18.0
+  - @zooid/runtime-docker@0.18.0
+  - @zooid/pi-extension@0.14.1
+
+## 0.17.2
+
+### Patch Changes
+
+- Room creation works on Tuwunel 1.9.3 (room v12), which rejects the creator in `power_level_content_override.users`. `createRoom` retries once without the creator on that rejection; older servers keep it listed. `zooid dev` now pins the Tuwunel image to v1.9.3 instead of `:latest`.
+- Updated dependencies
+- Updated dependencies [8d21634]
+  - @zooid/transport-matrix@0.17.2
+  - @zooid/core@0.17.2
+  - @zooid/acp-client@0.17.2
+  - @zooid/context-mcp@0.17.2
+  - @zooid/runtime-docker@0.17.2
+  - @zooid/runtime-local@0.17.2
+  - @zooid/transport-http@0.17.2
+
+## 0.17.1
+
+### Patch Changes
+
+- fa46595: Warn at daemon startup when configured hooks are ignored, post assignment messages as plain Matrix user IDs, and update the pinned agent CLI versions in container images.
+- d7f8329: `zooid dev` now fails immediately, with docker's stderr and exit code, when `docker run` for Tuwunel exits early, and removes a stale non-running `zooid-tuwunel` container left by an interrupted run (zooid#19). A running one is left alone with a clear error.
+- fa46595: Pin the bundled web client to @zooid/web 0.15.0, adding thread history gap markers and controls to load missing messages, with corrected pagination from the oldest room and thread timelines.
+- Updated dependencies [fa46595]
+- Updated dependencies [f60e546]
+- Updated dependencies [e112e88]
+- Updated dependencies [a594930]
+  - @zooid/transport-matrix@0.17.1
+  - @zooid/core@0.17.1
+  - @zooid/acp-client@0.17.1
+  - @zooid/context-mcp@0.17.1
+  - @zooid/runtime-docker@0.17.1
+  - @zooid/runtime-local@0.17.1
+  - @zooid/transport-http@0.17.1
+
 ## 0.17.0
 
 ### Minor Changes

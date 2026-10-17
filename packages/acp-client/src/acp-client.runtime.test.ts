@@ -48,4 +48,23 @@ describe('AcpClient honors a passed-in runtime', () => {
     expect(arg.command).toBe('npx')
     expect(arg.args).toEqual(['-y', '@agentclientprotocol/claude-agent-acp'])
   })
+
+  it('fails start() instead of crashing when the runtime child emits a spawn error', async () => {
+    const child = new FakeChild()
+    const rt = { spawn: vi.fn().mockReturnValue(child as unknown as ChildProcess) }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const client = new AcpClient({
+      agent: { id: 'x', command: 'foo', args: [], cwd: '/missing' },
+      onEvent: () => {},
+      onApprovalRequest: async () => ({ decision: 'cancel' }),
+      runtime: rt,
+    })
+    const started = client.start()
+    const err = Object.assign(new Error('spawn foo ENOENT'), { code: 'ENOENT' })
+    child.emit('error', err)
+    await expect(started).rejects.toThrow('ENOENT')
+    // a second error after the first must not throw as unhandled either
+    expect(() => child.emit('error', err)).not.toThrow()
+    warn.mockRestore()
+  })
 })

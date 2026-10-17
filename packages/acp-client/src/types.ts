@@ -72,6 +72,8 @@ export interface PromptResult {
    * by id, so they should re-read it from here.
    */
   sessionId?: string
+  /** The tracker's id for this turn; null when no TurnTracker is attached (no onTap). */
+  turnId?: string | null
 }
 
 export type AgentEvent =

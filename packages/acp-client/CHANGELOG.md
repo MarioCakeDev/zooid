@@ -1,5 +1,19 @@
 # @zooid/acp-client
 
+## 0.18.0
+
+### Minor Changes
+
+- `dev.zooid.turn.end` now carries the turn's `turn_id` and the agent's `stop_reason`, so a client can tell a turn that ended without a reply apart from one that replied.
+
+### Patch Changes
+
+- 05d02f5: A runtime child that fails to spawn now fails the turn instead of crashing the daemon, and `runtime: local` creates a missing agent workdir before spawning.
+
+## 0.17.2
+
+## 0.17.1
+
 ## 0.17.0
 
 ### Minor Changes

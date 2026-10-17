@@ -1,6 +1,6 @@
 {
   "name": "@zooid/runtime-docker",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Docker runtime for zooid. Spawns the agent CLI inside a container with a workspace mount and an env allowlist.",
   "type": "module",
   "license": "MIT",
@@ -28,6 +28,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:infra": "node ../../scripts/test-tier.mjs --no-file-parallelism src/docker-acp.integration.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

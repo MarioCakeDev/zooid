@@ -1,5 +1,26 @@
 # @zooid/runtime-local
 
+## 0.18.0
+
+### Patch Changes
+
+- 05d02f5: A runtime child that fails to spawn now fails the turn instead of crashing the daemon, and `runtime: local` creates a missing agent workdir before spawning.
+- Updated dependencies [c113da8]
+- Updated dependencies [b290fb6]
+  - @zooid/core@0.18.0
+
+## 0.17.2
+
+### Patch Changes
+
+- @zooid/core@0.17.2
+
+## 0.17.1
+
+### Patch Changes
+
+- @zooid/core@0.17.1
+
 ## 0.17.0
 
 ### Patch Changes

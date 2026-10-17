@@ -208,6 +208,7 @@ export class AcpClient {
     let stdout: Readable
     let stdin: Writable
     let stderr: Readable | null = null
+    let spawnFailed: Promise<never> | null = null
     if (this.options.runtime) {
       const child = this.options.runtime.spawn({
         command,
@@ -219,6 +220,16 @@ export class AcpClient {
         agentId: this.options.agent.id,
       })
       this.runtimeChild = child
+      // Without a listener a failed spawn (e.g. ENOENT on a missing cwd) is an
+      // unhandled 'error' event that takes the whole daemon down.
+      spawnFailed = new Promise<never>((_, reject) => {
+        child.once('error', (err) => {
+          console.warn(`[acp-client:${this.options.agent.id}] runtime spawn failed: ${err.message}`)
+          reject(err)
+        })
+      })
+      spawnFailed.catch(() => {})
+      child.on('error', () => {})
       if (!child.stdout || !child.stdin) {
         throw new Error('AcpClient: runtime returned a child without piped stdio')
       }
@@ -266,13 +277,14 @@ export class AcpClient {
       cancel: (p) => agent.notify(methods.agent.session.cancel, p),
     }
 
+    const initializing = this.connection.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: this.clientCapabilities(),
+      clientInfo: { name: 'zooid', title: 'Zooid', version: '0.0.1' },
+    })
     const init = await this.withDeadline(
       'initialize',
-      this.connection.initialize({
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: this.clientCapabilities(),
-        clientInfo: { name: 'zooid', title: 'Zooid', version: '0.0.1' },
-      }),
+      spawnFailed ? Promise.race([initializing, spawnFailed]) : initializing,
       this.timeouts.initializeMs,
     )
     this.agentCapabilities = init.agentCapabilities ?? {}
@@ -863,7 +875,7 @@ export class AcpClient {
         sessionId: launched.id,
         stopReason: result.stopReason,
       })
-      return { stopReason: result.stopReason, sessionId: sessionId ?? undefined }
+      return { stopReason: result.stopReason, sessionId: sessionId ?? undefined, turnId }
     } catch (err) {
       const c = classify(err)
       this.options.onTap?.({

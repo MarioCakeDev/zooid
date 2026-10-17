@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { buildContextMcpServer, registerTaskTools } from './mcp-server.js'
-import { callDaemon } from './daemon-socket.js'
+import { callDaemon, isTransportError } from './daemon-socket.js'
 import type {
   StartTasksOutput,
   CompleteTaskOutput,
@@ -94,12 +94,46 @@ const remoteTasks: TaskActions = {
     }) as Promise<HandoffOutput>,
 }
 
-// Connect the MCP transport before anything else so the read tools are live
-// immediately; a cold or slow daemon socket must not fail the agent's first
-// tool call with `Not connected` ([[ZOD084]]).
+// Probe the daemon's role once, bounded, before the transport is connected: a
+// transport failure (the socket is dead) is surfaced to the agent as
+// `zooid_context_status` with a notice in the instructions, so "context daemon
+// unreachable" is distinguishable from "tool missing". A daemon that answered
+// with an error, such as "task actions unavailable", is reachable and keeps the
+// plain no-task-tools behaviour ([[ZOD084]]).
+//
+// The probe is bounded so the fork's "register the task tools unconditionally,
+// never gate them on this query" guarantee holds even against a cold or wedged
+// daemon: the worst case adds ROLE_PROBE_DEADLINE_MS before the transport
+// connects, and a failed `describeRole` never hides a task tool for the
+// session.
+const ROLE_PROBE_DEADLINE_MS = 250
+
+async function probeRole(sockPath: string, spawnId: string): Promise<string | undefined> {
+  return await new Promise<string | undefined>((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ROLE_PROBE_DEADLINE_MS)
+    callDaemon(sockPath, { spawnId, method: 'describeRole', params: {} }).then(
+      () => {
+        clearTimeout(timer)
+        resolve(undefined)
+      },
+      (err: unknown) => {
+        clearTimeout(timer)
+        const message = err instanceof Error ? err.message : String(err)
+        process.stderr.write(
+          `zooid-context-mcp: describeRole failed (sock=${sockPath}): ${message}\n`,
+        )
+        resolve(isTransportError(err) ? message : undefined)
+      },
+    )
+  })
+}
+
+const roleError = await probeRole(sockPath, spawnId)
+
 const server = buildContextMcpServer({
   resolve: async () => remoteProvider,
   resolveTasks: async () => remoteTasks,
+  roleError,
 })
 await server.connect(new StdioServerTransport())
 process.stderr.write(`zooid-context-mcp: ready (spawnId=${spawnId})\n`)

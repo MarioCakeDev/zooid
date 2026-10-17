@@ -6,16 +6,19 @@
 > fork is not intended for humans, general use, or redistribution. **Do not
 > depend on this fork.**
 
-This branch (`feat/upstream-0.17-migration`) merges `upstream/main` @ `d7b44534`
-(zooid packages **0.17.0**) into our fork, whose prior deployed revision was
-`141cb8b` (`origin/feat/typed-interrupt`, based on upstream
-`feat/typed-interrupt` @ `c05231e`).
+This branch (`merge/upstream-0.18.0`) merges `upstream/main` @ `55a51bd0`
+(zooid packages **0.18.0**) into our fork `main`, whose merge base was
+`d7b44534` (upstream **0.17.0**); the fork's previous merged revision was
+`a9b04665`.
 
 Everything below is a **fork-only** difference that survives the merge. Upstream
-0.17.0's own new features (structured `zooid_handoff`, ACP form elicitation, ACP
-session lifecycle / `session_idle_timeout`, `acp.mode`, remote-workstation
-roster, `workforce_space`, trigger `messages[]`) are upstream's and are not
-listed here.
+0.18.0's own work (per-agent `runtime:` + the new `vm` runtime,
+`runtime-resolve.ts` / `provision-vms.ts`, `dev.zooid.turn.end` `turn_id` +
+`stop_reason`, the typing registry, thread-history `has_more`, recent-threads
+batching, the `createRoom` creator retry, the `zooid_send_message` bound-room
+alias, `describeRole` surfacing in context-mcp, the socket line-buffer cap,
+`acp-client` spawn-error/workdir handling, and the `scripts/tier-*.mjs` CI
+tiering) is upstream's and is not listed here.
 
 Regenerate with `git log --oneline upstream/main..HEAD`.
 
@@ -104,6 +107,9 @@ Modules:
   `classify`.
 - `packages/acp-client/src/index.ts`, `packages/acp-client/src/types.ts`,
   `packages/acp-client/src/event-mapping.ts` — exports and title forwarding.
+  `PromptResult` carries **both** the fork's `sessionId` (the session the turn
+  actually ran on, so callers re-key after a wedge replay) and upstream's
+  `turnId` (`dev.zooid.turn.end`).
 - Tests: `acp-client.resilience.test.ts`, `acp-client.wedge.test.ts`,
   `packages/core/src/acp-registry.wedge.test.ts`,
   `packages/transport-matrix/src/transport.wedge.test.ts`,
@@ -121,9 +127,9 @@ Modules:
 
 ## 5. Other fork-only changes
 
-- `packages/context-mcp/src/bin.ts`, `daemon-socket.ts` — connect the MCP stdio
-  transport *first* (read tools live immediately) and register the task tools
-  **unconditionally**. The daemon is the authorization boundary and refuses every
+- `packages/context-mcp/src/bin.ts`, `daemon-socket.ts` — register the task tools
+  **unconditionally**, with the MCP stdio transport connected *first* (read tools
+  live immediately). The daemon is the authorization boundary and refuses every
   disallowed task call per request (`depth_limit`, `no_open_task`,
   `unknown_caller`, `self`, `already_open`), so the MCP does not pre-screen. The
   fork previously gated registration on a one-shot `describeRole` snapshot taken
@@ -131,17 +137,38 @@ Modules:
   query (e.g. `binding not owned by caller` during the spawn window) hid
   `zooid_start_task_threads` for the whole MCP lifetime, because the snapshot was
   never refreshed.
+  One `describeRole` probe is still made, but **bounded** (`probeRole`, 250 ms
+  deadline) and used only for upstream's *unreachable* surfacing: on a socket
+  failure the server advertises `zooid_context_status` and the instructions carry
+  the notice, so "daemon unreachable" is distinguishable from "tool missing". A
+  probe that times out, or a daemon that answers with an error such as "task
+  actions unavailable", leaves the tool list plain. `daemon-socket.ts` keeps the
+  fork's cold-connect retry (`callDaemonOnce` + `neverConnected`, 50 ms)
+  alongside upstream's `isTransportError` and the `MAX_LINE_LENGTH` buffer cap.
 - `packages/context-mcp/src/mcp-server.ts` — `registerTaskTools` stays split out
   (read tools live before the task tools land), and the `role` parameter is kept
   for callers that want to pre-screen; production passes a permissive role and
-  lets the daemon decide.
+  lets the daemon decide. Upstream's `roleError` support (the
+  `zooid_context_status` tool plus the instructions notice) is kept as well.
 - `packages/transport-matrix/src/context-provider.ts` — resolve room names and
   survive cross-room thread ids (top-level fallback on
-  `Relations must be in the same room`).
+  `Relations must be in the same room`). `resolveRoom` now tries upstream's local
+  (homeserver-free) `resolveBoundRoom` match first — canonical room id, the
+  `configuredAlias` a bootstrap rewrite preserved, or the bare `#localpart` the
+  config normalizer expanded — and only then falls through to the fork's
+  directory / display-name resolution. The membership refusal lists the bound
+  rooms (`not_in_room: … Rooms this agent is in: …`), as upstream's does.
 - `packages/transport-matrix/src/matrix-client.ts` — carry the homeserver body
   on send failures so callers can tell actionable errors from transient ones.
 - `packages/transport-matrix/src/transport.ts` — `resolveThreadRoot` relation-chain
   walk (never root a thread on an event that itself carries a relation).
+- `packages/transport-matrix/src/transport.ts` — the answered-elicitation typing
+  re-arm is now upstream's typing registry (`typing.pause` when the card is
+  posted, `typing.resume` in the request handler's `finally`), not the fork's raw
+  `client.setTyping(…, 30_000)`. The fork's mirror-notice outcome edit
+  (`editElicitationNotice` + `toElicitationOutcomeBody`) and `forgetElicitation`
+  on `resolved` are unchanged, and the per-session re-key hook
+  (`agents.onSessionRekey`) is kept.
 - `.github/workflows/` — upstream's CI workflow updates are **intentionally not
   carried**. The fork's CI is external (built/deployed via Coolify), and pulling
   upstream `.github/workflows/*` would require a `workflow`-scoped token to push.

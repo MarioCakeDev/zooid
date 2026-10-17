@@ -1,5 +1,30 @@
 # @zooid/transport-http
 
+## 0.18.0
+
+### Patch Changes
+
+- Updated dependencies [05d02f5]
+- Updated dependencies
+- Updated dependencies [c113da8]
+- Updated dependencies [b290fb6]
+  - @zooid/acp-client@0.18.0
+  - @zooid/core@0.18.0
+
+## 0.17.2
+
+### Patch Changes
+
+- @zooid/core@0.17.2
+- @zooid/acp-client@0.17.2
+
+## 0.17.1
+
+### Patch Changes
+
+- @zooid/core@0.17.1
+- @zooid/acp-client@0.17.1
+
 ## 0.17.0
 
 ### Patch Changes

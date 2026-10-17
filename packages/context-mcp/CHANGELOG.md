@@ -1,5 +1,26 @@
 # @zooid/context-mcp
 
+## 0.18.0
+
+### Patch Changes
+
+- 04f6c28: The per-agent context socket now rejects a request line longer than 1 MiB without a newline: it replies with an error and closes the connection instead of buffering it without bound.
+- Updated dependencies [c113da8]
+- Updated dependencies [b290fb6]
+  - @zooid/core@0.18.0
+
+## 0.17.2
+
+### Patch Changes
+
+- @zooid/core@0.17.2
+
+## 0.17.1
+
+### Patch Changes
+
+- @zooid/core@0.17.1
+
 ## 0.17.0
 
 ### Patch Changes

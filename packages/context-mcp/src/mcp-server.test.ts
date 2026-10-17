@@ -114,6 +114,34 @@ describe('buildContextMcpServer', () => {
     expect(names).not.toContain('zooid_start_task_threads')
   })
 
+  it('explains the missing task tools when the role query failed', async () => {
+    const server = buildContextMcpServer({
+      resolve: async () => makeProvider(),
+      resolveTasks: async () => makeTasks(),
+      roleError: 'connect ENOENT /run/context-a.sock',
+    })
+    const client = await connect(server)
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    expect(names).toContain('zooid_context_status')
+    expect(names).not.toContain('zooid_handoff')
+    expect(client.getInstructions()).toContain('context daemon is unreachable')
+    const res = (await client.callTool({ name: 'zooid_context_status', arguments: {} })) as {
+      isError?: boolean
+      content: { text: string }[]
+    }
+    expect(res.isError).toBe(true)
+    expect(res.content[0].text).toContain('connect ENOENT /run/context-a.sock')
+  })
+
+  it('has no status tool when the role resolved', async () => {
+    const server = buildContextMcpServer({
+      resolve: async () => makeProvider(),
+      role: { is_task_assignee: false, can_start_task_threads: true },
+    })
+    const names = (await (await connect(server)).listTools()).tools.map((t) => t.name)
+    expect(names).not.toContain('zooid_context_status')
+  })
+
   it('start_task_threads returns the delivery contract verbatim', async () => {
     const server = buildContextMcpServer({
       resolve: async () => makeProvider(),

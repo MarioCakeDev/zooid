@@ -45,6 +45,9 @@ export interface AgentSocketsHandle {
 /** Same wire error for absent and foreign bindings, so sockets are not an ID oracle. */
 const NOT_OWNED = 'binding not owned by caller'
 
+/** Longest request line, in characters, the listener buffers while waiting for a newline. */
+export const MAX_LINE_LENGTH = 1024 * 1024
+
 export async function startDaemonSocketServer(opts: {
   sockPath: string
   registry: SpawnRegistry
@@ -73,6 +76,15 @@ export async function startDaemonSocketServer(opts: {
         buf = buf.slice(idx + 1)
         if (!line) continue
         await handleLine(line, socket, opts.registry, opts.agentName)
+      }
+      // The client is an agent's process, so its input is untrusted: an
+      // unterminated line must not grow this buffer without bound.
+      if (buf.length > MAX_LINE_LENGTH) {
+        buf = ''
+        socket.end(
+          JSON.stringify({ ok: false, error: 'request line too long' } satisfies DaemonError) + '\n',
+        )
+        socket.destroySoon()
       }
     })
     socket.on('error', () => {})
@@ -318,4 +330,13 @@ export async function callDaemon(sockPath: string, req: DaemonRequest): Promise<
     await new Promise((resolve) => setTimeout(resolve, CONNECT_RETRY_DELAY_MS))
     return await callDaemonOnce(sockPath, req)
   }
+}
+
+/**
+ * True when `err` came from the socket (ENOENT, ECONNREFUSED, ECONNRESET,
+ * ETIMEDOUT, ...) rather than from a reply the daemon sent. Node's socket
+ * errors carry a string `code`; daemon replies reject with a plain Error.
+ */
+export function isTransportError(err: unknown): boolean {
+  return err instanceof Error && typeof (err as NodeJS.ErrnoException).code === 'string'
 }

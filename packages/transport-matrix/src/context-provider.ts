@@ -78,6 +78,20 @@ function topLevelFallback(rootId: string, roomId: string): string {
   return `thread ${rootId} is not in ${roomId}; posted top-level instead`
 }
 
+/** Events fetched per round when collecting recent threads. */
+const RECENT_THREADS_BATCH = 50
+/** Max /messages rounds per getRecentThreads call (peeks not counted). */
+const RECENT_THREADS_MAX_ROUNDS = 5
+
+/** Index of the nth non-null item (1-based n), or -1 if there are fewer. */
+function indexOfNth<T>(items: Array<T | null>, n: number): number {
+  let seen = 0
+  for (let i = 0; i < items.length; i++) {
+    if (items[i] !== null && ++seen === n) return i
+  }
+  return -1
+}
+
 export class MatrixContextProvider implements TransportContextProvider {
   /**
    * Thread root event id → the room it lives in. A thread belongs to exactly
@@ -95,12 +109,13 @@ export class MatrixContextProvider implements TransportContextProvider {
     // burn the page budget on reactions, `dev.zooid.*` custom events, typing
     // notifications, etc., and routinely return empty pages with a stale
     // `has_more` cursor.
+    const filter = { types: ['m.room.message'] }
     const { chunk, end } = await this.opts.client.fetchRoomMessages({
       roomId: channelId,
       asUserId: this.opts.asUserId,
       limit: hopts.limit,
       from: hopts.before,
-      filter: { types: ['m.room.message'] },
+      filter,
     })
     const messages: Message[] = []
     for (let i = chunk.length - 1; i >= 0; i--) {
@@ -108,10 +123,11 @@ export class MatrixContextProvider implements TransportContextProvider {
       const msg = this.toMessage(ev)
       if (msg) messages.push(msg)
     }
+    const hasMore = await this.hasMessagesPast(channelId, end, filter)
     return {
       messages,
-      next_before: end,
-      has_more: end !== undefined,
+      next_before: hasMore ? end : undefined,
+      has_more: hasMore,
     }
   }
 
@@ -119,50 +135,120 @@ export class MatrixContextProvider implements TransportContextProvider {
     channelId: string,
     hopts: HistoryOptions,
   ): Promise<ThreadOverviewPage> {
-    // Server-side filter: `m.room.message` only, and exclude thread replies
-    // (`not_rel_types: ['m.thread']`) so the overview shows top-level entries
-    // and thread roots, not the reply noise underneath them.
-    const { chunk, end } = await this.opts.client.fetchRoomMessages({
+    // Server-side filter: `m.room.message` only, and ask to exclude thread
+    // replies (`not_rel_types: ['m.thread']`). Tuwunel honors `types` but
+    // ignores `not_rel_types` (zooid-ai/zooid#123), so replies still arrive
+    // and are dropped by toThreadOverview(). A page of `limit` events can
+    // then hold few or no entries. Instead, fetch in batches and keep going
+    // until `limit` entries are collected, history runs out, or the round
+    // budget is spent.
+    const filter = { types: ['m.room.message'], not_rel_types: ['m.thread'] }
+    const limit = hopts.limit ?? 50
+    const threads: ThreadOverview[] = []
+    let cursor = hopts.before
+    for (let round = 0; round < RECENT_THREADS_MAX_ROUNDS; round++) {
+      const remaining = limit - threads.length
+      const page = await this.opts.client.fetchRoomMessages({
+        roomId: channelId,
+        asUserId: this.opts.asUserId,
+        limit: Math.max(remaining, RECENT_THREADS_BATCH),
+        from: cursor,
+        filter,
+      })
+      // /messages returns newest-first; keep that order for the overview.
+      const entries = (page.chunk as unknown as MatrixMessageEvent[]).map((ev) =>
+        this.toThreadOverview(ev),
+      )
+      const cut = indexOfNth(entries, remaining)
+      if (cut !== -1) {
+        // The batch holds more entries than we need. A Matrix cursor can't
+        // point inside a page, so returning the first `remaining` entries
+        // with `page.end` would skip the rest. Re-request exactly the events
+        // through the last entry kept so `end` lands right after it.
+        let end = page.end
+        let kept = entries.slice(0, cut + 1)
+        if (cut < entries.length - 1) {
+          const exact = await this.opts.client.fetchRoomMessages({
+            roomId: channelId,
+            asUserId: this.opts.asUserId,
+            limit: cut + 1,
+            from: cursor,
+            filter,
+          })
+          end = exact.end
+          kept = (exact.chunk as unknown as MatrixMessageEvent[]).map((ev) =>
+            this.toThreadOverview(ev),
+          )
+        }
+        for (const t of kept) if (t) threads.push(t)
+        const hasMore = await this.hasMessagesPast(channelId, end, filter)
+        return { threads, next_before: hasMore ? end : undefined, has_more: hasMore }
+      }
+      for (const t of entries) if (t) threads.push(t)
+      // An empty batch or a missing cursor means history is exhausted. A
+      // non-empty batch doesn't prove the opposite (Tuwunel returns `end` on
+      // the oldest page), but the next round's fetch settles it.
+      if (page.chunk.length === 0 || page.end === undefined) {
+        return { threads, next_before: undefined, has_more: false }
+      }
+      cursor = page.end
+    }
+    // Round budget spent: return what we have and let the caller page on.
+    const hasMore = await this.hasMessagesPast(channelId, cursor, filter)
+    return { threads, next_before: hasMore ? cursor : undefined, has_more: hasMore }
+  }
+
+  /** A top-level entry or thread root for the overview; null for anything else. */
+  private toThreadOverview(ev: MatrixMessageEvent): ThreadOverview | null {
+    if (ev.type !== 'm.room.message') return null
+    // m.notice: agent prose sends as m.notice so
+    // .m.rule.suppress_notices silences the chunk storm server-side
+    // (ZNC025 §10) — a thread root sent by an agent must still surface here.
+    if (
+      (ev.content?.msgtype !== 'm.text' && ev.content?.msgtype !== 'm.notice') ||
+      typeof ev.content.body !== 'string'
+    )
+      return null
+    const relatesTo = ev.content['m.relates_to']
+    if (relatesTo?.rel_type === 'm.thread') return null // skip thread replies
+    const agent = this.opts.agentBots.get(ev.sender)
+    const bundled = ev.unsigned?.['m.relations']?.['m.thread']
+    const replyCount = bundled?.count ?? 0
+    const latestTs = bundled?.latest_event?.origin_server_ts ?? ev.origin_server_ts
+    return {
+      id: ev.event_id,
+      sender: ev.sender,
+      text: ev.content.body,
+      timestamp: new Date(ev.origin_server_ts).toISOString(),
+      is_agent: agent !== undefined,
+      ...(agent !== undefined ? { agent_name: agent } : {}),
+      reply_count: replyCount,
+      last_activity_at: new Date(latestTs).toISOString(),
+    }
+  }
+
+  /**
+   * Whether `/messages` has anything older than the cursor `end`. Cursor
+   * presence says nothing: Tuwunel returns a cursor even on an exhausted
+   * page (zooid-ai/zooid#21, #111), and a short page proves nothing either
+   * because the filter can thin a page while older events remain and the
+   * homeserver may clamp `limit`. So peek one event past the cursor with the
+   * same filter.
+   */
+  private async hasMessagesPast(
+    channelId: string,
+    end: string | undefined,
+    filter: { types?: string[]; not_rel_types?: string[] },
+  ): Promise<boolean> {
+    if (end === undefined) return false
+    const peek = await this.opts.client.fetchRoomMessages({
       roomId: channelId,
       asUserId: this.opts.asUserId,
-      limit: hopts.limit,
-      from: hopts.before,
-      filter: { types: ['m.room.message'], not_rel_types: ['m.thread'] },
+      limit: 1,
+      from: end,
+      filter,
     })
-    // /messages returns newest-first; keep that order for the overview.
-    const threads: ThreadOverview[] = []
-    for (const ev of chunk as unknown as MatrixMessageEvent[]) {
-      if (ev.type !== 'm.room.message') continue
-      // m.notice: agent prose sends as m.notice so
-      // .m.rule.suppress_notices silences the chunk storm server-side
-      // (ZNC025 §10) — a thread root sent by an agent must still surface here.
-      if (
-        (ev.content?.msgtype !== 'm.text' && ev.content?.msgtype !== 'm.notice') ||
-        typeof ev.content.body !== 'string'
-      )
-        continue
-      const relatesTo = ev.content['m.relates_to']
-      if (relatesTo?.rel_type === 'm.thread') continue // skip thread replies
-      const agent = this.opts.agentBots.get(ev.sender)
-      const bundled = ev.unsigned?.['m.relations']?.['m.thread']
-      const replyCount = bundled?.count ?? 0
-      const latestTs = bundled?.latest_event?.origin_server_ts ?? ev.origin_server_ts
-      threads.push({
-        id: ev.event_id,
-        sender: ev.sender,
-        text: ev.content.body,
-        timestamp: new Date(ev.origin_server_ts).toISOString(),
-        is_agent: agent !== undefined,
-        ...(agent !== undefined ? { agent_name: agent } : {}),
-        reply_count: replyCount,
-        last_activity_at: new Date(latestTs).toISOString(),
-      })
-    }
-    return {
-      threads,
-      next_before: end,
-      has_more: end !== undefined,
-    }
+    return peek.chunk.length > 0
   }
 
   async getThreadHistory(
@@ -194,10 +280,25 @@ export class MatrixContextProvider implements TransportContextProvider {
       const reply = this.toMessage(ev)
       if (reply) messages.push({ ...reply, thread_id: threadId })
     }
+    // Tuwunel returns `next_batch` even when the page is exhausted, so cursor
+    // presence says nothing about whether messages remain (zooid-ai/zooid#21).
+    // A short page doesn't prove exhaustion either: homeservers clamp `limit`
+    // on their side. So whenever a cursor is present, peek one event past it.
+    let hasMore = false
+    if (next_batch !== undefined) {
+      const peek = await this.opts.client.fetchThreadRelations({
+        roomId: channelId,
+        rootEventId: threadId,
+        asUserId: this.opts.asUserId,
+        limit: 1,
+        from: next_batch,
+      })
+      hasMore = peek.chunk.length > 0
+    }
     return {
       messages,
-      next_before: next_batch,
-      has_more: next_batch !== undefined,
+      next_before: hasMore ? next_batch : undefined,
+      has_more: hasMore,
     }
   }
 
@@ -271,9 +372,13 @@ export class MatrixContextProvider implements TransportContextProvider {
   }
 
   async sendMessage(input: SendMessageInput): Promise<SendMessageResult> {
+    const rooms = this.opts.rooms ?? []
     const roomId = await this.resolveRoom(input.room)
     if (!roomId) {
-      throw new Error(`not_in_room: this agent is not a member of ${input.room}`)
+      const bound = rooms.map((r) => r.alias).join(', ') || 'none'
+      throw new Error(
+        `not_in_room: this agent is not a member of ${input.room}. Rooms this agent is in: ${bound}`,
+      )
     }
 
     const content = { msgtype: 'm.notice', body: input.text }
@@ -335,8 +440,13 @@ export class MatrixContextProvider implements TransportContextProvider {
    */
   private async resolveRoom(input: string): Promise<string | undefined> {
     const rooms = this.opts.rooms ?? []
-    const direct = rooms.find((r) => r.alias === input)
-    if (direct) return direct.alias
+    // A binding rewritten by bootstrap keeps its configured alias in
+    // `configuredAlias`, so try the local (homeserver-free) match first: the
+    // canonical room id, the configured alias, or the bare `#localpart` the
+    // config normalizer expanded. Anything else falls through to the
+    // directory / display-name resolution below.
+    const local = resolveBoundRoom(rooms, input)
+    if (local) return local
     if (rooms.length === 0) return undefined
     // Room IDs have no alias or display name to match.
     if (input.startsWith('!')) return undefined
@@ -411,4 +521,21 @@ export class MatrixContextProvider implements TransportContextProvider {
 
 function missKey(roomId: string, rootId: string): string {
   return `${roomId}\u0000${rootId}`
+}
+
+/**
+ * Resolve an agent-supplied room selector against the agent's own bindings,
+ * locally (ZOD084: no homeserver call). Matches the canonical room ID, the
+ * configured alias, or a bare `#localpart` of a configured `#localpart:server`
+ * alias. Returns the canonical ID, or undefined when nothing (or more than one
+ * distinct room) matches.
+ */
+function resolveBoundRoom(rooms: RoomBinding[], selector: string): string | undefined {
+  const exact = rooms.find((r) => r.alias === selector || r.configuredAlias === selector)
+  if (exact) return exact.alias
+  if (!selector.startsWith('#') || selector.includes(':')) return undefined
+  const hits = new Set(
+    rooms.filter((r) => r.configuredAlias?.startsWith(`${selector}:`)).map((r) => r.alias),
+  )
+  return hits.size === 1 ? [...hits][0] : undefined
 }

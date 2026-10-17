@@ -120,7 +120,11 @@ describe('AcpClient first-response deadline', () => {
     // instant. A wedge and a slow agent look the same until something arrives.
     setTimeout(() => void emitSessionUpdate(internals, 'ses-slow'), 40)
     setTimeout(() => resolvePrompt({ stopReason: 'end_turn' }), 120)
-    await expect(pending).resolves.toEqual({ stopReason: 'end_turn', sessionId: 'ses-slow' })
+    await expect(pending).resolves.toEqual({
+      stopReason: 'end_turn',
+      sessionId: 'ses-slow',
+      turnId: null,
+    })
     expect(client.isAlive()).toBe(true)
   })
 

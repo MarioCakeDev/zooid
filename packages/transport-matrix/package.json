@@ -1,6 +1,6 @@
 {
   "name": "@zooid/transport-matrix",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Matrix Application Service transport for zooid. Routes inbound Matrix messages to ACP agents and posts replies plus approval custom events back to threads.",
   "type": "module",
   "license": "MIT",
@@ -27,6 +27,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:infra": "node ../../scripts/test-tier.mjs --no-file-parallelism tests/context-provider.integration.test.ts tests/media.integration.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

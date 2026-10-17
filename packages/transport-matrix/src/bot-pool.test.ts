@@ -271,7 +271,9 @@ describe('BotPool.bootstrap — create-if-missing rooms', () => {
     }
     const pool = new BotPool(client as never, [binding])
     await pool.bootstrap({ adminUserId: '@admin:localhost' })
-    expect(binding.rooms).toEqual([{ alias: '!resolved:localhost' }])
+    expect(binding.rooms).toEqual([
+      { alias: '!resolved:localhost', configuredAlias: '#welcome:localhost' },
+    ])
   })
 
   it('passes through room IDs (starting with !) without resolving or creating', async () => {
