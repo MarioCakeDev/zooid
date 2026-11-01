@@ -464,11 +464,18 @@ export class AcpAgentRegistry implements AcpRegistry {
       onTap: this.opts.onTap ? (e) => this.opts.onTap!(name, e) : undefined,
       onLifecycle: (e) => {
         this.opts.onLifecycle?.(name, e)
-        // A closed session no longer owns its context spawn. `failed` means the
-        // close attempt errored, but the client has already dropped the session
-        // and will never prompt it again — the binding is equally dead. An
-        // `unsupported` idle close keeps the session alive, so it is left alone.
-        if (e.outcome === 'closed' || e.outcome === 'failed') {
+        // A closed session no longer owns its context spawn. An `unsupported`
+        // idle close keeps the session alive, so it is left alone.
+        //
+        // `failed` is only the end of a session when the *close* failed, which
+        // is the path that sets `reason` ('idle' | 'clear'). The client also
+        // emits `{ outcome: 'failed', reason: undefined }` when a restore
+        // (`resumeSession`/`loadSession`) throws: it then falls straight through
+        // to `newSession` with the mcpServers it minted moments earlier, so
+        // releasing that spawn here would leave the fresh session with a dead
+        // context server for its whole life — every `zooid_*` call answering
+        // `binding not owned by caller`, with no way to repair it.
+        if (e.outcome === 'closed' || (e.outcome === 'failed' && e.reason !== undefined)) {
           this.opts.onSessionEnded?.(name, e.sessionKey)
         }
       },

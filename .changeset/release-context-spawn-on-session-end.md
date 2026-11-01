@@ -24,5 +24,12 @@ and task. That is the cross-thread leak seen live.
   spawn's tools fail loudly with the daemon's existing `binding not owned by
   caller` instead of acting.
 
+Each idle close now releases its spawn, so the *next* prompt mints a fresh one
+and a fresh `zooid-context-<spawnId>` name. Until
+[anomalyco/opencode#40978](https://github.com/anomalyco/opencode/issues/40978)
+lands, opencode's directory-scoped registry still gains one entry (and one
+subprocess) per idle cycle: this change stops stale spawns from *acting*, it does
+not make them disappear.
+
 Also rejects a whitespace-only `zooid_complete_task` summary
 (`z.string().trim().min(1)`); `"   "` previously passed `min(1)`.

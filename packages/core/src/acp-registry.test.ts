@@ -202,6 +202,33 @@ describe('AcpAgentRegistry', () => {
     expect(forwarded).toHaveBeenCalledWith('triage', expect.objectContaining({ outcome: 'closed' }))
   })
 
+  it('keeps the binding when a session restore fails before the new session starts', async () => {
+    const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
+      AcpClient: ReturnType<typeof vi.fn>
+    }
+    const ended = vi.fn()
+    registry = new AcpAgentRegistry({
+      runtime,
+      agents: registry.opts.agents,
+      onSessionEnded: ended,
+    })
+    await registry.prompt('triage', { threadId: 't', content: [] })
+    const opts = AcpClient.mock.calls[0][0] as { onLifecycle: (e: unknown) => void }
+    const base = { agentId: 'triage', sessionKey: 't', sessionId: 'acp-session-1' }
+
+    // `AcpClient.ensureSession` emits this when resume/load throws, *before* it
+    // falls through to newSession with the mcpServers minted a moment earlier.
+    // The spawn is not dead — releasing it here would leave the fresh session
+    // with a context server nobody owns, for the rest of its life.
+    opts.onLifecycle({ ...base, outcome: 'failed', recoveryMethod: 'resume' })
+    opts.onLifecycle({ ...base, outcome: 'failed', recoveryMethod: 'load' })
+    expect(ended).not.toHaveBeenCalled()
+
+    // A failed *close* is a real end: that path sets `reason`.
+    opts.onLifecycle({ ...base, outcome: 'failed', reason: 'idle' })
+    expect(ended).toHaveBeenCalledExactlyOnceWith('triage', 't')
+  })
+
   it('stopAll() invokes stop on every started client', async () => {
     const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
       AcpClient: ReturnType<typeof vi.fn>
