@@ -354,6 +354,8 @@ export function buildAcpRegistry(
     contextSpawns,
     onSessionEstablished: (agentName, sessionKey, sessionId) =>
       opts.contextSpawnRegistry?.linkSession(agentName, sessionKey, sessionId),
+    onSessionEnded: (agentName, sessionKey) =>
+      opts.contextSpawnRegistry?.releaseSession(agentName, sessionKey),
   })
 }
 

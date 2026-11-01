@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -130,6 +130,53 @@ describe('daemon-socket', () => {
     await expect(
       callDaemon(sockPath, { spawnId: 'unknown', method: 'getRoomHistory', params: {} }),
     ).rejects.toThrow(/binding not owned by caller/)
+  })
+
+  // Regression: opencode keeps every ACP mcpServers entry in a directory-scoped
+  // registry for the life of its process, so a spawn whose ACP session ended
+  // stays advertised. Releasing its binding must make those stale calls fail
+  // loudly (NOT_OWNED) instead of acting on a dead session's room/thread/task.
+  it('rejects calls for a released spawn instead of serving its old binding', async () => {
+    const registry = new SpawnRegistry()
+    const sent = vi.fn(async () => ({ event_id: '$sent' }))
+    const spawnId = registry.register({
+      agentName: 'a',
+      threadRef: { channelId: '!room:hs', threadId: '$dead-thread' },
+      sessionKey: '$dead-thread',
+      provider: fakeProvider({ sendMessage: sent }),
+    })
+    const liveSpawn = registry.register({
+      agentName: 'a',
+      threadRef: { channelId: '!room:hs', threadId: '$live-thread' },
+      sessionKey: '$live-thread',
+      provider: defaultProvider,
+    })
+    const sockPath = join(tmpdir(), `zooid-test-${randomUUID()}.sock`)
+    const server = await startDaemonSocketServer({ sockPath, registry, agentName: 'a' })
+    cleanup.push(() => server.close())
+
+    await expect(
+      callDaemon(sockPath, {
+        spawnId,
+        method: 'sendMessage',
+        params: { room_id: '!room:hs', text: 'hello' },
+      }),
+    ).resolves.toEqual({ event_id: '$sent' })
+
+    expect(registry.releaseSession('a', '$dead-thread')).toBe(spawnId)
+
+    await expect(
+      callDaemon(sockPath, {
+        spawnId,
+        method: 'sendMessage',
+        params: { room_id: '!room:hs', text: 'hello after release' },
+      }),
+    ).rejects.toThrow(/binding not owned by caller/)
+    expect(sent).toHaveBeenCalledTimes(1)
+    // The concurrently live session is unaffected.
+    await expect(
+      callDaemon(sockPath, { spawnId: liveSpawn, method: 'getRoomInfo', params: {} }),
+    ).resolves.toEqual({ id: '!r:hs', name: 'general', transport: 'matrix' })
   })
 
   it('routes getChannelMembers and getRoomInfo', async () => {

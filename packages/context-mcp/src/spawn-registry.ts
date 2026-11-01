@@ -39,6 +39,23 @@ export class SpawnRegistry {
       if (value === spawnId) this.spawnByAcpSession.delete(key)
     }
   }
+
+  /**
+   * Release the spawn bound to `(agentName, sessionKey)`, i.e. the one an ACP
+   * session owns. Called when that session ends (idle close, `/clear`, reset)
+   * or is superseded, so the daemon stops serving it: a stale `zooid-context`
+   * MCP server that opencode still advertises for the directory then gets
+   * `binding not owned by caller` instead of acting on the dead session's
+   * room/thread/task. Returns the released spawn id, or undefined when no
+   * binding was held.
+   */
+  releaseSession(agentName: string, sessionKey: string): string | undefined {
+    const spawnId = this.spawnByAgentSession.get(this.key(agentName, sessionKey))
+    if (!spawnId) return undefined
+    this.release(spawnId)
+    return spawnId
+  }
+
   linkSession(agentName: string, sessionKey: string, acpSessionId: string): void {
     const spawnId = this.spawnByAgentSession.get(this.key(agentName, sessionKey))
     if (spawnId) this.spawnByAcpSession.set(acpSessionId, spawnId)

@@ -76,7 +76,7 @@ export function registerTaskTools(
     server.tool(
       'zooid_complete_task',
       'Record an explicit result for the delegated task you were assigned.',
-      { summary: z.string().min(1) },
+      { summary: z.string().trim().min(1) },
       async ({ summary }) => {
         const out = await resolveTasks().then((actions) =>
           actions.completeTask(CALLER_FROM_BINDING, { summary }),

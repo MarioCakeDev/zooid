@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { buildContextMcpServer, registerTaskTools } from './mcp-server.js'
@@ -82,6 +82,26 @@ describe('buildContextMcpServer', () => {
     const names = (await (await connect(server)).listTools()).tools.map((t) => t.name)
     expect(names).toContain('zooid_complete_task')
     expect(names).not.toContain('zooid_start_task_threads')
+  })
+
+  it('rejects a whitespace-only complete_task summary and trims a real one', async () => {
+    const completeTask = vi.fn(async () => ({ status: 'recorded' as const }))
+    const server = buildContextMcpServer({
+      resolve: async () => makeProvider(),
+      resolveTasks: async () => makeTasks({ completeTask }),
+      role: { is_task_assignee: true, can_start_task_threads: false },
+    })
+    const client = await connect(server)
+
+    const rejected = (await client.callTool({
+      name: 'zooid_complete_task',
+      arguments: { summary: '   ' },
+    })) as { isError?: boolean }
+    expect(rejected.isError).toBe(true)
+    expect(completeTask).not.toHaveBeenCalled()
+
+    await client.callTool({ name: 'zooid_complete_task', arguments: { summary: '  done  ' } })
+    expect(completeTask).toHaveBeenCalledWith(expect.anything(), { summary: 'done' })
   })
 
   it('registerTaskTools adds task tools to an already-connected server', async () => {

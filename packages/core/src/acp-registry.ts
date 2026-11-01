@@ -147,6 +147,15 @@ export interface AcpAgentRegistryOptions {
    */
   onSessionEstablished?: (agentName: string, sessionKey: string, sessionId: string) => void
   /**
+   * Called when an ACP session stops owning its context spawn: it was closed
+   * (idle timeout, `/clear`, reset) or superseded by a fresh session. The
+   * context spawn registry releases the binding here so a `zooid-context` MCP
+   * server left registered in the agent's directory-scoped tool list can no
+   * longer act on the dead session's room/thread/task — the daemon answers
+   * `binding not owned by caller` instead.
+   */
+  onSessionEnded?: (agentName: string, sessionKey: string) => void
+  /**
    * Handshake deadlines forwarded to each `AcpClient`. Bounds `initialize`
    * and `loadSession`/`newSession` so a dead/recreated agent container fails
    * the dispatch instead of hanging the daemon.
@@ -281,7 +290,13 @@ export class AcpAgentRegistry implements AcpRegistry {
   async endSession(name: string, threadId: string): Promise<void> {
     if (!this.hasAgent(name)) return
     const client = this.clients.get(name)
-    await client?.endSession(threadId)
+    try {
+      await client?.endSession(threadId)
+    } finally {
+      // The session is forgotten either way (close supported or not), so its
+      // context binding must stop being callable.
+      this.opts.onSessionEnded?.(name, threadId)
+    }
   }
 
   async cancelSession(name: string, sessionId: string): Promise<void> {
@@ -447,7 +462,16 @@ export class AcpAgentRegistry implements AcpRegistry {
         ? (req, signal) => this.onElicitationRequest!(name, req, signal)
         : undefined,
       onTap: this.opts.onTap ? (e) => this.opts.onTap!(name, e) : undefined,
-      onLifecycle: this.opts.onLifecycle ? (e) => this.opts.onLifecycle!(name, e) : undefined,
+      onLifecycle: (e) => {
+        this.opts.onLifecycle?.(name, e)
+        // A closed session no longer owns its context spawn. `failed` means the
+        // close attempt errored, but the client has already dropped the session
+        // and will never prompt it again — the binding is equally dead. An
+        // `unsupported` idle close keeps the session alive, so it is left alone.
+        if (e.outcome === 'closed' || e.outcome === 'failed') {
+          this.opts.onSessionEnded?.(name, e.sessionKey)
+        }
+      },
       sessionIdleTimeoutMs: cfg.session_idle_timeout_ms,
       contextSpawn: this.opts.contextSpawns?.[name],
       timeouts: this.resolveTimeouts(name),

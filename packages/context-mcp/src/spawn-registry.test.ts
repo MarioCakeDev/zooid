@@ -90,6 +90,58 @@ describe('SpawnRegistry', () => {
     expect(r.get(spawnId)).toBeUndefined()
   })
 
+  it('releaseSession() drops only the (agent, session key) binding and its ACP links', () => {
+    const r = new SpawnRegistry()
+    const doomed = r.register({
+      agentName: 'a',
+      threadRef: { channelId: 'c', threadId: 't1' },
+      sessionKey: 't1',
+      provider: fakeProvider,
+    })
+    const kept = r.register({
+      agentName: 'a',
+      threadRef: { channelId: 'c', threadId: 't2' },
+      sessionKey: 't2',
+      provider: fakeProvider,
+    })
+    const otherAgent = r.register({
+      agentName: 'b',
+      threadRef: { channelId: 'c', threadId: 't1' },
+      sessionKey: 't1',
+      provider: fakeProvider,
+    })
+    r.linkSession('a', 't1', 'acp-a-t1')
+    r.linkSession('b', 't1', 'acp-b-t1')
+
+    expect(r.releaseSession('a', 't1')).toBe(doomed)
+    expect(r.get(doomed)).toBeUndefined()
+    expect(r.getByAcpSession('acp-a-t1')).toBeUndefined()
+    // Same thread key on another agent, and the agent's other thread, survive.
+    expect(r.get(kept)?.threadRef.threadId).toBe('t2')
+    expect(r.get(otherAgent)?.agentName).toBe('b')
+    expect(r.getByAcpSession('acp-b-t1')?.spawnId).toBe(otherAgent)
+  })
+
+  it('releaseSession() is idempotent and a later register() mints a fresh spawn', () => {
+    const r = new SpawnRegistry()
+    const first = r.register({
+      agentName: 'a',
+      threadRef: { channelId: 'c', threadId: 't' },
+      sessionKey: 't',
+      provider: fakeProvider,
+    })
+    r.releaseSession('a', 't')
+    expect(r.releaseSession('a', 't')).toBeUndefined()
+
+    const second = r.register({
+      agentName: 'a',
+      threadRef: { channelId: 'c', threadId: 't' },
+      sessionKey: 't',
+      provider: fakeProvider,
+    })
+    expect(second).not.toBe(first)
+  })
+
   it('get() returns undefined for unknown spawn-ids', () => {
     const r = new SpawnRegistry()
     expect(r.get('not-a-real-id')).toBeUndefined()
