@@ -5,6 +5,7 @@ import {
   CONTEXT_CONTAINER_BIN,
   CONTEXT_CONTAINER_BIN_DIR,
   CONTEXT_CONTAINER_SOCK,
+  SpawnRegistry,
 } from '@zooid/context-mcp'
 
 const matrixCfg: ZooidConfig = {
@@ -125,6 +126,27 @@ describe('buildAcpRegistry — context provider in a container runtime', () => {
     expect(a.name).toBe('zooid-context-spawn-a')
     expect(b.name).toBe('zooid-context-spawn-b')
     expect(a.name).not.toBe(b.name)
+  })
+
+  // Regression: ending an ACP session must release its daemon-side binding, so
+  // a zooid-context MCP server opencode still advertises for the directory
+  // cannot act for the dead session ([[ZOD092]] follow-up).
+  it('releases a session spawn when that ACP session ends', async () => {
+    const spawnRegistry = new SpawnRegistry()
+    const registry = buildAcpRegistry(matrixCfg, {
+      ...opts,
+      contextSpawnRegistry: spawnRegistry,
+    })
+    const factory = registry.opts.contextSpawns!.architect!
+    const spec = await factory('$threadA', '!r:hs', '$threadA')
+    const spawnId = spawnRegistry
+      .get(spec.name.replace(/^zooid-context-/, ''))
+      ?.spawnId
+    expect(spawnId).toBeDefined()
+
+    expect(registry.opts.onSessionEnded).toBeTypeOf('function')
+    registry.opts.onSessionEnded!('architect', '$threadA')
+    expect(spawnRegistry.get(spawnId!)).toBeUndefined()
   })
 
   it('leaves the local runtime host-shaped (no context mounts, host command)', async () => {
