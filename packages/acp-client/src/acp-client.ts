@@ -51,6 +51,8 @@ export interface SpawnRuntime {
     mounts?: Array<{ path: string; target: string; mode: 'ro' | 'rw' }>
     /** Agent id. Container runtimes use it for deterministic container names. */
     agentId?: string
+    /** Per-conversation identity; container runtimes derive a unique name from it. */
+    spawnKey?: string
   }): ChildProcess
 }
 
@@ -86,6 +88,20 @@ const DEFAULT_SESSION_TIMEOUT_MS = 60_000
  */
 const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 300_000
 
+/**
+ * The durable `(sessionKey → ACP sessionId)` map. Structural so the daemon can
+ * share one store between the per-conversation clients of the same agent —
+ * independent stores on the same file would each rewrite it from their own
+ * in-memory map and drop the other conversations' pointers.
+ */
+export interface SessionStoreLike {
+  load(): Promise<void>
+  get(sessionKey: string): string | undefined
+  set(sessionKey: string, sessionId: string): Promise<void>
+  delete(sessionKey: string): Promise<void>
+  flush(): Promise<void>
+}
+
 export interface AcpClientOptions {
   agent: AgentConfig
   /**
@@ -95,6 +111,19 @@ export interface AcpClientOptions {
    * is logged once on first ensureSession).
    */
   agentDataDir?: string
+  /**
+   * Shared per-agent session store. When set it wins over `agentDataDir`: the
+   * daemon runs one client per conversation, and they must all persist into
+   * the same map/file.
+   */
+  sessionStore?: SessionStoreLike
+  /**
+   * Stable identity of the conversation this client serves (the daemon's
+   * `<agent>\0<session key>`). Forwarded to the spawn as `spawnKey`, which a
+   * container runtime turns into a per-conversation container name. Omitted =
+   * no per-conversation container identity.
+   */
+  instanceId?: string
   onEvent: (event: AgentEvent) => void
   onApprovalRequest: (req: ApprovalRequest) => Promise<ApprovalDecision>
   onElicitationRequest?: (req: ElicitationRequest, signal: AbortSignal) => Promise<ElicitationResponse>
@@ -158,7 +187,7 @@ export class AcpClient {
   private connection: Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'resumeSession' | 'closeSession' | 'setSessionMode' | 'prompt' | 'cancel'> | null = null
   private rawConnection: ClientConnection | null = null
   private readonly sessions = new SessionMap()
-  private store: JsonFileSessionStore | null = null
+  private store: SessionStoreLike | null = null
   private storeLoaded: Promise<void> | null = null
   private agentCapabilities: AgentCapabilities = {}
   private readonly lifecycle = new Map<string, KeyLifecycle>()
@@ -200,6 +229,52 @@ export class AcpClient {
     return this.initialized && !this.dead && this.connection !== null
   }
 
+  /**
+   * ACP session ids this process currently owns. With the daemon's
+   * per-conversation process model there is exactly one, but the session map
+   * stays a map so a client can still host several sessions if used directly.
+   */
+  sessionIds(): string[] {
+    return this.sessions.listForAgent(this.options.agent.id).map((s) => s.sessionId)
+  }
+
+  /** Whether this process owns the given ACP session id. */
+  ownsSession(sessionId: string): boolean {
+    return this.sessionIds().includes(sessionId)
+  }
+
+  /**
+   * True while this process has work in flight: a turn, an approval or
+   * elicitation waiting on a human, a reset or an idle close. The registry's
+   * process reaper never kills a busy process, so a long turn is not mistaken
+   * for an idle one.
+   */
+  isBusy(): boolean {
+    for (const state of this.lifecycle.values()) {
+      if (state.prompts || state.humans || state.resetting || state.closing || state.activeTurns.size) {
+        return true
+      }
+    }
+    return false
+  }
+
+  /** Whether any ACP session is still live in this process. */
+  hasLiveSessions(): boolean {
+    return this.sessionIds().length > 0
+  }
+
+  /**
+   * Whether this adapter can bring a session back after the process is gone
+   * (`session/resume` or `session/load`). The daemon only reaps a process that
+   * still has a live session when this is true — otherwise killing it would
+   * silently drop the conversation.
+   */
+  canResumeSessions(): boolean {
+    return Boolean(
+      this.agentCapabilities.sessionCapabilities?.resume || this.agentCapabilities.loadSession,
+    )
+  }
+
   async start(): Promise<void> {
     this.generation++
     this.clearTimers()
@@ -218,6 +293,7 @@ export class AcpClient {
         image: this.options.agent.image,
         mounts: this.options.agent.mounts,
         agentId: this.options.agent.id,
+        spawnKey: this.options.instanceId,
       })
       this.runtimeChild = child
       // Without a listener a failed spawn (e.g. ENOENT on a missing cwd) is an
@@ -740,7 +816,9 @@ export class AcpClient {
 
   private async ensureStoreLoaded(): Promise<void> {
     if (!this.store) {
-      if (!this.options.agentDataDir) {
+      if (this.options.sessionStore) {
+        this.store = this.options.sessionStore
+      } else if (!this.options.agentDataDir) {
         if (!this.warnedNoStore) {
           console.warn(
             `[acp-client:${this.options.agent.id}] no agentDataDir configured; ` +
@@ -750,11 +828,12 @@ export class AcpClient {
         }
         this.storeLoaded = Promise.resolve()
         return this.storeLoaded
+      } else {
+        this.store = new JsonFileSessionStore({
+          agentId: this.options.agent.id,
+          dir: this.options.agentDataDir,
+        })
       }
-      this.store = new JsonFileSessionStore({
-        agentId: this.options.agent.id,
-        dir: this.options.agentDataDir,
-      })
     }
     if (!this.storeLoaded) {
       this.storeLoaded = this.store.load().catch((err) => {

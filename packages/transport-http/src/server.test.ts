@@ -22,6 +22,7 @@ interface FakeRegistryOptions {
   stopReason?: PromptResult['stopReason']
   sessionId?: string
   ensureSession?: (name: string, threadId: string) => Promise<string>
+  endSession?: (name: string, threadId: string) => Promise<void>
   prompt?: (name: string, input: PromptInput) => Promise<PromptResult>
 }
 
@@ -37,7 +38,7 @@ function makeRegistry(opts: FakeRegistryOptions = {}): AcpRegistry {
     ensureSession:
       opts.ensureSession ??
       vi.fn(async () => opts.sessionId ?? SID),
-    endSession: vi.fn(),
+    endSession: opts.endSession ?? vi.fn(),
     prompt:
       opts.prompt ??
       vi.fn(async (name) => {
@@ -192,6 +193,20 @@ describe('POST /agents/:name/sessions', () => {
     expect(input.threadId).toMatch(/^[0-9a-f-]{8,}$/)
     expect(Array.isArray(input.content)).toBe(true)
     expect(input.content[0]).toMatchObject({ type: 'text', text: 'hello' })
+  })
+
+  it('ends the per-request conversation when the turn is over', async () => {
+    const endSession = vi.fn(async () => {})
+    const app = createApp({
+      agents: makeRegistry({ endSession }),
+      approvals: newApprovals(),
+      token: TOKEN,
+    })
+    const res = await postJson(app, '/agents/triage/sessions', { prompt: 'hi' })
+    await res.text()
+    expect(endSession).toHaveBeenCalledTimes(1)
+    expect(endSession.mock.calls[0]![0]).toBe('triage')
+    expect(endSession.mock.calls[0]![1]).toMatch(/^[0-9a-f-]{8,}$/)
   })
 })
 

@@ -31,3 +31,26 @@ describe('session_idle_timeout', () => {
     )
   })
 })
+
+describe('process_idle_timeout', () => {
+  it('is unset by default so the registry default (5m) applies', () => {
+    expect(config().agents.architect!.process_idle_timeout_ms).toBeUndefined()
+  })
+
+  it.each([
+    ['30s', 30_000],
+    ['5m', 300_000],
+    ['2h', 7_200_000],
+    ['0', 0],
+  ])('parses %s', (raw, expected) => {
+    expect(
+      config('    process_idle_timeout: ' + raw + '\n').agents.architect!.process_idle_timeout_ms,
+    ).toBe(expected)
+  })
+
+  it.each(['-1m', 'forever', '1d', '1.5m'])('rejects %s with an agent-scoped error', (raw) => {
+    expect(() => config('    process_idle_timeout: ' + raw + '\n')).toThrow(
+      /agents\.architect\.process_idle_timeout/,
+    )
+  })
+})

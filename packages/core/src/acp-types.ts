@@ -52,6 +52,14 @@ export interface AcpSpawnSpec {
    * Ignored by LocalAcpRuntime.
    */
   agentId?: string
+  /**
+   * Stable identity of the ACP conversation this process serves (the daemon's
+   * `<agent>\0<session key>`). Container runtimes derive a deterministic
+   * per-conversation container name from it, so spawning one conversation's
+   * process can never reap another conversation's container. Omitted keeps the
+   * legacy one-container-per-agent name. Ignored by LocalAcpRuntime.
+   */
+  spawnKey?: string
 }
 
 /**

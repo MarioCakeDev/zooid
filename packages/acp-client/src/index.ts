@@ -1,6 +1,8 @@
 export { AcpClient } from './acp-client.js'
 export { AgentProcess } from './agent-process.js'
 export { SessionMap } from './session-map.js'
+export { JsonFileSessionStore } from './session-store.js'
+export type { SessionStoreLike } from './acp-client.js'
 export { PRESETS, resolvePreset, isPreset } from './presets.js'
 export type {
   PresetName,

@@ -5,12 +5,14 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   AcpClient,
+  JsonFileSessionStore,
   resolvePreset,
   type AgentEvent,
   type ApprovalDecision,
   type ApprovalRequest,
   type PromptInput,
   type PromptResult,
+  type SessionStoreLike,
   type TapEvent,
   type AcpClientTimeouts,
   isSessionWedge,
@@ -34,8 +36,15 @@ export type AcpRegistryApprovalHandler = (
 
 /**
  * Daemon-side surface of the ACP agent fleet. The transport (HTTP) consumes
- * this; the CLI builds it via `buildAcpRegistry`. Long-lived: one
- * `AcpClient` per agent, kept alive across prompts.
+ * this; the CLI builds it via `buildAcpRegistry`.
+ *
+ * One ACP process per agent **conversation** (zooid's session key: the thread
+ * id for a thread-level turn, a composed `thread|call` key for a handoff arc).
+ * The process is reused for that conversation's turns and idle-reaped. That is
+ * the containment boundary: an adapter that keeps `session/new` MCP servers in
+ * a directory-scoped registry (opencode#40978) can only ever advertise the
+ * servers of the one session living in its process, so a foreign session's
+ * `zooid-context` server cannot answer a call.
  */
 export interface AcpRegistry {
   hasAgent(name: string): boolean
@@ -45,6 +54,12 @@ export interface AcpRegistry {
   hasContextSpawn(name: string): boolean
   /** Per-agent approval timeout from zooid.yaml. 0 means no timeout. */
   getApprovalTimeoutMs(name: string): number
+  /**
+   * Establish (or recover) the session for one conversation and return its ACP
+   * session id. `threadId` is zooid's session key — the thread root for a
+   * thread-level turn, a composed `thread|call` key for a handoff arc — and is
+   * also the key the per-conversation process is held under.
+   */
   ensureSession(
     name: string,
     threadId: string,
@@ -162,6 +177,15 @@ export interface AcpAgentRegistryOptions {
    */
   timeouts?: AcpClientTimeouts
   /**
+   * Idle deadline for a per-conversation ACP process, in milliseconds. Once a
+   * process has been idle this long — no turn, no pending approval or
+   * elicitation — it is closed and reaped, so four agents with a handful of
+   * recently-active threads cost a handful of processes, not one per thread
+   * ever seen. Per-agent override: `agents.<name>.process_idle_timeout_ms`.
+   * `0` disables process reaping. Default 5m.
+   */
+  processIdleTimeoutMs?: number
+  /**
    * How many times a single prompt may be attempted against an agent. The
    * first attempt is the original dispatch; `2` (the default) means exactly one
    * replay after a wedged session. Bounded on purpose: the same prompt must
@@ -191,6 +215,40 @@ export interface AcpAgentRegistryOptions {
  */
 const DEFAULT_MAX_PROMPT_ATTEMPTS = 2
 
+/**
+ * Default idle deadline for a per-conversation ACP process. Deliberately
+ * shorter than the 10m session idle close: the expensive thing is the process
+ * and its MCP clients, and a reaped process resumes its session (when the
+ * adapter supports it) on the next turn.
+ */
+const DEFAULT_PROCESS_IDLE_TIMEOUT_MS = 300_000
+
+/** A start that dies this soon is a crash, not a normal session end. */
+const QUICK_DEATH_MS = 60_000
+/** Crash-loop breaker: N quick failures inside the window opens the circuit. */
+const CRASH_THRESHOLD = 3
+const CRASH_WINDOW_MS = 60_000
+const CRASH_COOLDOWN_MS = 30_000
+const CRASH_COOLDOWN_MAX_MS = 600_000
+
+/** One live ACP process, bound to exactly one conversation. */
+interface ClientEntry {
+  client: AcpClient
+  agent: string
+  sessionKey: string
+  startedAt: number
+  lastUsed: number
+}
+
+interface CrashState {
+  /** Timestamps of recent quick failures, within CRASH_WINDOW_MS. */
+  failures: number[]
+  /** No spawn is attempted before this timestamp. */
+  openUntil: number
+  /** Current backoff, doubled on every trip up to CRASH_COOLDOWN_MAX_MS. */
+  cooldown: number
+}
+
 export type ContextSpawnFactory = (
   threadId: string,
   channelId?: string,
@@ -204,10 +262,24 @@ export type ContextSpawnFactory = (
 
 export class AcpAgentRegistry implements AcpRegistry {
   readonly opts: AcpAgentRegistryOptions
-  private readonly clients = new Map<string, AcpClient>()
-  /** In-flight first-time starts, keyed by agent, so concurrent dispatches
-   *  don't spawn duplicate children/containers for the same agent. */
-  private readonly starting = new Map<string, Promise<AcpClient>>()
+  /** One live process per (agent, conversation), addressed by agent + session key. */
+  private readonly clients = new Map<string, ClientEntry>()
+  /** In-flight starts, keyed like `clients`, so concurrent dispatches for the
+   *  same conversation don't spawn duplicate children/containers. */
+  private readonly starting = new Map<string, Promise<ClientEntry>>()
+  /** Processes being torn down; a dispatch for the same conversation waits for
+   *  the old child to die instead of racing it onto the same session. */
+  private readonly stopping = new Map<string, Promise<void>>()
+  /** One shared session store per agent: every conversation's client persists
+   *  into the same `sessions.json` instead of clobbering each other's copy. */
+  private readonly stores = new Map<string, JsonFileSessionStore>()
+  /** Per-conversation crash-loop bookkeeping. */
+  private readonly crashes = new Map<string, CrashState>()
+  /** Conversations whose context binding has already been released, so the
+   *  idle-close lifecycle and our own end/reap paths don't double-release. */
+  private readonly released = new Set<string>()
+  private reaper: ReturnType<typeof setInterval> | undefined
+  private warnedNoReap = false
 
   onEvent: AcpRegistryEventHandler
   onApprovalRequest: AcpRegistryApprovalHandler
@@ -281,34 +353,49 @@ export class AcpAgentRegistry implements AcpRegistry {
     contextThreadId?: string,
   ): Promise<string> {
     if (!this.hasAgent(name)) throw new Error(`unknown agent: ${name}`)
-    const client = await this.ensureClient(name)
-    const sessionId = await client.ensureSession(threadId, channelId, contextThreadId)
+    const entry = await this.ensureClient(name, threadId)
+    const sessionId = await entry.client.ensureSession(threadId, channelId, contextThreadId)
+    this.touch(entry)
+    this.markBound(name, threadId)
     this.opts.onSessionEstablished?.(name, threadId, sessionId)
     return sessionId
   }
 
   async endSession(name: string, threadId: string): Promise<void> {
     if (!this.hasAgent(name)) return
-    const client = this.clients.get(name)
-    try {
-      await client?.endSession(threadId)
-    } finally {
+    const key = this.clientKey(name, threadId)
+    const entry = this.clients.get(key)
+    this.crashes.delete(key)
+    // Remove the entry from dispatch *before* awaiting the close, and publish
+    // `stopping[key]` in the same synchronous step (inside retireEntry): a
+    // turn arriving mid-/clear must wait for the teardown, never run on the
+    // process we are about to kill.
+    if (!entry) {
       // The session is forgotten either way (close supported or not), so its
       // context binding must stop being callable.
-      this.opts.onSessionEnded?.(name, threadId)
+      this.releaseBinding(name, threadId)
+      return
     }
+    await this.retireEntry(entry, `session ended (${threadId})`, () =>
+      entry.client.endSession(threadId),
+    )
   }
 
   async cancelSession(name: string, sessionId: string): Promise<void> {
     if (!this.hasAgent(name)) return
-    const client = this.clients.get(name)
     // Always nudge the correlator first so any pending approvals resolve with
     // 'cancel' regardless of whether the client is alive or already stopped.
     this.opts.approvals?.cancelSession(sessionId)
     this.opts.elicitations?.cancelSession(sessionId, 'interrupt')
-    if (!client) return
+    // The caller knows the ACP session id, not the conversation key; find the
+    // one process that owns it (per-conversation processes ⇒ one candidate).
+    const entry = [...this.clients.values()].find(
+      (e) => e.agent === name && e.client.ownsSession(sessionId),
+    )
+    if (!entry) return
+    this.touch(entry)
     try {
-      await client.cancel(sessionId)
+      await entry.client.cancel(sessionId)
     } catch (err) {
       // ACP cancel is a notification; failures here are typically transport
       // errors after the agent has already exited.
@@ -331,12 +418,14 @@ export class AcpAgentRegistry implements AcpRegistry {
   async prompt(name: string, input: PromptInput): Promise<PromptResult> {
     if (!this.hasAgent(name)) throw new Error(`unknown agent: ${name}`)
     const maxAttempts = this.resolveMaxPromptAttempts()
-    let client = await this.ensureClient(name)
+    let entry = await this.ensureClient(name, input.threadId)
     for (let attempt = 1; ; attempt++) {
       try {
         // `prompt()` reports the session it ran on, which after a recovery is
         // the *fresh* one — callers key their per-session state off it.
-        return await client.prompt(input)
+        const result = await entry.client.prompt(input)
+        this.touch(entry)
+        return result
       } catch (err) {
         if (!isSessionWedge(err)) throw err
         const wedged = err.sessionId
@@ -355,15 +444,26 @@ export class AcpAgentRegistry implements AcpRegistry {
           })
           throw err
         }
+        // Retire this conversation's process only. Every other thread keeps its
+        // process and session — a wedge is no longer an agent-wide event. The
+        // client is already dead; `retireEntry` still fences dispatch behind the
+        // teardown and releases the stale context binding.
+        console.warn(
+          `[acp:${name}] process for ${input.threadId} wedged ` +
+            `(session ${wedged ?? '<none>'}); respawning it and replaying`,
+        )
+        await this.retireEntry(entry, 'wedged', async () => {})
         // Fresh client (the wedged one is dead) and a fresh session: the wedged
         // session id was dropped from the store, so `ensureSession` issues
         // session/new rather than resuming the corpse.
-        client = await this.ensureClient(name)
-        const next = await client.ensureSession(
+        entry = await this.ensureClient(name, input.threadId)
+        const next = await entry.client.ensureSession(
           input.threadId,
           input.channelId,
           input.contextThreadId,
         )
+        this.touch(entry)
+        this.markBound(name, input.threadId)
         this.opts.onSessionEstablished?.(name, input.threadId, next)
         if (wedged) this.onSessionRekey?.(name, input.threadId, wedged, next)
         console.warn(
@@ -400,8 +500,44 @@ export class AcpAgentRegistry implements AcpRegistry {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.allSettled([...this.clients.values()].map((c) => c.stop()))
+    if (this.reaper) {
+      clearInterval(this.reaper)
+      this.reaper = undefined
+    }
+    const entries = [...this.clients.values()]
     this.clients.clear()
+    await Promise.allSettled(entries.map((e) => e.client.stop()))
+    this.stopping.clear()
+  }
+
+  /**
+   * Stop every process that has been idle past its agent's deadline. Public so
+   * a test (or an operator command) can sweep deterministically; the daemon
+   * drives it from a timer.
+   */
+  async reapIdle(now: number = Date.now()): Promise<void> {
+    const victims: ClientEntry[] = []
+    for (const entry of this.clients.values()) {
+      const timeout = this.processIdleTimeoutFor(entry.agent)
+      if (!timeout || now - entry.lastUsed < timeout) continue
+      // Never kill a turn, an approval/elicitation wait or a close in flight.
+      if (entry.client.isBusy()) continue
+      // Killing a process that still holds a live session is only safe if the
+      // adapter can bring it back (session/resume or session/load). Otherwise
+      // it would silently drop the conversation's context.
+      if (entry.client.hasLiveSessions() && !entry.client.canResumeSessions()) {
+        if (!this.warnedNoReap) {
+          console.warn(
+            '[acp] not reaping idle processes: this adapter cannot resume or load ' +
+              'sessions, so a reaped process would drop the conversation',
+          )
+          this.warnedNoReap = true
+        }
+        continue
+      }
+      victims.push(entry)
+    }
+    await Promise.allSettled(victims.map((entry) => this.reapEntry(entry, 'idle')))
   }
 
   /** Registry-wide deadlines, with this agent's first-response override applied. */
@@ -412,31 +548,107 @@ export class AcpAgentRegistry implements AcpRegistry {
     return { ...base, firstResponseMs: override ?? base?.firstResponseMs }
   }
 
-  private async ensureClient(name: string): Promise<AcpClient> {
-    const existing = this.clients.get(name)
-    if (existing) {
-      // A client whose child/container was recreated underneath the daemon
-      // reports itself dead. Never return it: drop the stale handle and
-      // reconnect, otherwise every later mention blocks on a dead connection.
-      if (existing.isAlive()) return existing
-      this.clients.delete(name)
-      console.warn(`[acp:${name}] cached client is dead; reconnecting`)
-      void existing.stop().catch((err) => {
-        console.warn(`[acp:${name}] stop() of dead client failed:`, err)
+  private clientKey(agent: string, sessionKey: string): string {
+    return `${agent}\u0000${sessionKey}`
+  }
+
+  private processIdleTimeoutFor(name: string): number {
+    return (
+      this.opts.agents[name]?.process_idle_timeout_ms ??
+      this.opts.processIdleTimeoutMs ??
+      DEFAULT_PROCESS_IDLE_TIMEOUT_MS
+    )
+  }
+
+  /** One shared store per agent, so per-conversation clients don't clobber
+   *  each other's `sessions.json` write. */
+  private storeFor(name: string): SessionStoreLike | undefined {
+    if (!this.opts.agentsDir) return undefined
+    let store = this.stores.get(name)
+    if (!store) {
+      store = new JsonFileSessionStore({
+        agentId: name,
+        dir: join(this.opts.agentsDir, name),
       })
+      this.stores.set(name, store)
     }
-    const inFlight = this.starting.get(name)
-    if (inFlight) return inFlight
-    const starting = this.startClient(name)
-    this.starting.set(name, starting)
-    try {
-      return await starting
-    } finally {
-      this.starting.delete(name)
+    return store
+  }
+
+  private touch(entry: ClientEntry): void {
+    entry.lastUsed = Date.now()
+    const key = this.clientKey(entry.agent, entry.sessionKey)
+    // A process that has stayed up past the quick-death window is healthy:
+    // forget its crash history, so one bad image pull doesn't count forever.
+    if (this.crashes.has(key) && Date.now() - entry.startedAt >= QUICK_DEATH_MS) {
+      this.crashes.delete(key)
     }
   }
 
-  private async startClient(name: string): Promise<AcpClient> {
+  /** A conversation now owns a freshly minted context spawn again. */
+  private markBound(agent: string, sessionKey: string): void {
+    this.released.delete(this.clientKey(agent, sessionKey))
+  }
+
+  /**
+   * Release a conversation's context spawn exactly once per session lifetime.
+   * Three paths can report the same end — the ACP idle close (`closed`
+   * lifecycle), an explicit `endSession`, and the process reaper — and
+   * `SpawnRegistry.releaseSession` would otherwise be called two or three
+   * times for one binding.
+   */
+  private releaseBinding(agent: string, sessionKey: string): void {
+    const key = this.clientKey(agent, sessionKey)
+    if (this.released.has(key)) return
+    this.released.add(key)
+    this.opts.onSessionEnded?.(agent, sessionKey)
+  }
+
+  private async ensureClient(name: string, sessionKey: string): Promise<ClientEntry> {
+    const key = this.clientKey(name, sessionKey)
+    const existing = this.clients.get(key)
+    if (existing) {
+      // A child/container recreated underneath the daemon reports itself dead.
+      // Never reuse it: drop the handle and respawn for this conversation only.
+      if (existing.client.isAlive()) {
+        this.touch(existing)
+        return existing
+      }
+      this.clients.delete(key)
+      this.recordCrash(key, Date.now() - existing.startedAt, name, sessionKey)
+      console.warn(`[acp:${name}] process for ${sessionKey} is dead; respawning`)
+      void existing.client.stop().catch((err) => {
+        console.warn(`[acp:${name}] stop() of dead process failed:`, err)
+      })
+    }
+    const inFlight = this.starting.get(key)
+    if (inFlight) return inFlight
+    // A reap/teardown in progress for this conversation must finish before a
+    // new process starts, or two processes could touch the same ACP session.
+    // Re-enter the whole selection after the wait: a second dispatch queued on
+    // the same teardown would otherwise also fall through and start its own
+    // process (one orphaned on the same persisted pointer).
+    if (this.stopping.has(key)) {
+      await this.stopping.get(key)
+      return this.ensureClient(name, sessionKey)
+    }
+    this.assertNotCrashLooping(name, sessionKey, key)
+    const starting = this.startClient(name, sessionKey, key)
+    this.starting.set(key, starting)
+    try {
+      const entry = await starting
+      this.startReaper()
+      return entry
+    } finally {
+      this.starting.delete(key)
+    }
+  }
+
+  private async startClient(
+    name: string,
+    sessionKey: string,
+    key: string,
+  ): Promise<ClientEntry> {
     const cfg = this.opts.agents[name]
     if (!cfg.acp) throw new Error(`agents.${name}: missing acp block`)
     const spawn = resolveAcpAgentSpec(cfg.acp)
@@ -454,6 +666,12 @@ export class AcpAgentRegistry implements AcpRegistry {
         image: this.opts.image?.[name],
         mounts: this.resolveSpawnMounts(name),
       },
+      // Per-conversation identity: container runtimes name the container after
+      // it, so one conversation's spawn cannot reap another's container.
+      instanceId: key,
+      // One shared store per agent: independent stores on the same
+      // sessions.json would each rewrite the whole file from their own map.
+      sessionStore: this.storeFor(name),
       agentDataDir: this.opts.agentsDir ? join(this.opts.agentsDir, name) : undefined,
       runtime: this.runtimeFor(name),
       onEvent: (e) => this.onEvent(name, e),
@@ -476,7 +694,7 @@ export class AcpAgentRegistry implements AcpRegistry {
         // context server for its whole life — every `zooid_*` call answering
         // `binding not owned by caller`, with no way to repair it.
         if (e.outcome === 'closed' || (e.outcome === 'failed' && e.reason !== undefined)) {
-          this.opts.onSessionEnded?.(name, e.sessionKey)
+          this.releaseBinding(name, e.sessionKey)
         }
       },
       sessionIdleTimeoutMs: cfg.session_idle_timeout_ms,
@@ -488,10 +706,121 @@ export class AcpAgentRegistry implements AcpRegistry {
     } catch (err) {
       // Don't leak a half-started child when the handshake fails/times out.
       void client.stop().catch(() => {})
+      this.recordCrash(key, 0, name, sessionKey)
       throw err
     }
-    this.clients.set(name, client)
-    return client
+    const entry: ClientEntry = {
+      client,
+      agent: name,
+      sessionKey,
+      startedAt: Date.now(),
+      lastUsed: Date.now(),
+    }
+    this.clients.set(key, entry)
+    return entry
+  }
+
+  /**
+   * Take a conversation out of service: remove it from dispatch, close its ACP
+   * session (the caller's `close`), kill its process, release its context
+   * binding. The entry is deleted and `stopping[key]` published synchronously,
+   * before any await, so a dispatch arriving mid-teardown waits for the
+   * teardown rather than running on the process being killed.
+   */
+  private retireEntry(
+    entry: ClientEntry,
+    why: string,
+    close: () => Promise<void>,
+  ): Promise<void> {
+    const key = this.clientKey(entry.agent, entry.sessionKey)
+    if (this.clients.get(key) !== entry) return Promise.resolve()
+    this.clients.delete(key)
+    const stopping = (async () => {
+      try {
+        await close()
+      } catch (err) {
+        console.warn(
+          `[acp:${entry.agent}] close before stop failed for ${entry.sessionKey} (${why}):`,
+          err,
+        )
+      }
+      await entry.client.stop().catch((err) => {
+        console.warn(`[acp:${entry.agent}] stop of ${entry.sessionKey} failed (${why}):`, err)
+      })
+      // The process is gone, so nothing can answer through its context spawn
+      // any more; release the binding. #48's releaseSession is idempotent, so
+      // an already-closed session's release here is harmless.
+      this.releaseBinding(entry.agent, entry.sessionKey)
+      console.log(`[acp:${entry.agent}] stopped process for ${entry.sessionKey} (${why})`)
+    })()
+    this.stopping.set(key, stopping)
+    void stopping.finally(() => {
+      if (this.stopping.get(key) === stopping) this.stopping.delete(key)
+    })
+    return stopping
+  }
+
+  /**
+   * Idle reap: close the ACP session (keeping the persisted pointer so the next
+   * turn resumes it) and then kill the process.
+   */
+  private reapEntry(entry: ClientEntry, why: string): Promise<void> {
+    return this.retireEntry(entry, why, () => entry.client.closeIdleSession(entry.sessionKey))
+  }
+
+  private startReaper(): void {
+    if (this.reaper) return
+    const timeouts = Object.keys(this.opts.agents)
+      .map((name) => this.processIdleTimeoutFor(name))
+      .filter((ms) => ms > 0)
+    if (timeouts.length === 0) return
+    const interval = Math.max(1_000, Math.min(30_000, Math.floor(Math.min(...timeouts) / 2)))
+    this.reaper = setInterval(() => {
+      void this.reapIdle()
+    }, interval)
+    this.reaper.unref?.()
+  }
+
+  /**
+   * Crash-loop breaker, per conversation. A process that fails to start or
+   * dies within {@link QUICK_DEATH_MS} is a crash; {@link CRASH_THRESHOLD} of
+   * them inside {@link CRASH_WINDOW_MS} opens the circuit for a cooldown that
+   * doubles up to {@link CRASH_COOLDOWN_MAX_MS}. Only this conversation is
+   * refused — a crash-looping config or a broken image must not hold the rest
+   * of the agent's threads hostage.
+   */
+  private recordCrash(key: string, lifetimeMs: number, name: string, sessionKey: string): void {
+    if (lifetimeMs >= QUICK_DEATH_MS) {
+      this.crashes.delete(key)
+      return
+    }
+    const now = Date.now()
+    const state = this.crashes.get(key) ?? { failures: [], openUntil: 0, cooldown: 0 }
+    state.failures = state.failures.filter((t) => now - t < CRASH_WINDOW_MS)
+    state.failures.push(now)
+    if (state.failures.length >= CRASH_THRESHOLD) {
+      state.cooldown =
+        state.cooldown === 0 ? CRASH_COOLDOWN_MS : Math.min(CRASH_COOLDOWN_MAX_MS, state.cooldown * 2)
+      state.openUntil = now + state.cooldown
+      state.failures = []
+      console.error(
+        `[acp:${name}] ${sessionKey} crashed ${CRASH_THRESHOLD} times within ` +
+          `${CRASH_WINDOW_MS / 1000}s; refusing to respawn it until ` +
+          `${new Date(state.openUntil).toISOString()} (cooldown ${state.cooldown / 1000}s)`,
+      )
+    }
+    this.crashes.set(key, state)
+  }
+
+  private assertNotCrashLooping(name: string, sessionKey: string, key: string): void {
+    const state = this.crashes.get(key)
+    if (!state || state.openUntil <= Date.now()) return
+    throw new Error(
+      `[acp:${name}] refusing to spawn a process for ${sessionKey}: it crash-looped ` +
+        `(${CRASH_THRESHOLD} failed starts/exits within ${CRASH_WINDOW_MS / 1000}s). ` +
+        `Cooling down until ${new Date(state.openUntil).toISOString()}; ` +
+        `other conversations are unaffected.`,
+    )
   }
 }
 
