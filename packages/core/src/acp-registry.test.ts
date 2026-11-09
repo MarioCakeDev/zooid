@@ -566,6 +566,46 @@ describe('AcpAgentRegistry — per-conversation processes', () => {
     await expect(registry.ensureSession('triage', '$good')).resolves.toBe('acp-session-1')
   })
 
+  it('does not spawn two processes when two dispatches queue behind one reap', async () => {
+    await registry.ensureSession('triage', '$threadA')
+    const a = instance(0)
+    let releaseClose!: () => void
+    a.closeIdleSession.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseClose = resolve
+        }),
+    )
+    const reaping = registry.reapIdle(Date.now() + 300_001)
+    // The reaper publishes `stopping` synchronously, before the close resolves.
+    const first = registry.ensureSession('triage', '$threadA')
+    const second = registry.ensureSession('triage', '$threadA')
+    releaseClose()
+    await Promise.all([reaping, first, second])
+    // Old process + exactly one replacement, not one per queued dispatch.
+    expect(AcpClient).toHaveBeenCalledTimes(2)
+  })
+
+  it('makes a dispatch during endSession wait for the teardown instead of using the doomed process', async () => {
+    await registry.ensureSession('triage', '$threadA')
+    const a = instance(0)
+    let releaseEnd!: () => void
+    a.endSession.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseEnd = resolve
+        }),
+    )
+    const ending = registry.endSession('triage', '$threadA')
+    const next = registry.ensureSession('triage', '$threadA')
+    // The process being ended is out of service before its close resolves.
+    expect(AcpClient).toHaveBeenCalledTimes(1)
+    releaseEnd()
+    await Promise.all([ending, next])
+    expect(AcpClient).toHaveBeenCalledTimes(2)
+    expect(a.stop).toHaveBeenCalled()
+  })
+
   it('shares one session store per agent across its per-conversation clients', async () => {
     registry = new AcpAgentRegistry({
       runtime,

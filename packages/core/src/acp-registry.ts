@@ -365,21 +365,20 @@ export class AcpAgentRegistry implements AcpRegistry {
     if (!this.hasAgent(name)) return
     const key = this.clientKey(name, threadId)
     const entry = this.clients.get(key)
-    try {
-      await entry?.client.endSession(threadId)
-    } finally {
+    this.crashes.delete(key)
+    // Remove the entry from dispatch *before* awaiting the close, and publish
+    // `stopping[key]` in the same synchronous step (inside retireEntry): a
+    // turn arriving mid-/clear must wait for the teardown, never run on the
+    // process we are about to kill.
+    if (!entry) {
       // The session is forgotten either way (close supported or not), so its
       // context binding must stop being callable.
       this.releaseBinding(name, threadId)
+      return
     }
-    // The process exists for this conversation only; with the session gone it
-    // has nothing left to serve. Stop it now instead of parking ~120 MB until
-    // the idle reaper notices.
-    if (entry) {
-      this.clients.delete(key)
-      this.crashes.delete(key)
-      await this.stopEntry(entry, `session ended (${threadId})`)
-    }
+    await this.retireEntry(entry, `session ended (${threadId})`, () =>
+      entry.client.endSession(threadId),
+    )
   }
 
   async cancelSession(name: string, sessionId: string): Promise<void> {
@@ -446,14 +445,14 @@ export class AcpAgentRegistry implements AcpRegistry {
           throw err
         }
         // Retire this conversation's process only. Every other thread keeps its
-        // process and session — a wedge is no longer an agent-wide event.
+        // process and session — a wedge is no longer an agent-wide event. The
+        // client is already dead; `retireEntry` still fences dispatch behind the
+        // teardown and releases the stale context binding.
         console.warn(
           `[acp:${name}] process for ${input.threadId} wedged ` +
             `(session ${wedged ?? '<none>'}); respawning it and replaying`,
         )
-        this.clients.delete(this.clientKey(name, input.threadId))
-        this.releaseBinding(name, input.threadId)
-        await this.stopEntry(entry, 'wedged')
+        await this.retireEntry(entry, 'wedged', async () => {})
         // Fresh client (the wedged one is dead) and a fresh session: the wedged
         // session id was dropped from the store, so `ensureSession` issues
         // session/new rather than resuming the corpse.
@@ -624,16 +623,14 @@ export class AcpAgentRegistry implements AcpRegistry {
     }
     const inFlight = this.starting.get(key)
     if (inFlight) return inFlight
-    // A reap in progress for this conversation must finish before a new
-    // process starts, or two processes could touch the same ACP session.
-    const stopping = this.stopping.get(key)
-    if (stopping) {
-      await stopping
-      const replacement = this.clients.get(key)
-      if (replacement?.client.isAlive()) {
-        this.touch(replacement)
-        return replacement
-      }
+    // A reap/teardown in progress for this conversation must finish before a
+    // new process starts, or two processes could touch the same ACP session.
+    // Re-enter the whole selection after the wait: a second dispatch queued on
+    // the same teardown would otherwise also fall through and start its own
+    // process (one orphaned on the same persisted pointer).
+    if (this.stopping.has(key)) {
+      await this.stopping.get(key)
+      return this.ensureClient(name, sessionKey)
     }
     this.assertNotCrashLooping(name, sessionKey, key)
     const starting = this.startClient(name, sessionKey, key)
@@ -723,35 +720,27 @@ export class AcpAgentRegistry implements AcpRegistry {
     return entry
   }
 
-  private async stopEntry(entry: ClientEntry, why: string): Promise<void> {
-    const key = this.clientKey(entry.agent, entry.sessionKey)
-    const stopping = entry.client.stop().catch((err) => {
-      console.warn(`[acp:${entry.agent}] stop of ${entry.sessionKey} failed (${why}):`, err)
-    })
-    this.stopping.set(key, stopping)
-    try {
-      await stopping
-    } finally {
-      if (this.stopping.get(key) === stopping) this.stopping.delete(key)
-    }
-  }
-
   /**
-   * Close a conversation's ACP session (keeping the persisted pointer so the
-   * next turn resumes it) and then kill its process. The whole sequence is
-   * guarded by `stopping[key]` so a dispatch that arrives meanwhile waits for
-   * the old process to die instead of racing it onto the same session.
+   * Take a conversation out of service: remove it from dispatch, close its ACP
+   * session (the caller's `close`), kill its process, release its context
+   * binding. The entry is deleted and `stopping[key]` published synchronously,
+   * before any await, so a dispatch arriving mid-teardown waits for the
+   * teardown rather than running on the process being killed.
    */
-  private reapEntry(entry: ClientEntry, why: string): Promise<void> {
+  private retireEntry(
+    entry: ClientEntry,
+    why: string,
+    close: () => Promise<void>,
+  ): Promise<void> {
     const key = this.clientKey(entry.agent, entry.sessionKey)
     if (this.clients.get(key) !== entry) return Promise.resolve()
     this.clients.delete(key)
     const stopping = (async () => {
       try {
-        await entry.client.closeIdleSession(entry.sessionKey)
+        await close()
       } catch (err) {
         console.warn(
-          `[acp:${entry.agent}] idle close before reap failed for ${entry.sessionKey}:`,
+          `[acp:${entry.agent}] close before stop failed for ${entry.sessionKey} (${why}):`,
           err,
         )
       }
@@ -762,13 +751,21 @@ export class AcpAgentRegistry implements AcpRegistry {
       // any more; release the binding. #48's releaseSession is idempotent, so
       // an already-closed session's release here is harmless.
       this.releaseBinding(entry.agent, entry.sessionKey)
-      console.log(`[acp:${entry.agent}] reaped process for ${entry.sessionKey} (${why})`)
+      console.log(`[acp:${entry.agent}] stopped process for ${entry.sessionKey} (${why})`)
     })()
     this.stopping.set(key, stopping)
     void stopping.finally(() => {
       if (this.stopping.get(key) === stopping) this.stopping.delete(key)
     })
     return stopping
+  }
+
+  /**
+   * Idle reap: close the ACP session (keeping the persisted pointer so the next
+   * turn resumes it) and then kill the process.
+   */
+  private reapEntry(entry: ClientEntry, why: string): Promise<void> {
+    return this.retireEntry(entry, why, () => entry.client.closeIdleSession(entry.sessionKey))
   }
 
   private startReaper(): void {

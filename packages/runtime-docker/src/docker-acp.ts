@@ -38,6 +38,8 @@ export interface DockerAcpRuntimeOptions {
 export class DockerAcpRuntime implements AcpRuntime {
   private readonly engine: 'docker' | 'podman'
   private readonly namePrefix: string
+  /** Agents whose pre-conversation container has already been reaped. */
+  private readonly legacyReaped = new Set<string>()
   constructor(private readonly opts: DockerAcpRuntimeOptions = {}) {
     this.engine = opts.engine ?? 'docker'
     this.namePrefix = opts.containerNamePrefix ?? 'zooid-agent'
@@ -86,7 +88,16 @@ export class DockerAcpRuntime implements AcpRuntime {
   }
 
   spawn(spec: AcpSpawnSpec): ChildProcess {
-    if (spec.agentId) this.reapStale(this.containerName(spec.agentId, spec.spawnKey))
+    if (spec.agentId) {
+      this.reapStale(this.containerName(spec.agentId, spec.spawnKey))
+      // Upgrade path: the pre-conversation model left one unsuffixed
+      // `zooid-agent-<agent>` container behind. It is not the one we are about
+      // to start, so nothing else will ever reap it. Once per agent.
+      if (spec.spawnKey && !this.legacyReaped.has(spec.agentId)) {
+        this.legacyReaped.add(spec.agentId)
+        this.reapStale(this.containerName(spec.agentId))
+      }
+    }
     return spawn(this.engine, this.buildArgv(spec), {
       stdio: ['pipe', 'pipe', 'pipe'],
     })

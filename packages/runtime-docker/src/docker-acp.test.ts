@@ -193,11 +193,20 @@ describe('DockerAcpRuntime', () => {
       expect(nameB).toMatch(/^zooid-agent-dev-[0-9a-f]{12}$/)
       expect(nameA).not.toBe(nameB)
       // Each spawn reaps exactly the container it is about to replace, so one
-      // conversation can never `docker rm -f` another's live container.
-      expect(spawnSyncMock.mock.calls.map((c) => c[1])).toEqual([
-        ['rm', '-f', nameA],
-        ['rm', '-f', nameB],
-      ])
+      // conversation can never `docker rm -f` another's live container. (The
+      // first spawn also reaps the pre-upgrade unsuffixed container once.)
+      const reaped = spawnSyncMock.mock.calls.map((c) => c[1][2])
+      expect(reaped.filter((n) => n === nameA)).toHaveLength(1)
+      expect(reaped.filter((n) => n === nameB)).toHaveLength(1)
+    })
+
+    it('reaps the legacy unsuffixed container once after the upgrade', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev', spawnKey: 'dev\u0000$threadA' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev', spawnKey: 'dev\u0000$threadB' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev', spawnKey: 'dev\u0000$threadC' })
+      const reaped = spawnSyncMock.mock.calls.map((c) => c[1][2])
+      expect(reaped.filter((n) => n === 'zooid-agent-dev')).toHaveLength(1)
     })
 
     it('is deterministic: the same conversation keeps the same container name', () => {
