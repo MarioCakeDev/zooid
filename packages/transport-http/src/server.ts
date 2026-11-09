@@ -231,6 +231,13 @@ export function createApp({
             streams.delete(sessionId)
           }
         }
+        // This route mints a fresh conversation per POST and offers no way to
+        // resume it, so the turn is the session's whole life. End it (which
+        // releases its context spawn and stops its ACP process) instead of
+        // leaving one idle process per HTTP request for the reaper.
+        await agents.endSession(name, threadId).catch((err) => {
+          console.warn(`[http] endSession(${name}, ${threadId}) failed:`, err)
+        })
       }
     })
   })
