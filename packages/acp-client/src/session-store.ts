@@ -31,12 +31,24 @@ export class JsonFileSessionStore {
   private readonly mem = new Map<string, string>()
   private readonly path: string
   private writeChain: Promise<void> = Promise.resolve()
+  private loading: Promise<void> | null = null
 
   constructor(private readonly opts: SessionStoreOptions) {
     this.path = join(opts.dir, 'sessions.json')
   }
 
+  /**
+   * Load the file once. The daemon shares one store across an agent's
+   * per-conversation clients, so a second caller must await the same read
+   * rather than return early on an empty in-memory map (which would turn a
+   * resumable session into a fresh one).
+   */
   async load(): Promise<void> {
+    if (!this.loading) this.loading = this.read()
+    return this.loading
+  }
+
+  private async read(): Promise<void> {
     let raw: string
     try {
       raw = await readFile(this.path, 'utf8')

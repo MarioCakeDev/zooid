@@ -34,6 +34,22 @@ describe('AcpClient honors a passed-in runtime', () => {
     )
   })
 
+  it('forwards instanceId as the spawn key so every conversation gets its own container', () => {
+    const child = new FakeChild() as unknown as ChildProcess
+    const rt = { spawn: vi.fn().mockReturnValue(child) }
+    const client = new AcpClient({
+      agent: { id: 'dev', command: 'opencode', args: ['acp'], cwd: '/x' },
+      instanceId: 'dev\u0000$threadA',
+      onEvent: () => {},
+      onApprovalRequest: async () => ({ decision: 'cancel' }),
+      runtime: rt,
+    })
+    void client.start().catch(() => {})
+    expect(rt.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'dev', spawnKey: 'dev\u0000$threadA' }),
+    )
+  })
+
   it('resolves a preset before passing to the runtime', () => {
     const child = new FakeChild() as unknown as ChildProcess
     const rt = { spawn: vi.fn().mockReturnValue(child) }
