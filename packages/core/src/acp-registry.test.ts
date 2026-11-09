@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { Readable, Writable } from 'node:stream'
 import type { AcpRuntime, AcpSpawnSpec } from './acp-types.js'
@@ -23,9 +23,15 @@ vi.mock('@zooid/acp-client', async (orig) => {
       start: vi.fn().mockResolvedValue(undefined),
       ensureSession: vi.fn().mockResolvedValue('acp-session-1'),
       endSession: vi.fn().mockResolvedValue(undefined),
+      closeIdleSession: vi.fn().mockResolvedValue(undefined),
       prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+      cancel: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
       isAlive: vi.fn(() => true),
+      ownsSession: vi.fn(() => true),
+      isBusy: vi.fn(() => false),
+      hasLiveSessions: vi.fn(() => false),
+      canResumeSessions: vi.fn(() => true),
     })),
   }
 })
@@ -86,13 +92,19 @@ describe('AcpAgentRegistry', () => {
     expect(AcpClient).toHaveBeenCalledTimes(1)
   })
 
-  it('reuses the same client across prompts (long-lived)', async () => {
+  it('reuses the same client for one conversation, and gives each conversation its own process', async () => {
     const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
       AcpClient: ReturnType<typeof vi.fn>
     }
     await registry.prompt('triage', { threadId: 't1', content: [] })
-    await registry.prompt('triage', { threadId: 't2', content: [] })
+    await registry.prompt('triage', { threadId: 't1', content: [] })
     expect(AcpClient).toHaveBeenCalledTimes(1)
+    await registry.prompt('triage', { threadId: 't2', content: [] })
+    expect(AcpClient).toHaveBeenCalledTimes(2)
+    // The process identity is the conversation, not the agent: container
+    // runtimes derive a unique container name from it.
+    expect(AcpClient.mock.calls[0]![0].instanceId).toMatch(/^triage\u0000t1$/)
+    expect(AcpClient.mock.calls[1]![0].instanceId).toMatch(/^triage\u0000t2$/)
   })
 
   it('keeps clients per-agent isolated', async () => {
@@ -251,21 +263,22 @@ describe('AcpAgentRegistry', () => {
     }
     dead.isAlive.mockReturnValue(false)
 
-    await registry.prompt('triage', { threadId: 't2', content: [] })
+    // Same conversation: the dead process is replaced, not reused.
+    await registry.prompt('triage', { threadId: 't1', content: [] })
     expect(AcpClient).toHaveBeenCalledTimes(2)
     expect(dead.stop).toHaveBeenCalled()
     const fresh = AcpClient.mock.results[1].value as { start: ReturnType<typeof vi.fn> }
     expect(fresh.start).toHaveBeenCalled()
   })
 
-  it('does not start duplicate clients for concurrent first dispatches', async () => {
+  it('does not start duplicate clients for concurrent first dispatches of one conversation', async () => {
     const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
       AcpClient: ReturnType<typeof vi.fn>
     }
     await Promise.all([
       registry.ensureSession('triage', 't1'),
-      registry.ensureSession('triage', 't2'),
-      registry.ensureSession('triage', 't3'),
+      registry.ensureSession('triage', 't1'),
+      registry.ensureSession('triage', 't1'),
     ])
     expect(AcpClient).toHaveBeenCalledTimes(1)
   })
@@ -343,7 +356,11 @@ describe('AcpAgentRegistry — elicitation', () => {
 })
 
 describe('AcpAgentRegistry.cancelSession', () => {
-  it('calls cancel on the underlying AcpClient and ApprovalCorrelator.cancelSession', async () => {
+  it('calls cancel on the AcpClient that owns the session and ApprovalCorrelator.cancelSession', async () => {
+    const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
+      AcpClient: ReturnType<typeof vi.fn>
+    }
+    AcpClient.mockClear()
     const correlator = {
       register: vi.fn(),
       resolve: vi.fn(),
@@ -357,16 +374,37 @@ describe('AcpAgentRegistry.cancelSession', () => {
       agents: { architect: { acp: { command: 'noop' } } as never },
       approvals: correlator,
     })
-    const fakeClient = { cancel: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
-    ;(registry as unknown as { clients: Map<string, typeof fakeClient> }).clients.set(
-      'architect',
-      fakeClient,
-    )
+    await registry.ensureSession('architect', 'thread-1')
+    const fakeClient = AcpClient.mock.results.at(-1)!.value as {
+      cancel: ReturnType<typeof vi.fn>
+    }
     await registry.cancelSession('architect', 'sess-xyz')
     expect(fakeClient.cancel).toHaveBeenCalledWith('sess-xyz')
     expect((correlator as unknown as { cancelSession: ReturnType<typeof vi.fn> }).cancelSession).toHaveBeenCalledWith(
       'sess-xyz',
     )
+  })
+
+  it('routes an interrupt to the one process that owns the session, not its siblings', async () => {
+    const { AcpClient } = (await import('@zooid/acp-client')) as unknown as {
+      AcpClient: ReturnType<typeof vi.fn>
+    }
+    AcpClient.mockClear()
+    const registry = new AcpAgentRegistry({
+      runtime: { spawn: vi.fn() } as never,
+      agents: { architect: { acp: { command: 'noop' } } as never },
+    })
+    await registry.ensureSession('architect', 'thread-a')
+    await registry.ensureSession('architect', 'thread-b')
+    const [a, b] = AcpClient.mock.results.map((r) => r.value as {
+      ownsSession: ReturnType<typeof vi.fn>
+      cancel: ReturnType<typeof vi.fn>
+    })
+    a!.ownsSession.mockReturnValue(false)
+    b!.ownsSession.mockImplementation((id: string) => id === 'sess-b')
+    await registry.cancelSession('architect', 'sess-b')
+    expect(a!.cancel).not.toHaveBeenCalled()
+    expect(b!.cancel).toHaveBeenCalledWith('sess-b')
   })
 
   it('is a no-op for an unknown agent', async () => {
@@ -407,6 +445,141 @@ describe('AcpAgentRegistry.cancelSession', () => {
     expect(
       (correlator as unknown as { cancelSession: ReturnType<typeof vi.fn> }).cancelSession,
     ).toHaveBeenCalledWith('sess-xyz')
+  })
+})
+
+describe('AcpAgentRegistry — per-conversation processes', () => {
+  const AGENTS = {
+    triage: {
+      name: 'triage',
+      workdir: '.',
+      hooks: {},
+      acp: { command: 'opencode', args: ['acp'] },
+      approval_timeout_ms: 0,
+      session_idle_timeout_ms: 600_000,
+    },
+  }
+
+  let runtime: StubRuntime
+  let registry: InstanceType<typeof AcpAgentRegistry>
+  let ended: ReturnType<typeof vi.fn>
+  let AcpClient: ReturnType<typeof vi.fn>
+
+  beforeEach(async () => {
+    const mod = (await import('@zooid/acp-client')) as unknown as { AcpClient: ReturnType<typeof vi.fn> }
+    AcpClient = mod.AcpClient
+    AcpClient.mockClear()
+    runtime = new StubRuntime()
+    ended = vi.fn()
+    registry = new AcpAgentRegistry({
+      runtime,
+      agents: AGENTS as never,
+      onSessionEnded: ended,
+    })
+  })
+
+  afterEach(async () => {
+    await registry.stopAll()
+  })
+
+  function instance(i: number) {
+    return AcpClient.mock.results[i]!.value as {
+      ensureSession: ReturnType<typeof vi.fn>
+      endSession: ReturnType<typeof vi.fn>
+      closeIdleSession: ReturnType<typeof vi.fn>
+      stop: ReturnType<typeof vi.fn>
+      isAlive: ReturnType<typeof vi.fn>
+      isBusy: ReturnType<typeof vi.fn>
+      hasLiveSessions: ReturnType<typeof vi.fn>
+      canResumeSessions: ReturnType<typeof vi.fn>
+      ownsSession: ReturnType<typeof vi.fn>
+    }
+  }
+
+  it('two threads → two processes, each keyed to its own conversation', async () => {
+    await registry.ensureSession('triage', '$threadA', '!room:hs', '$threadA')
+    await registry.ensureSession('triage', '$threadB', '!room:hs', '$threadB')
+
+    expect(AcpClient).toHaveBeenCalledTimes(2)
+    const ids = AcpClient.mock.calls.map((c) => (c[0] as { instanceId: string }).instanceId)
+    expect(ids).toEqual(['triage\u0000$threadA', 'triage\u0000$threadB'])
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('endSession stops that conversation’s process and leaves its siblings running', async () => {
+    await registry.ensureSession('triage', '$threadA')
+    await registry.ensureSession('triage', '$threadB')
+    const [a, b] = [instance(0), instance(1)]
+
+    await registry.endSession('triage', '$threadA')
+
+    expect(a.ensureSession.mock.calls[0]).toEqual(['$threadA', undefined, undefined])
+    expect(a.endSession).toHaveBeenCalledWith('$threadA')
+    expect(a.stop).toHaveBeenCalled()
+    expect(b.stop).not.toHaveBeenCalled()
+    expect(ended.mock.calls).toEqual([['triage', '$threadA']])
+  })
+
+  it('idle reaper closes, stops and releases only conversations past their deadline', async () => {
+    await registry.ensureSession('triage', '$threadA')
+    await registry.ensureSession('triage', '$threadB')
+    const [a, b] = [instance(0), instance(1)]
+    a.hasLiveSessions.mockReturnValue(true)
+    a.canResumeSessions.mockReturnValue(true)
+    b.isBusy.mockReturnValue(true) // mid-turn: never reaped
+
+    await registry.reapIdle(Date.now() + 300_001)
+
+    expect(a.closeIdleSession).toHaveBeenCalledWith('$threadA')
+    expect(a.stop).toHaveBeenCalled()
+    expect(b.stop).not.toHaveBeenCalled()
+    expect(ended.mock.calls).toEqual([['triage', '$threadA']])
+  })
+
+  it('does not reap a live session when the adapter cannot resume or load it', async () => {
+    await registry.ensureSession('triage', '$threadA')
+    const a = instance(0)
+    a.hasLiveSessions.mockReturnValue(true)
+    a.canResumeSessions.mockReturnValue(false)
+
+    await registry.reapIdle(Date.now() + 300_001)
+
+    expect(a.closeIdleSession).not.toHaveBeenCalled()
+    expect(a.stop).not.toHaveBeenCalled()
+  })
+
+  it('opens a per-conversation circuit after repeated quick crashes and leaves other threads alone', async () => {
+    const crash = () =>
+      AcpClient.mockImplementationOnce(() => ({
+        start: vi.fn().mockRejectedValue(new Error('boom')),
+        stop: vi.fn().mockResolvedValue(undefined),
+        isAlive: vi.fn(() => false),
+      }))
+
+    for (let i = 0; i < 3; i++) {
+      crash()
+      await expect(registry.ensureSession('triage', '$bad')).rejects.toThrow(/boom/)
+    }
+    // The circuit is open: no fourth spawn is attempted.
+    await expect(registry.ensureSession('triage', '$bad')).rejects.toThrow(/refusing to spawn/)
+    // A different conversation is unaffected.
+    await expect(registry.ensureSession('triage', '$good')).resolves.toBe('acp-session-1')
+  })
+
+  it('shares one session store per agent across its per-conversation clients', async () => {
+    registry = new AcpAgentRegistry({
+      runtime,
+      agents: AGENTS as never,
+      agentsDir: '/tmp/zooid-sessions-shared',
+    })
+    AcpClient.mockClear()
+    await registry.ensureSession('triage', '$threadA')
+    await registry.ensureSession('triage', '$threadB')
+    const stores = AcpClient.mock.calls.map(
+      (c) => (c[0] as { sessionStore?: unknown }).sessionStore,
+    )
+    expect(stores[0]).toBeDefined()
+    expect(stores[0]).toBe(stores[1])
   })
 })
 

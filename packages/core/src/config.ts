@@ -204,6 +204,23 @@ function parseSessionIdleTimeout(name: string, raw: unknown): number {
   return milliseconds
 }
 
+/**
+ * Idle deadline for a per-conversation ACP process. Deliberately separate from
+ * `session_idle_timeout`: the session (context) and the process (memory) have
+ * different costs. Undefined = the registry's 5m default.
+ */
+function parseProcessIdleTimeout(name: string, raw: unknown): number | undefined {
+  if (raw === undefined) return undefined
+  if (raw === 0 || raw === '0') return 0
+  const match = typeof raw === 'string' ? /^(\d+)(s|m|h)$/.exec(raw) : null
+  const multiplier = match?.[2] === 's' ? 1000 : match?.[2] === 'm' ? 60_000 : 3_600_000
+  const milliseconds = match ? Number(match[1]) * multiplier : NaN
+  if (!Number.isSafeInteger(milliseconds)) {
+    throw new Error(`agents.${name}.process_idle_timeout: expected a duration like "30s", "15m", "2h", or 0`)
+  }
+  return milliseconds
+}
+
 /** A `container.env` / `vm.env` mapping: strings only, `${VAR}`-interpolated, no `ZOOID_*`. */
 function parseEnvMapping(
   raw: unknown,
@@ -899,6 +916,7 @@ function parseAgents(
     const approval_timeout_ms = parseApprovalTimeout(name, entry.approval_timeout)
     const first_response_timeout_ms = parseFirstResponseTimeout(name, entry.first_response_timeout)
     const session_idle_timeout_ms = parseSessionIdleTimeout(name, entry.session_idle_timeout)
+    const process_idle_timeout_ms = parseProcessIdleTimeout(name, entry.process_idle_timeout)
 
     // Reject legacy fields up front with pointers to [ZOD043].
     if (entry.docker !== undefined) {
@@ -1006,6 +1024,9 @@ function parseAgents(
     // an override, not a second source of truth for the same number.
     if (first_response_timeout_ms !== undefined) {
       agentCfg.first_response_timeout_ms = first_response_timeout_ms
+    }
+    if (process_idle_timeout_ms !== undefined) {
+      agentCfg.process_idle_timeout_ms = process_idle_timeout_ms
     }
     if (agentRuntime) agentCfg.runtime = agentRuntime
     if (vmBlock) agentCfg.vm = vmBlock

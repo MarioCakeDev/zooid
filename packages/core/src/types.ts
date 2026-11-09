@@ -245,6 +245,14 @@ export interface AgentConfig {
   /** Milliseconds before an idle ACP session is closed; 0 disables idle close. */
   session_idle_timeout_ms: number
   /**
+   * Milliseconds an idle per-conversation ACP process is kept alive before it
+   * is closed and reaped. Duration string like `"5m"` in `zooid.yaml`;
+   * `0` disables process reaping. Undefined = registry default (5m). Only
+   * applies to adapters that can resume/load a session — otherwise a reaped
+   * process would drop the conversation.
+   */
+  process_idle_timeout_ms?: number
+  /**
    * Explicit per-agent runtime. Unset means "inherit the workforce value";
    * read it through `resolveAgentRuntime`, never directly. [ZOD109]
    */
