@@ -181,5 +181,38 @@ describe('DockerAcpRuntime', () => {
       const nameIdx = argv.indexOf('--name')
       expect(argv[nameIdx + 1]).toBe('zooid-dev')
     })
+
+    it('gives each conversation its own container name and reaps only that one', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev', spawnKey: 'dev\u0000$threadA' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev', spawnKey: 'dev\u0000$threadB' })
+
+      const nameA = argvOf(0)[argvOf(0).indexOf('--name') + 1]
+      const nameB = argvOf(1)[argvOf(1).indexOf('--name') + 1]
+      expect(nameA).toMatch(/^zooid-agent-dev-[0-9a-f]{12}$/)
+      expect(nameB).toMatch(/^zooid-agent-dev-[0-9a-f]{12}$/)
+      expect(nameA).not.toBe(nameB)
+      // Each spawn reaps exactly the container it is about to replace, so one
+      // conversation can never `docker rm -f` another's live container.
+      expect(spawnSyncMock.mock.calls.map((c) => c[1])).toEqual([
+        ['rm', '-f', nameA],
+        ['rm', '-f', nameB],
+      ])
+    })
+
+    it('is deterministic: the same conversation keeps the same container name', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      expect(rt.containerName('dev', 'dev\u0000$threadA')).toBe(
+        rt.containerName('dev', 'dev\u0000$threadA'),
+      )
+    })
+
+    it('labels each conversation so an agent-wide lookup still works', () => {
+      const rt = new DockerAcpRuntime({ defaultImage: 'img' })
+      rt.spawn({ command: 'cmd', args: [], agentId: 'dev', spawnKey: 'dev\u0000$threadA' })
+      const argv = argvOf()
+      expect(argv).toContain('zooid.agent=dev')
+      expect(argv.some((a) => a.startsWith('zooid.session='))).toBe(true)
+    })
   })
 })
